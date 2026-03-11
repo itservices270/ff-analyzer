@@ -224,6 +224,16 @@ function RevenueTab({ a, excludedDepositIds, setExcludedDepositIds }) {
         </div>
       </div>
 
+      {/* Revenue breakdown by type */}
+      <div style={S.divider} />
+      <div style={S.sectionTitle}>Revenue Breakdown</div>
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(200px, 1fr))', gap: 12, marginBottom: 16 }}>
+        <div style={S.stat}><div style={S.statLabel}>Card Processing</div><div style={{ fontSize: 18, color: '#00e5ff' }}>{fmt(r.card_processing)}</div><div style={S.statSub}>Square / Cantaloupe / etc</div></div>
+        <div style={S.stat}><div style={S.statLabel}>Cash Deposits</div><div style={{ fontSize: 18, color: '#81c784' }}>{fmt(r.cash_deposits)}</div><div style={S.statSub}>Route collections</div></div>
+        <div style={S.stat}><div style={S.statLabel}>ACH Credits</div><div style={{ fontSize: 18, color: '#ce93d8' }}>{fmt(r.ach_credits)}</div><div style={S.statSub}>Customer ACH</div></div>
+        <div style={S.stat}><div style={S.statLabel}>Vendor Credits</div><div style={{ fontSize: 18, color: '#ffd54f' }}>{fmt(r.vendor_credits)}</div><div style={S.statSub}>Rebates / credits</div></div>
+      </div>
+
       <div style={S.divider} />
       <div style={S.sectionTitle}>Revenue Sources</div>
       <div style={S.tableHeader}><span>Source</span><span>Total</span><span>Type</span><span>Status</span></div>
@@ -801,6 +811,184 @@ function NegotiationTab({ a, positions, excludedIds, otherExcludedIds, excludedD
   );
 }
 
+// ─── Agreements Tab (NEW) ────────────────────────────────────────────────────
+function AgreementsTab({ agreementResults }) {
+  if (!agreementResults || agreementResults.length === 0) {
+    return (
+      <div style={{ textAlign: 'center', padding: 40, color: 'rgba(232,232,240,0.4)' }}>
+        <div style={{ fontSize: 40, marginBottom: 12 }}>📋</div>
+        <div style={{ fontSize: 15, marginBottom: 8 }}>No agreements analyzed yet</div>
+        <div style={{ fontSize: 13 }}>Upload MCA agreements using the controls above, then analyze them.</div>
+      </div>
+    );
+  }
+
+  return (
+    <div>
+      <div style={S.sectionTitle}>Analyzed Agreements ({agreementResults.length})</div>
+      {agreementResults.map((ag, i) => {
+        const d = ag.analysis || ag;
+        return (
+          <div key={i} style={{ ...S.card, background: 'rgba(255,255,255,0.04)' }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 12 }}>
+              <div>
+                <div style={{ fontSize: 16, color: '#e8e8f0', marginBottom: 4 }}>{d.funder_name || d.buyer_name || 'Unknown Funder'}</div>
+                <div style={{ fontSize: 12, color: 'rgba(232,232,240,0.4)' }}>Dated: {d.agreement_date || d.effective_date || '—'} · {ag.fileName || ''}</div>
+              </div>
+              <span style={S.tag('gold')}>{d.governing_law || '—'} law</span>
+            </div>
+
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(160px, 1fr))', gap: 10, marginBottom: 12 }}>
+              <div><div style={S.statLabel}>Purchase Price</div><div style={{ fontSize: 15, color: '#00e5ff' }}>{fmt(d.purchase_price || d.purchase_amount)}</div></div>
+              <div><div style={S.statLabel}>Payback Amount</div><div style={{ fontSize: 15, color: '#ef9a9a' }}>{fmt(d.purchased_amount || d.payback_amount)}</div></div>
+              <div><div style={S.statLabel}>Factor Rate</div><div style={{ fontSize: 15, color: '#e8e8f0' }}>{d.factor_rate || '—'}</div></div>
+              <div><div style={S.statLabel}>Weekly Payment</div><div style={{ fontSize: 15, color: '#ffd54f' }}>{fmtD(d.weekly_payment || d.periodic_amount)}</div></div>
+              <div><div style={S.statLabel}>Specified %</div><div style={{ fontSize: 15, color: '#e8e8f0' }}>{d.specified_percentage ? d.specified_percentage + '%' : '—'}</div></div>
+              <div><div style={S.statLabel}>Origination Fee</div><div style={{ fontSize: 15, color: '#e8e8f0' }}>{fmt(d.origination_fee)}</div></div>
+              <div><div style={S.statLabel}>Net to Merchant</div><div style={{ fontSize: 15, color: '#81c784' }}>{fmt(d.net_to_merchant || d.net_funded)}</div></div>
+              <div><div style={S.statLabel}>Prior Balance</div><div style={{ fontSize: 15, color: (d.prior_balance || 0) > 0 ? '#ff9800' : '#e8e8f0' }}>{fmt(d.prior_balance)}</div></div>
+            </div>
+
+            <div style={S.divider} />
+            <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginBottom: 8 }}>
+              {d.has_reconciliation && <span style={S.tag('green')}>✓ Reconciliation</span>}
+              {d.has_anti_stacking && <span style={S.tag('amber')}>Anti-Stacking</span>}
+              {d.has_coj && <span style={S.tag('red')}>COJ</span>}
+              {d.has_arbitration && <span style={{ ...S.tag('grey'), background: 'rgba(156,39,176,0.15)', color: '#ce93d8', border: '1px solid rgba(156,39,176,0.25)' }}>Arbitration</span>}
+              {d.has_jury_waiver && <span style={S.tag('grey')}>Jury Waiver</span>}
+              {d.has_personal_guarantee && <span style={S.tag('red')}>PG</span>}
+              {d.has_ucc && <span style={S.tag('grey')}>UCC Filed</span>}
+            </div>
+
+            {d.reconciliation_details && (
+              <div style={{ display: 'flex', gap: 8, alignItems: 'flex-start', padding: '10px 14px', borderRadius: 8, background: 'rgba(0,229,255,0.06)', border: '1px solid rgba(0,229,255,0.15)', marginBottom: 8, fontSize: 12, color: '#80deea', lineHeight: 1.6 }}>
+                <span>📋</span><div><strong>Reconciliation:</strong> {d.reconciliation_details}</div>
+              </div>
+            )}
+            {d.anti_stacking_details && (
+              <div style={{ display: 'flex', gap: 8, alignItems: 'flex-start', padding: '10px 14px', borderRadius: 8, background: 'rgba(249,168,37,0.06)', border: '1px solid rgba(249,168,37,0.15)', marginBottom: 8, fontSize: 12, color: '#ffd54f', lineHeight: 1.6 }}>
+                <span>⚠️</span><div><strong>Anti-Stacking:</strong> {d.anti_stacking_details}</div>
+              </div>
+            )}
+            {d.leverage_notes && (
+              <div style={{ display: 'flex', gap: 8, alignItems: 'flex-start', padding: '10px 14px', borderRadius: 8, background: 'rgba(0,229,255,0.06)', border: '1px solid rgba(0,229,255,0.15)', fontSize: 12, color: '#80deea', lineHeight: 1.6 }}>
+                <span>💡</span><div><strong>Leverage:</strong> {d.leverage_notes}</div>
+              </div>
+            )}
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+// ─── Cross-Reference Tab (NEW) ───────────────────────────────────────────────
+function CrossReferenceTab({ crossRefResult }) {
+  if (!crossRefResult) {
+    return (
+      <div style={{ textAlign: 'center', padding: 40, color: 'rgba(232,232,240,0.4)' }}>
+        <div style={{ fontSize: 40, marginBottom: 12 }}>🔄</div>
+        <div style={{ fontSize: 15, marginBottom: 8 }}>Cross-reference not yet run</div>
+        <div style={{ fontSize: 13 }}>Analyze bank statements and agreements first, then click "Run Cross-Reference" in the header.</div>
+      </div>
+    );
+  }
+  const cr = crossRefResult.analysis || crossRefResult;
+  const comparisons = cr.position_comparisons || cr.comparisons || [];
+  const violations = cr.violations || cr.discrepancies || [];
+  const narrative = cr.stacking_narrative || cr.narrative || '';
+
+  return (
+    <div>
+      {narrative && (
+        <div style={{ fontSize: 13, color: 'rgba(232,232,240,0.7)', lineHeight: 1.8, padding: '14px 18px', background: 'rgba(255,255,255,0.03)', borderRadius: 8, marginBottom: 16, whiteSpace: 'pre-line' }}>{narrative}</div>
+      )}
+      {comparisons.length > 0 && (
+        <>
+          <div style={S.sectionTitle}>Contract vs Reality</div>
+          {comparisons.map((c, i) => (
+            <div key={i} style={{ ...S.card, background: 'rgba(255,255,255,0.04)', padding: 16 }}>
+              <div style={{ fontSize: 15, color: '#e8e8f0', marginBottom: 10 }}>{c.funder_name || c.funder}</div>
+              <div style={S.grid3}>
+                <div><div style={S.statLabel}>Contract Payment</div><div style={{ fontSize: 15, color: '#ffd54f' }}>{fmtD(c.contracted_payment || c.contract_amount)}</div></div>
+                <div><div style={S.statLabel}>Actual Payment</div><div style={{ fontSize: 15, color: '#00e5ff' }}>{fmtD(c.actual_payment || c.bank_amount)}</div></div>
+                <div><div style={S.statLabel}>Difference</div><div style={{ fontSize: 15, color: Math.abs(c.difference || 0) > 1 ? '#ef5350' : '#4caf50' }}>{fmtD(c.difference || 0)}</div></div>
+              </div>
+              {c.notes && <div style={{ fontSize: 12, color: 'rgba(232,232,240,0.4)', marginTop: 8 }}>{c.notes}</div>}
+            </div>
+          ))}
+        </>
+      )}
+      {violations.length > 0 && (
+        <>
+          <div style={S.sectionTitle}>Violations & Discrepancies</div>
+          {violations.map((v, i) => (
+            <div key={i} style={{ display: 'flex', gap: 10, alignItems: 'flex-start', padding: '12px 16px', borderRadius: 8, fontSize: 13, lineHeight: 1.6, marginBottom: 8, ...(v.severity === 'critical' ? { background: 'rgba(239,83,80,0.1)', border: '1px solid rgba(239,83,80,0.25)', color: '#ef9a9a' } : { background: 'rgba(249,168,37,0.1)', border: '1px solid rgba(249,168,37,0.25)', color: '#ffd54f' }) }}>
+              <span>{v.severity === 'critical' ? '🔴' : '🟡'}</span>
+              <div><strong>{v.funder || v.category}:</strong> {v.description || v.message}</div>
+            </div>
+          ))}
+        </>
+      )}
+    </div>
+  );
+}
+
+// ─── Confidence Tab (NEW) ────────────────────────────────────────────────────
+function ConfidenceTab({ a }) {
+  const positions = a.mca_positions || [];
+  const flags = a.flags_and_alerts || [];
+  const highConf = positions.filter(p => p.confidence === 'high').length;
+  const medConf = positions.filter(p => p.confidence === 'medium').length;
+  const lowConf = positions.filter(p => p.confidence === 'low').length;
+  const total = positions.length || 1;
+
+  return (
+    <div>
+      <div style={S.row}>
+        <div style={S.stat}>
+          <div style={S.statLabel}>High Confidence</div>
+          <div style={S.statValue('#4caf50')}>{highConf}/{total}</div>
+          <div style={{ height: 4, background: 'rgba(255,255,255,0.06)', borderRadius: 2, marginTop: 8 }}><div style={S.progressBar((highConf/total)*100, '#4caf50')} /></div>
+        </div>
+        <div style={S.stat}>
+          <div style={S.statLabel}>Medium Confidence</div>
+          <div style={S.statValue('#ff9800')}>{medConf}/{total}</div>
+          <div style={{ height: 4, background: 'rgba(255,255,255,0.06)', borderRadius: 2, marginTop: 8 }}><div style={S.progressBar((medConf/total)*100, '#ff9800')} /></div>
+        </div>
+        <div style={S.stat}>
+          <div style={S.statLabel}>Low Confidence</div>
+          <div style={S.statValue('#ef5350')}>{lowConf}/{total}</div>
+          <div style={{ height: 4, background: 'rgba(255,255,255,0.06)', borderRadius: 2, marginTop: 8 }}><div style={S.progressBar((lowConf/total)*100, '#ef5350')} /></div>
+        </div>
+      </div>
+      <div style={S.divider} />
+      <div style={S.sectionTitle}>Position Confidence Detail</div>
+      {positions.map((p, i) => (
+        <div key={i} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '10px 12px', background: i%2===0 ? 'rgba(255,255,255,0.03)' : 'transparent', borderRadius: 6 }}>
+          <div>
+            <div style={{ fontSize: 13, color: '#e8e8f0' }}>{p.funder_name}</div>
+            <div style={{ fontSize: 11, color: 'rgba(232,232,240,0.4)' }}>{p.payments_detected || 0} payments detected · {p.status || 'active'}</div>
+          </div>
+          <span style={S.tag(p.confidence === 'high' ? 'green' : p.confidence === 'low' ? 'red' : 'amber')}>{p.confidence || 'unknown'}</span>
+        </div>
+      ))}
+      {flags.length > 0 && (
+        <>
+          <div style={S.divider} />
+          <div style={S.sectionTitle}>Analysis Alerts ({flags.length})</div>
+          {flags.map((f, i) => (
+            <div key={i} style={{ display: 'flex', gap: 10, alignItems: 'flex-start', padding: '10px 14px', borderRadius: 8, fontSize: 12, lineHeight: 1.6, marginBottom: 6, ...(f.severity === 'critical' ? { background: 'rgba(239,83,80,0.1)', border: '1px solid rgba(239,83,80,0.25)', color: '#ef9a9a' } : f.severity === 'warning' ? { background: 'rgba(249,168,37,0.1)', border: '1px solid rgba(249,168,37,0.25)', color: '#ffd54f' } : { background: 'rgba(0,229,255,0.06)', border: '1px solid rgba(0,229,255,0.15)', color: '#80deea' }) }}>
+              <span>{f.severity === 'critical' ? '🔴' : f.severity === 'warning' ? '🟡' : 'ℹ️'}</span>
+              <div><strong>{f.category}:</strong> {f.message}</div>
+            </div>
+          ))}
+        </>
+      )}
+    </div>
+  );
+}
+
 // ─── Export Tab ───────────────────────────────────────────────────────────────
 function ExportTab({ a, fileName, positions, excludedIds, otherExcludedIds, excludedDepositIds }) {
   const activePositions = (positions || a.mca_positions || []).filter(p => !(excludedIds || []).includes(p._id));
@@ -986,7 +1174,15 @@ export default function FFAnalyzer() {
   const [excludedDepositIds, setExcludedDepositIds] = useState([]);
   const inputRef = useRef(null);
 
-  const TABS = ['📊 Revenue', '📈 Trend', '🏦 MCA Positions', '⚠️ Risk', '🤝 Negotiation Intel', '⬇️ Export'];
+  const TABS = ['📊 Revenue', '📈 Trend', '🏦 MCA Positions', '⚠️ Risk', '🤝 Negotiation', '📋 Agreements', '🔄 Cross-Ref', '🎯 Confidence', '⬇️ Export'];
+
+  // ─── Agreement state ─────────────────────────────────────────
+  const [uploadedAgreements, setUploadedAgreements] = useState([]);
+  const [agreementResults, setAgreementResults] = useState([]);
+  const [agreementLoading, setAgreementLoading] = useState(false);
+  const [crossRefResult, setCrossRefResult] = useState(null);
+  const [crossRefLoading, setCrossRefLoading] = useState(false);
+  const agreementInputRef = useRef(null);
 
   // ─── PDF helpers ────────────────────────────────────────────────────────────
   const loadPDFJS = async () => {
@@ -1103,6 +1299,60 @@ export default function FFAnalyzer() {
   };
 
   // ─── File drop handler ──────────────────────────────────────────────────────
+
+  // ─── Agreement upload handler ──────────────────────────────────────────────
+  const onAgreementDrop = useCallback(async (e) => {
+    e.preventDefault();
+    const files = Array.from(e.dataTransfer?.files || e.target?.files || []);
+    if (!files.length) return;
+    const newEntries = files.map(f => ({ id: Date.now() + Math.random(), file: f, name: f.name, status: 'pending' }));
+    setUploadedAgreements(prev => [...prev, ...newEntries]);
+  }, []);
+
+  const analyzeAgreements = async () => {
+    const pending = uploadedAgreements.filter(a => a.status === 'pending' || a.status === 'ready');
+    if (!pending.length) return;
+    setAgreementLoading(true);
+    for (const ag of pending) {
+      try {
+        setUploadedAgreements(prev => prev.map(a => a.id === ag.id ? { ...a, status: 'analyzing' } : a));
+        let text = '';
+        try { text = await extractPDFText(ag.file); } catch(e) { text = ''; }
+        let res;
+        if (text && text.trim().length > 200) {
+          res = await fetch('/api/analyze-agreement', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ text, fileName: ag.name, model }) });
+        } else {
+          const formData = new FormData();
+          formData.append('pdf', ag.file);
+          formData.append('model', model);
+          res = await fetch('/api/analyze-agreement', { method: 'POST', body: formData });
+        }
+        const data = await res.json();
+        if (data.analysis) {
+          setAgreementResults(prev => [...prev, { fileName: ag.name, analysis: data.analysis }]);
+          setUploadedAgreements(prev => prev.map(a => a.id === ag.id ? { ...a, status: 'done' } : a));
+        } else {
+          setUploadedAgreements(prev => prev.map(a => a.id === ag.id ? { ...a, status: 'error', error: data.error || 'Failed' } : a));
+        }
+      } catch (err) {
+        setUploadedAgreements(prev => prev.map(a => a.id === ag.id ? { ...a, status: 'error', error: err.message } : a));
+      }
+    }
+    setAgreementLoading(false);
+  };
+
+  const runCrossReference = async () => {
+    if (!result?.analysis || agreementResults.length === 0) return;
+    setCrossRefLoading(true);
+    try {
+      const res = await fetch('/api/cross-reference', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ bankAnalysis: result.analysis, agreements: agreementResults.map(a => a.analysis), model }) });
+      const data = await res.json();
+      if (data.analysis) setCrossRefResult(data);
+    } catch (err) { console.error('Cross-ref error:', err); }
+    setCrossRefLoading(false);
+  };
+
+  // ─── File drop handler ──────────────────────────────────────────────────────
   const onDrop = useCallback(async (e) => {
     e.preventDefault();
     setDragging(false);
@@ -1132,7 +1382,7 @@ export default function FFAnalyzer() {
         const stripped = stripCheckImages(text);
         if (!stripped || stripped.trim().length < 100) {
           setUploadedFiles(prev => prev.map(f => f.id === entry.id
-            ? { ...f, status: 'error', error: 'Could not extract text — may be a scanned PDF' } : f));
+            ? { ...f, status: 'needs_scan', error: 'Scanned PDF — choose a scan method below' } : f));
           continue;
         }
         // Quick detect via Haiku
@@ -1218,6 +1468,7 @@ export default function FFAnalyzer() {
   const reset = () => {
     setUploadedFiles([]); setResult(null); setError(null);
     setPositions([]); setExcludedIds([]); setOtherExcludedIds([]); setExcludedDepositIds([]);
+    setUploadedAgreements([]); setAgreementResults([]); setCrossRefResult(null);
     if (inputRef.current) inputRef.current.value = '';
   };
 
@@ -1238,10 +1489,10 @@ export default function FFAnalyzer() {
           </svg>
           <div>
             <div style={S.logoText}>Funders <span style={S.logoAccent}>First</span></div>
-            <div style={{ fontSize: 11, color: 'rgba(232,232,240,0.35)', letterSpacing: 1.5 }}>FF ANALYZER</div>
+            <div style={{ fontSize: 11, color: 'rgba(232,232,240,0.35)', letterSpacing: 1.5 }}>FF ANALYZER v2</div>
           </div>
         </div>
-        <span style={S.badge}>BANK STATEMENT ANALYSIS</span>
+        <span style={S.badge}>BANK STATEMENT & MCA AGREEMENT ANALYSIS</span>
       </div>
 
       {!result && !loading && (
@@ -1269,7 +1520,7 @@ export default function FFAnalyzer() {
             <div style={{ marginBottom: 20 }}>
               <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(300px, 1fr))', gap: 12, marginBottom: 16 }}>
                 {uploadedFiles.map(f => (
-                  <div key={f.id} style={{ background: 'rgba(255,255,255,0.05)', border: `1px solid ${f.status === 'error' ? 'rgba(239,83,80,0.3)' : f.status === 'ready' ? 'rgba(76,175,80,0.3)' : 'rgba(255,255,255,0.1)'}`, borderRadius: 10, padding: 14 }}>
+                  <div key={f.id} style={{ background: 'rgba(255,255,255,0.05)', border: `1px solid ${f.status === 'error' ? 'rgba(239,83,80,0.3)' : f.status === 'needs_scan' ? 'rgba(249,168,37,0.3)' : f.status === 'ready' ? 'rgba(76,175,80,0.3)' : 'rgba(255,255,255,0.1)'}`, borderRadius: 10, padding: 14 }}>
                     <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 10 }}>
                       <div style={{ fontSize: 12, color: 'rgba(232,232,240,0.5)', maxWidth: 200, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
                         📄 {f.file.name}
@@ -1282,50 +1533,30 @@ export default function FFAnalyzer() {
                     {f.status === 'error' && (
                       <div>
                         <div style={{ fontSize: 12, color: '#ef9a9a', marginBottom: 8 }}>⚠ {f.error}</div>
-                        {f.error?.includes('scanned') && (
-                          <div>
-                            <div style={{ fontSize: 11, color: 'rgba(232,232,240,0.4)', marginBottom: 8, lineHeight: 1.5 }}>
-                              This is a scanned PDF. Choose a scan method:<br/>
-                              <span style={{ color: '#ffd54f' }}>Scan with Claude sends the PDF directly (faster, recommended)</span>
-                            </div>
-                            <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
-                              <button
-                                onClick={() => scanWithClaude(f.id, f.file, 'sonnet')}
-                                style={{ padding: '6px 14px', borderRadius: 6, border: '1px solid rgba(0,229,255,0.3)', background: 'rgba(0,229,255,0.08)', color: '#00e5ff', cursor: 'pointer', fontSize: 12, fontFamily: 'inherit' }}>
-                                🔍 Scan with Claude (Sonnet)
-                              </button>
-                              <button
-                                onClick={() => scanWithClaude(f.id, f.file, 'opus')}
-                                style={{ padding: '6px 14px', borderRadius: 6, border: '1px solid rgba(76,175,80,0.3)', background: 'rgba(76,175,80,0.08)', color: '#4caf50', cursor: 'pointer', fontSize: 12, fontFamily: 'inherit' }}>
-                                🔍 Scan with Opus
-                              </button>
-                              <button
-                                onClick={() => scanAsImages(f.id, f.file)}
-                                style={{ padding: '6px 14px', borderRadius: 6, border: '1px solid rgba(234,208,104,0.3)', background: 'rgba(234,208,104,0.08)', color: '#EAD068', cursor: 'pointer', fontSize: 12, fontFamily: 'inherit' }}>
-                                📷 Scan as Images
-                              </button>
-                            </div>
-                          </div>
-                        )}
-                        {!f.error?.includes('scanned') && (
-                          <div style={{ display: 'flex', gap: 8, marginTop: 4 }}>
-                            <button
-                              onClick={() => scanWithClaude(f.id, f.file, 'sonnet')}
-                              style={{ padding: '5px 12px', borderRadius: 6, border: '1px solid rgba(0,229,255,0.3)', background: 'rgba(0,229,255,0.08)', color: '#00e5ff', cursor: 'pointer', fontSize: 11, fontFamily: 'inherit' }}>
-                              🔍 Try Scan with Claude
-                            </button>
-                            <button
-                              onClick={() => scanAsImages(f.id, f.file)}
-                              style={{ padding: '5px 12px', borderRadius: 6, border: '1px solid rgba(234,208,104,0.3)', background: 'rgba(234,208,104,0.08)', color: '#EAD068', cursor: 'pointer', fontSize: 11, fontFamily: 'inherit' }}>
-                              📷 Scan as Images
-                            </button>
-                          </div>
-                        )}
+                        <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+                          <button onClick={() => scanWithClaude(f.id, f.file, 'sonnet')} style={{ padding: '5px 10px', borderRadius: 6, border: '1px solid rgba(0,229,255,0.3)', background: 'rgba(0,229,255,0.08)', color: '#00e5ff', cursor: 'pointer', fontSize: 11, fontFamily: 'inherit' }}>🔍 Scan (Sonnet)</button>
+                          <button onClick={() => scanWithClaude(f.id, f.file, 'opus')} style={{ padding: '5px 10px', borderRadius: 6, border: '1px solid rgba(76,175,80,0.3)', background: 'rgba(76,175,80,0.08)', color: '#4caf50', cursor: 'pointer', fontSize: 11, fontFamily: 'inherit' }}>🔍 Scan (Opus)</button>
+                          <button onClick={() => scanAsImages(f.id, f.file)} style={{ padding: '5px 10px', borderRadius: 6, border: '1px solid rgba(234,208,104,0.3)', background: 'rgba(234,208,104,0.08)', color: '#EAD068', cursor: 'pointer', fontSize: 11, fontFamily: 'inherit' }}>📷 As Images</button>
+                        </div>
+                      </div>
+                    )}
+                    {f.status === 'needs_scan' && (
+                      <div>
+                        <div style={{ fontSize: 12, color: '#ffd54f', marginBottom: 8 }}>📷 NEEDS SCAN — scanned PDF detected</div>
+                        <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+                          <button onClick={() => scanWithClaude(f.id, f.file, 'sonnet')} style={{ padding: '5px 10px', borderRadius: 6, border: '1px solid rgba(0,229,255,0.3)', background: 'rgba(0,229,255,0.08)', color: '#00e5ff', cursor: 'pointer', fontSize: 11, fontFamily: 'inherit' }}>🔍 Scan with Claude (Sonnet)</button>
+                          <button onClick={() => scanWithClaude(f.id, f.file, 'opus')} style={{ padding: '5px 10px', borderRadius: 6, border: '1px solid rgba(76,175,80,0.3)', background: 'rgba(76,175,80,0.08)', color: '#4caf50', cursor: 'pointer', fontSize: 11, fontFamily: 'inherit' }}>🔍 Scan with Opus</button>
+                          <button onClick={() => scanAsImages(f.id, f.file)} style={{ padding: '5px 10px', borderRadius: 6, border: '1px solid rgba(234,208,104,0.3)', background: 'rgba(234,208,104,0.08)', color: '#EAD068', cursor: 'pointer', fontSize: 11, fontFamily: 'inherit' }}>📷 Scan as Images</button>
+                        </div>
                       </div>
                     )}
                     {f.status === 'ready' && (
                       <>
-                        {f.isScanned && <div style={{ fontSize: 11, color: '#ffd54f', marginBottom: 6 }}>📷 Scanned · {(f.images||[]).length} pages rendered</div>}
+                        <div style={{ display: 'flex', gap: 6, marginBottom: 6 }}>
+                          <span style={S.tag('green')}>TEXT READY</span>
+                          {f.isScanned && <span style={S.tag('gold')}>SCANNED</span>}
+                        </div>
+                        {f.isScanned && <div style={{ fontSize: 11, color: '#ffd54f', marginBottom: 6 }}>📷 Scanned · {(f.images||[]).length > 0 ? (f.images.length + ' pages rendered') : 'OCR complete'}</div>}
                         <input
                           value={f.accountLabel}
                           onChange={e => updateLabel(f.id, e.target.value)}
@@ -1384,13 +1615,34 @@ export default function FFAnalyzer() {
             </div>
           )}
 
+          {/* Agreement upload section */}
+          {uploadedFiles.length > 0 && (
+            <div style={{ marginTop: 16, marginBottom: 20 }}>
+              <div style={{ borderTop: '1px solid rgba(255,255,255,0.08)', margin: '16px 0' }} />
+              <div style={{ fontSize: 13, letterSpacing: 1.5, textTransform: 'uppercase', color: 'rgba(232,232,240,0.5)', marginBottom: 12 }}>📋 MCA Agreements (Optional)</div>
+              <div style={{ fontSize: 12, color: 'rgba(232,232,240,0.4)', marginBottom: 12 }}>Upload MCA agreements for contract analysis & cross-referencing against bank data</div>
+              <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap', marginBottom: 8 }}>
+                <input ref={agreementInputRef} type="file" accept=".pdf" multiple style={{ display: 'none' }} onChange={onAgreementDrop} />
+                <button style={{ ...S.btn('secondary'), padding: '8px 16px', fontSize: 12 }} onClick={() => agreementInputRef.current?.click()}>📎 Add Agreements</button>
+                {uploadedAgreements.length > 0 && <span style={{ fontSize: 12, color: 'rgba(232,232,240,0.5)' }}>{uploadedAgreements.length} loaded</span>}
+              </div>
+              {uploadedAgreements.map(ag => (
+                <span key={ag.id} style={{ display: 'inline-flex', alignItems: 'center', gap: 4, background: 'rgba(234,208,104,0.08)', border: '1px solid rgba(234,208,104,0.2)', borderRadius: 6, padding: '3px 8px', marginRight: 6, marginBottom: 4, fontSize: 11 }}>
+                  <span style={{ color: '#EAD068' }}>📋</span>
+                  <span style={{ color: 'rgba(232,232,240,0.6)' }}>{ag.name.slice(0, 25)}{ag.name.length > 25 ? '…' : ''}</span>
+                  <button onClick={() => setUploadedAgreements(prev => prev.filter(a => a.id !== ag.id))} style={{ background: 'none', border: 'none', color: 'rgba(232,232,240,0.3)', cursor: 'pointer', fontSize: 12, padding: 0 }}>✕</button>
+                </span>
+              ))}
+            </div>
+          )}
+
           {/* Info cards */}
           {uploadedFiles.length === 0 && (
             <div style={{ ...S.grid3, marginTop: 32 }}>
               {[
                 { icon: '🏦', title: 'Any Bank Format', body: 'Beverly Bank, Chase, BOA, credit unions — up to 6 months per account' },
-                { icon: '🔍', title: 'Multi-Account Support', body: 'Main, payroll, pass-through — cross-account transfers auto-deduplicated' },
-                { icon: '📊', title: 'UW Calculator Ready', body: 'Bank-verified revenue with 6-month trend exports into the UW Calculator' },
+                { icon: '📋', title: 'Agreement Analysis', body: 'Upload MCA contracts for clause extraction, reconciliation rights, and stacking detection' },
+                { icon: '🔄', title: 'Cross-Reference Engine', body: 'Compares contract terms vs actual bank debits — catches overpayments, violations, and discrepancies' },
               ].map((c, i) => (
                 <div key={i} style={S.card}>
                   <div style={{ fontSize: 28, marginBottom: 10 }}>{c.icon}</div>
@@ -1442,6 +1694,28 @@ export default function FFAnalyzer() {
                 <button style={{ ...S.btn('secondary'), padding: '6px 14px', fontSize: 12 }} onClick={analyze}>🔄 Re-analyze</button>
               </div>
             </div>
+            {/* Post-analysis agreement controls */}
+            <div style={{ borderTop: '1px solid rgba(255,255,255,0.08)', marginTop: 16, paddingTop: 12 }}>
+              <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
+                <input ref={agreementInputRef} type="file" accept=".pdf" multiple style={{ display: 'none' }} onChange={onAgreementDrop} />
+                <button style={{ ...S.btn('secondary'), padding: '6px 12px', fontSize: 11 }} onClick={() => agreementInputRef.current?.click()}>📎 Add Agreements</button>
+                {uploadedAgreements.filter(a => a.status !== 'done').length > 0 && (
+                  <button style={{ ...S.btn('gold'), padding: '6px 12px', fontSize: 11, opacity: agreementLoading ? 0.5 : 1 }} onClick={analyzeAgreements} disabled={agreementLoading}>
+                    {agreementLoading ? '⏳ Analyzing…' : `📋 Analyze ${uploadedAgreements.filter(a => a.status !== 'done').length} Agreement${uploadedAgreements.filter(a => a.status !== 'done').length > 1 ? 's' : ''}`}
+                  </button>
+                )}
+                {agreementResults.length > 0 && (
+                  <button style={{ ...S.btn('primary'), padding: '6px 12px', fontSize: 11, opacity: crossRefLoading ? 0.5 : 1 }} onClick={runCrossReference} disabled={crossRefLoading}>
+                    {crossRefLoading ? '⏳ Cross-referencing…' : '🔄 Run Cross-Reference'}
+                  </button>
+                )}
+                {uploadedAgreements.map(ag => (
+                  <span key={ag.id} style={{ fontSize: 10, color: ag.status === 'done' ? '#81c784' : ag.status === 'error' ? '#ef9a9a' : 'rgba(232,232,240,0.4)' }}>
+                    {ag.name.slice(0,18)}{ag.name.length>18?'…':''} [{ag.status}]
+                  </span>
+                ))}
+              </div>
+            </div>
           </div>
 
           {/* Tabs */}
@@ -1455,7 +1729,10 @@ export default function FFAnalyzer() {
             {activeTab === 2 && <MCATab a={result.analysis} positions={positions} setPositions={setPositions} excludedIds={excludedIds} setExcludedIds={setExcludedIds} otherExcludedIds={otherExcludedIds} setOtherExcludedIds={setOtherExcludedIds} excludedDepositIds={excludedDepositIds} />}
             {activeTab === 3 && <RiskTab a={result.analysis} positions={positions} excludedIds={excludedIds} otherExcludedIds={otherExcludedIds} excludedDepositIds={excludedDepositIds} />}
             {activeTab === 4 && <NegotiationTab a={result.analysis} positions={positions} excludedIds={excludedIds} otherExcludedIds={otherExcludedIds} excludedDepositIds={excludedDepositIds} />}
-            {activeTab === 5 && <ExportTab a={result.analysis} fileName={result.file_name || 'analysis'} positions={positions} excludedIds={excludedIds} otherExcludedIds={otherExcludedIds} excludedDepositIds={excludedDepositIds} />}
+            {activeTab === 5 && <AgreementsTab agreementResults={agreementResults} />}
+            {activeTab === 6 && <CrossReferenceTab crossRefResult={crossRefResult} />}
+            {activeTab === 7 && <ConfidenceTab a={result.analysis} />}
+            {activeTab === 8 && <ExportTab a={result.analysis} fileName={result.file_name || 'analysis'} positions={positions} excludedIds={excludedIds} otherExcludedIds={otherExcludedIds} excludedDepositIds={excludedDepositIds} />}
           </div>
         </div>
       )}
