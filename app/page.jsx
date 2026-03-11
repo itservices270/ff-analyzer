@@ -910,20 +910,350 @@ ${ni.sustainability_case ? `<div class="section-box"><strong>100% Repayment Path
   </div>);
 }
 
+// ─── Agreement Analysis Tab ───
+function AgreementTab({ agreements }) {
+  if (!agreements || agreements.length === 0) return (
+    <div style={S.card}><div style={{ textAlign: 'center', padding: 24, color: C.textMuted }}>No MCA agreements analyzed yet. Upload agreement PDFs and re-analyze.</div></div>
+  );
+
+  return (<div>
+    {agreements.map((ag, i) => {
+      const a = ag.analysis || ag;
+      const ft = a.financial_terms || {};
+      const fees = a.fee_analysis || {};
+      const rv = a.revenue_verification || {};
+      const lev = a.negotiation_leverage || {};
+      const tc = ft.factor_rate > 1.45 ? C.red : ft.factor_rate > 1.35 ? C.orange : C.gold;
+
+      return (
+        <div key={i} style={{ marginBottom: 24 }}>
+          <div style={{ ...S.card, borderLeft: `3px solid ${C.cyan}` }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+              <div>
+                <div style={{ fontSize: 18, fontWeight: 700 }}>{a.funder_name || 'Unknown Funder'}</div>
+                <div style={{ fontSize: 12, color: C.textMuted, marginTop: 2 }}>{a.agreement_date || ''} • {a.agreement_type || 'MCA'}</div>
+              </div>
+              {lev.overall_leverage_rating && (
+                <span style={S.badge(lev.overall_leverage_rating === 'strong' ? C.green : lev.overall_leverage_rating === 'moderate' ? C.gold : C.red)}>
+                  {lev.overall_leverage_rating.toUpperCase()} LEVERAGE
+                </span>
+              )}
+            </div>
+          </div>
+
+          {/* Financial Terms */}
+          <div style={S.statGrid}>
+            <div style={S.stat}><div style={S.statLabel}>Purchase Price</div><div style={S.statValue(C.cyan)}>{fmt(ft.purchase_price)}</div><div style={S.statSub}>Amount funded</div></div>
+            <div style={S.stat}><div style={S.statLabel}>Purchased Amount</div><div style={S.statValue(C.red)}>{fmt(ft.purchased_amount)}</div><div style={S.statSub}>Total payback</div></div>
+            <div style={S.stat}><div style={S.statLabel}>Factor Rate</div><div style={S.statValue(tc)}>{fmtFactor(ft.factor_rate)}</div><div style={S.statSub}>{ft.factor_rate > 1.45 ? '⚠ Above market' : 'Market rate'}</div></div>
+            <div style={S.stat}><div style={S.statLabel}>Net Proceeds</div><div style={S.statValue(C.gold)}>{fmt(fees.net_proceeds_to_merchant)}</div><div style={S.statSub}>After {fmt(fees.total_fees)} in fees ({fmtPct(fees.total_fees_pct_of_purchase)})</div></div>
+          </div>
+
+          {/* Revenue Verification - KEY */}
+          {rv.stated_revenue > 0 && (
+            <div style={{ ...S.card, borderLeft: `3px solid ${C.orange}`, background: C.orangeDim }}>
+              <div style={S.statLabel}>REVENUE REPRESENTATION IN CONTRACT</div>
+              <div style={{ marginTop: 8 }}>
+                <div style={{ fontSize: 14 }}>
+                  Funder stated merchant revenue: <strong style={{ color: C.orange, fontSize: 18 }}>{fmt(rv.stated_revenue)}</strong>
+                  <span style={{ color: C.textMuted }}> ({rv.stated_revenue_type || 'unspecified'}, {rv.stated_revenue_period || 'monthly'})</span>
+                </div>
+                {rv.revenue_clause_text && (
+                  <div style={{ marginTop: 8, padding: '8px 12px', background: 'rgba(255,255,255,0.03)', borderRadius: 6, fontSize: 12, color: C.textSoft, fontStyle: 'italic' }}>
+                    "{rv.revenue_clause_text}"
+                  </div>
+                )}
+                {rv.notes && <div style={{ marginTop: 6, fontSize: 12, color: C.gold }}>{rv.notes}</div>}
+              </div>
+            </div>
+          )}
+
+          {/* Fee Breakdown */}
+          {fees.total_fees > 0 && (
+            <div style={S.card}>
+              <div style={S.statLabel}>FEE ANALYSIS — TRUE COST OF CAPITAL</div>
+              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(140px, 1fr))', gap: 8, marginTop: 10 }}>
+                {fees.origination_fee > 0 && <div style={{ fontSize: 12 }}><span style={{ color: C.textMuted }}>Origination:</span> <strong>{fmt(fees.origination_fee)}</strong></div>}
+                {fees.closing_fee > 0 && <div style={{ fontSize: 12 }}><span style={{ color: C.textMuted }}>Closing:</span> <strong>{fmt(fees.closing_fee)}</strong></div>}
+                {fees.admin_fee > 0 && <div style={{ fontSize: 12 }}><span style={{ color: C.textMuted }}>Admin:</span> <strong>{fmt(fees.admin_fee)}</strong></div>}
+                {fees.broker_commission > 0 && <div style={{ fontSize: 12 }}><span style={{ color: C.textMuted }}>Broker:</span> <strong>{fmt(fees.broker_commission)}</strong></div>}
+                {fees.ach_fee > 0 && <div style={{ fontSize: 12 }}><span style={{ color: C.textMuted }}>ACH:</span> <strong>{fmt(fees.ach_fee)}</strong></div>}
+                {fees.ucc_fee > 0 && <div style={{ fontSize: 12 }}><span style={{ color: C.textMuted }}>UCC:</span> <strong>{fmt(fees.ucc_fee)}</strong></div>}
+                {(fees.other_fees || []).map((f, fi) => <div key={fi} style={{ fontSize: 12 }}><span style={{ color: C.textMuted }}>{f.name}:</span> <strong>{fmt(f.amount)}</strong></div>)}
+              </div>
+              <div style={{ marginTop: 10, padding: '8px 12px', background: C.redDim, borderRadius: 6, fontSize: 13, display: 'flex', justifyContent: 'space-between' }}>
+                <span>True Factor Rate (after fees): <strong style={{ color: C.red }}>{fmtFactor(fees.true_factor_rate)}</strong></span>
+                <span>Effective APR: <strong style={{ color: fees.effective_annual_rate > 100 ? C.red : C.orange }}>{fmtPct(fees.effective_annual_rate)}</strong></span>
+              </div>
+            </div>
+          )}
+
+          {/* Problematic Clauses */}
+          {(a.problematic_clauses || []).length > 0 && (<>
+            <div style={S.sectionTitle}>Problematic Clauses</div>
+            {a.problematic_clauses.map((cl, ci) => (
+              <div key={ci} style={{ ...S.card, borderLeft: `3px solid ${cl.leverage_rating === 'high' ? C.red : cl.leverage_rating === 'medium' ? C.orange : C.textMuted}`, padding: '12px 16px' }}>
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                  <span style={{ fontWeight: 600, fontSize: 13 }}>{(cl.clause_type || '').replace(/_/g, ' ').toUpperCase()}</span>
+                  <div style={{ display: 'flex', gap: 6 }}>
+                    <span style={S.badge(cl.enforceability === 'unenforceable' ? C.red : cl.enforceability === 'questionable' ? C.orange : C.textMuted)}>{cl.enforceability}</span>
+                    <span style={S.badge(cl.leverage_rating === 'high' ? C.green : C.gold)}>{cl.leverage_rating} leverage</span>
+                  </div>
+                </div>
+                <div style={{ fontSize: 12, color: C.textSoft, marginTop: 6 }}>{cl.clause_text_summary}</div>
+                {cl.negotiation_notes && <div style={{ fontSize: 12, color: C.cyan, marginTop: 4 }}>{cl.negotiation_notes}</div>}
+              </div>
+            ))}
+          </>)}
+
+          {/* Merchant Protections */}
+          {(a.merchant_protections || []).length > 0 && (<>
+            <div style={S.sectionTitle}>Merchant Protections (Often Unknown)</div>
+            {a.merchant_protections.map((mp, mi) => (
+              <div key={mi} style={{ ...S.card, borderLeft: `3px solid ${C.green}`, padding: '12px 16px' }}>
+                <div style={{ display: 'flex', justifyContent: 'space-between' }}>
+                  <span style={{ fontWeight: 600, fontSize: 13, color: C.green }}>{(mp.protection_type || '').replace(/_/g, ' ').toUpperCase()}</span>
+                  <span style={S.badge(C.green)}>{mp.leverage_rating} leverage</span>
+                </div>
+                <div style={{ fontSize: 12, color: C.textSoft, marginTop: 6 }}>{mp.description}</div>
+                {mp.merchant_action_required && <div style={{ fontSize: 12, color: C.gold, marginTop: 4 }}>Action needed: {mp.merchant_action_required}</div>}
+              </div>
+            ))}
+          </>)}
+
+          {/* Red Flags */}
+          {(a.contract_red_flags || []).length > 0 && (<>
+            <div style={S.sectionTitle}>Contract Red Flags</div>
+            {a.contract_red_flags.map((rf, ri) => (
+              <div key={ri} style={{ padding: '8px 0', borderBottom: ri < a.contract_red_flags.length - 1 ? `1px solid ${C.cardBorder}` : 'none', fontSize: 13 }}>
+                <span style={S.badge(rf.severity === 'critical' ? C.red : rf.severity === 'warning' ? C.orange : C.textMuted)}>{rf.severity}</span>
+                <strong>{rf.flag}</strong>
+                <div style={{ fontSize: 12, color: C.textMuted, marginTop: 2 }}>{rf.explanation}</div>
+              </div>
+            ))}
+          </>)}
+
+          {/* Leverage Summary */}
+          {lev.top_leverage_points?.length > 0 && (
+            <div style={{ ...S.card, borderLeft: `3px solid ${C.gold}` }}>
+              <div style={S.statLabel}>NEGOTIATION LEVERAGE — {a.funder_name}</div>
+              <div style={{ marginTop: 8 }}>
+                {lev.top_leverage_points.map((lp, li) => (
+                  <div key={li} style={{ padding: '6px 0', fontSize: 13 }}><span style={{ color: C.gold, marginRight: 8 }}>→</span>{lp}</div>
+                ))}
+              </div>
+              {lev.recommended_approach && <div style={{ marginTop: 10, fontSize: 13, color: C.textSoft }}><strong>Approach:</strong> {lev.recommended_approach}</div>}
+            </div>
+          )}
+        </div>
+      );
+    })}
+  </div>);
+}
+
+// ─── Cross-Reference Tab ───
+function CrossReferenceTab({ xref }) {
+  if (!xref) return (
+    <div style={S.card}><div style={{ textAlign: 'center', padding: 24, color: C.textMuted }}>Cross-reference analysis not yet run. Upload both statements AND agreements, then analyze.</div></div>
+  );
+
+  const x = xref.analysis || xref;
+  const cascade = x.cascading_burden_analysis || {};
+  const rec = x.restructuring_recommendation || {};
+
+  return (<div>
+    {/* Cascading Burden Headline */}
+    <div style={{ ...S.card, borderLeft: `3px solid ${C.red}`, background: 'rgba(255,71,87,0.03)' }}>
+      <div style={S.statLabel}>CASCADING BURDEN ANALYSIS</div>
+      <div style={{ fontSize: 14, lineHeight: 1.7, marginTop: 10, color: C.textSoft }}>{cascade.narrative || ''}</div>
+      <div style={S.statGrid}>
+        <div style={S.stat}><div style={S.statLabel}>Total Funded</div><div style={S.statValue(C.cyan)}>{fmt(cascade.total_purchase_prices)}</div></div>
+        <div style={S.stat}><div style={S.statLabel}>Total Payback Owed</div><div style={S.statValue(C.red)}>{fmt(cascade.total_purchased_amounts)}</div></div>
+        <div style={S.stat}><div style={S.statLabel}>Total Fees Paid</div><div style={S.statValue(C.orange)}>{fmt(cascade.total_fees_across_all)}</div></div>
+        <div style={S.stat}><div style={S.statLabel}>True DSR (All MCA)</div><div style={S.statValue(cascade.true_dsr_all_mca > 50 ? C.red : C.orange)}>{fmtPct(cascade.true_dsr_all_mca)}</div></div>
+      </div>
+      {cascade.viability_explanation && (
+        <div style={{ marginTop: 10, padding: '10px 14px', background: cascade.viable_without_mca ? C.greenDim : C.redDim, borderRadius: 8, fontSize: 13, color: cascade.viable_without_mca ? C.green : C.red }}>
+          <strong>{cascade.viable_without_mca ? '✓ VIABLE BUSINESS' : '⚠ AT RISK'}:</strong> {cascade.viability_explanation}
+        </div>
+      )}
+    </div>
+
+    {/* Contract vs Reality Table */}
+    {(x.contract_vs_reality || []).length > 0 && (<>
+      <div style={S.sectionTitle}>Contract vs Reality — Per Funder</div>
+      {x.contract_vs_reality.map((cvr, i) => (
+        <div key={i} style={{ ...S.card, marginBottom: 14 }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 }}>
+            <div style={{ fontSize: 16, fontWeight: 700 }}>{cvr.funder_name}</div>
+            <span style={S.badge(cvr.underwriting_grade === 'F' || cvr.underwriting_grade === 'D' ? C.red : cvr.underwriting_grade === 'C' ? C.orange : C.green)}>
+              UW Grade: {cvr.underwriting_grade}
+            </span>
+          </div>
+          <table style={S.table}>
+            <thead><tr><th style={S.th}>Metric</th><th style={S.th}>Contracted</th><th style={S.th}>Actual</th><th style={S.th}>Discrepancy</th></tr></thead>
+            <tbody>
+              <tr>
+                <td style={S.td}>Revenue Used</td>
+                <td style={S.td}>{fmt(cvr.stated_revenue)}</td>
+                <td style={{ ...S.td, fontWeight: 600 }}>{fmt(cvr.actual_revenue)}</td>
+                <td style={{ ...S.td, color: cvr.revenue_inflated ? C.red : C.green, fontWeight: 600 }}>
+                  {cvr.revenue_inflated ? '↑' : '✓'} {fmtPct(Math.abs(cvr.revenue_discrepancy_pct))} {cvr.revenue_inflated ? 'INFLATED' : 'accurate'}
+                </td>
+              </tr>
+              <tr>
+                <td style={S.td}>Withhold %</td>
+                <td style={S.td}>{fmtPct(cvr.contracted_withhold_pct)}</td>
+                <td style={{ ...S.td, fontWeight: 600 }}>{fmtPct(cvr.actual_withhold_pct)}</td>
+                <td style={{ ...S.td, color: cvr.withhold_discrepancy_points > 0 ? C.red : C.green }}>
+                  {cvr.withhold_discrepancy_points > 0 ? '+' : ''}{cvr.withhold_discrepancy_points?.toFixed(1)} pts
+                </td>
+              </tr>
+              <tr>
+                <td style={S.td}>Available Revenue at Funding</td>
+                <td style={{ ...S.td, color: C.textMuted }}>Assumed: {fmt(cvr.stated_revenue)}</td>
+                <td style={{ ...S.td, fontWeight: 600, color: C.red }}>{fmt(cvr.available_revenue_at_funding)}</td>
+                <td style={{ ...S.td, color: C.red, fontWeight: 600 }}>
+                  True withhold: {fmtPct(cvr.true_withhold_of_available)}
+                </td>
+              </tr>
+              <tr>
+                <td style={S.td}>Factor Rate</td>
+                <td style={S.td}>{fmtFactor(cvr.contracted_factor_rate)}</td>
+                <td style={{ ...S.td, color: C.orange }}>{fmtFactor(cvr.true_factor_rate)} (after fees)</td>
+                <td style={{ ...S.td, color: C.red }}>APR: {fmtPct(cvr.effective_apr)}</td>
+              </tr>
+            </tbody>
+          </table>
+          {cvr.underwriting_failures?.length > 0 && (
+            <div style={{ marginTop: 10 }}>
+              <div style={{ fontSize: 10, color: C.textMuted, textTransform: 'uppercase', fontWeight: 700, marginBottom: 6 }}>Underwriting Failures</div>
+              {cvr.underwriting_failures.map((f, fi) => (
+                <div key={fi} style={{ fontSize: 12, color: C.red, padding: '3px 0' }}>⚠ {f}</div>
+              ))}
+            </div>
+          )}
+          {cvr.leverage_points?.length > 0 && (
+            <div style={{ marginTop: 8 }}>
+              <div style={{ fontSize: 10, color: C.textMuted, textTransform: 'uppercase', fontWeight: 700, marginBottom: 6 }}>Leverage Points</div>
+              {cvr.leverage_points.map((lp, li) => (
+                <div key={li} style={{ fontSize: 12, color: C.gold, padding: '3px 0' }}>→ {lp}</div>
+              ))}
+            </div>
+          )}
+        </div>
+      ))}
+    </>)}
+
+    {/* Position Chronology */}
+    {(x.position_chronology || []).length > 0 && (<>
+      <div style={S.sectionTitle}>Stacking Chronology — How Each Position Changed the Picture</div>
+      {x.position_chronology.map((pc, i) => (
+        <div key={i} style={{ ...S.card, borderLeft: `3px solid ${i === 0 ? C.cyan : C.orange}`, padding: '14px 16px' }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+            <div>
+              <span style={{ color: C.cyan, fontWeight: 700, marginRight: 8 }}>#{pc.order}</span>
+              <strong>{pc.funder_name}</strong>
+              <span style={{ color: C.textMuted, fontSize: 12, marginLeft: 8 }}>{pc.funding_date}</span>
+            </div>
+            <div style={{ textAlign: 'right' }}>
+              <div style={{ fontSize: 12, color: C.textMuted }}>Cumulative Weekly After</div>
+              <div style={{ fontSize: 16, fontWeight: 700, color: C.red }}>{fmt(pc.cumulative_weekly_burden_after)}</div>
+            </div>
+          </div>
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: 8, marginTop: 10, fontSize: 12 }}>
+            <div><span style={{ color: C.textMuted }}>Funded:</span> <strong>{fmt(pc.purchase_price)}</strong> (net {fmt(pc.net_proceeds)})</div>
+            <div><span style={{ color: C.textMuted }}>Existing MCA/mo:</span> <strong>{fmt(pc.existing_monthly_mca_at_funding)}</strong></div>
+            <div><span style={{ color: C.textMuted }}>Available Revenue:</span> <strong style={{ color: C.orange }}>{fmt(pc.available_revenue_at_funding)}</strong></div>
+          </div>
+          <div style={{ fontSize: 12, color: C.textSoft, marginTop: 8, lineHeight: 1.6 }}>{pc.narrative}</div>
+          <div style={{ marginTop: 6, padding: '6px 10px', background: C.redDim, borderRadius: 6, fontSize: 12 }}>
+            <span style={{ color: C.red }}>{fmtPct(pc.pct_of_available_revenue_consumed)} of available revenue consumed after this position</span>
+          </div>
+        </div>
+      ))}
+    </>)}
+
+    {/* Funder Scorecards */}
+    {(x.funder_scorecards || []).length > 0 && (<>
+      <div style={S.sectionTitle}>Funder Scorecards</div>
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(280px, 1fr))', gap: 12 }}>
+        {x.funder_scorecards.map((sc, i) => (
+          <div key={i} style={S.card}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 10 }}>
+              <div style={{ fontWeight: 700, fontSize: 14 }}>{sc.funder_name}</div>
+              <span style={S.badge(sc.underwriting_grade === 'F' || sc.underwriting_grade === 'D' ? C.red : sc.underwriting_grade === 'C' ? C.orange : C.green)}>
+                Grade: {sc.underwriting_grade}
+              </span>
+            </div>
+            <div style={{ fontSize: 12, lineHeight: 2 }}>
+              <div>Revenue Verified: <strong style={{ color: sc.revenue_verified ? C.green : C.red }}>{sc.revenue_verified ? 'Yes' : 'NO'}</strong></div>
+              <div>Existing Positions Considered: <strong style={{ color: sc.existing_positions_accounted ? C.green : C.red }}>{sc.existing_positions_accounted ? 'Yes' : 'NO'}</strong></div>
+              {sc.anti_stacking_hypocrite && <div style={{ color: C.red, fontWeight: 600 }}>⚠ Anti-Stacking Hypocrite</div>}
+              <div>Factor Rate: <strong style={{ color: sc.factor_rate_assessment === 'predatory' ? C.red : sc.factor_rate_assessment === 'above_market' ? C.orange : C.green }}>{(sc.factor_rate_assessment || '').replace(/_/g, ' ')}</strong></div>
+              {sc.has_reconciliation_rights && <div style={{ color: C.green }}>✓ Has Reconciliation Rights</div>}
+            </div>
+            {sc.recommended_approach && <div style={{ fontSize: 12, color: C.cyan, marginTop: 8 }}>{sc.recommended_approach}</div>}
+          </div>
+        ))}
+      </div>
+    </>)}
+
+    {/* Restructuring Recommendation */}
+    {rec.headline && (
+      <div style={{ ...S.card, borderLeft: `3px solid ${C.green}`, background: 'rgba(38,222,129,0.03)', marginTop: 16 }}>
+        <div style={S.statLabel}>RESTRUCTURING RECOMMENDATION</div>
+        <div style={{ fontSize: 15, fontWeight: 600, marginTop: 8, lineHeight: 1.6 }}>{rec.headline}</div>
+        <div style={{ display: 'flex', gap: 24, marginTop: 16 }}>
+          <div><div style={{ fontSize: 10, color: C.textMuted }}>CURRENT WEEKLY</div><div style={{ fontSize: 24, fontWeight: 700, color: C.red, textDecoration: 'line-through' }}>{fmt(rec.current_total_weekly)}</div></div>
+          <div style={{ fontSize: 28, color: C.textMuted, alignSelf: 'center' }}>→</div>
+          <div><div style={{ fontSize: 10, color: C.textMuted }}>RECOMMENDED</div><div style={{ fontSize: 24, fontWeight: 700, color: C.green }}>{fmt(rec.sustainable_weekly)}</div></div>
+          <div style={{ alignSelf: 'center' }}><span style={{ ...S.badge(C.green), fontSize: 13, padding: '6px 14px' }}>{fmtPct(rec.recommended_reduction_pct)} reduction</span></div>
+        </div>
+        {rec.repayment_guarantee && (
+          <div style={{ marginTop: 14, padding: '10px 14px', background: C.greenDim, borderRadius: 8, fontSize: 13, color: C.green }}>
+            <strong>100% Repayment Path:</strong> {rec.repayment_guarantee}
+          </div>
+        )}
+        {(rec.per_funder_recommendation || []).length > 0 && (
+          <table style={{ ...S.table, marginTop: 16 }}>
+            <thead><tr><th style={S.th}>Funder</th><th style={S.th}>Current /wk</th><th style={S.th}>Recommended /wk</th><th style={S.th}>Reduction</th><th style={S.th}>Remaining Bal</th><th style={S.th}>Term</th></tr></thead>
+            <tbody>{rec.per_funder_recommendation.map((pf, i) => (
+              <tr key={i}>
+                <td style={S.td}><strong>{pf.funder}</strong></td>
+                <td style={{ ...S.td, color: C.red, textDecoration: 'line-through' }}>{fmt(pf.current_weekly)}</td>
+                <td style={{ ...S.td, color: C.green, fontWeight: 600 }}>{fmt(pf.recommended_weekly)}</td>
+                <td style={S.td}>{fmtPct(pf.reduction_pct)}</td>
+                <td style={S.td}>{fmt(pf.remaining_balance)}</td>
+                <td style={S.td}>{pf.recommended_term_weeks}wks</td>
+              </tr>
+            ))}</tbody>
+          </table>
+        )}
+      </div>
+    )}
+  </div>);
+}
+
 // ─── Main Component ───
-const TABS = ['Revenue', 'Trend', 'MCA Positions', 'Risk & Capacity', 'Negotiation Intel', 'Confidence', 'Export'];
+const TABS = ['Revenue', 'Trend', 'MCA Positions', 'Risk & Capacity', 'Negotiation Intel', 'Agreements', 'Cross-Reference', 'Confidence', 'Export'];
 
 export default function FFAnalyzer() {
   const [files, setFiles] = useState([]);
+  const [agreementFiles, setAgreementFiles] = useState([]);
   const [loading, setLoading] = useState(false);
   const [loadingMsg, setLoadingMsg] = useState('');
   const [error, setError] = useState(null);
   const [result, setResult] = useState(null);
   const [positions, setPositions] = useState([]);
+  const [agreementResults, setAgreementResults] = useState([]);
+  const [crossRefResult, setCrossRefResult] = useState(null);
   const [activeTab, setActiveTab] = useState(0);
   const [model, setModel] = useState('opus');
   const [dragging, setDragging] = useState(false);
+  const [draggingAg, setDraggingAg] = useState(false);
   const fileRef = useRef(null);
+  const agFileRef = useRef(null);
 
   // File handling with deduplication
   const handleFiles = useCallback((newFiles) => {
@@ -939,6 +1269,18 @@ export default function FFAnalyzer() {
   }, []);
 
   const removeFile = (id) => setFiles(prev => prev.filter(f => f.id !== id));
+
+  // Agreement file handling
+  const handleAgreementFiles = useCallback((newFiles) => {
+    const pdfs = Array.from(newFiles).filter(f => f.type === 'application/pdf' || f.name.endsWith('.pdf'));
+    setAgreementFiles(prev => {
+      const existingNames = new Set(prev.map(f => f.name + '_' + f.file?.size));
+      const unique = pdfs.filter(f => !existingNames.has(f.name + '_' + f.size));
+      return [...prev, ...unique.map(f => ({ id: Math.random().toString(36).slice(2), file: f, name: f.name, status: 'ready' }))];
+    });
+  }, []);
+
+  const removeAgreementFile = (id) => setAgreementFiles(prev => prev.filter(f => f.id !== id));
 
   const analyze = async () => {
     if (files.length === 0) return;
@@ -986,13 +1328,68 @@ export default function FFAnalyzer() {
       setResult(data);
       setPositions((data.analysis?.mca_positions || []).map(p => ({ ...p, _excluded: false })));
       setActiveTab(0);
+
+      // Phase 2: Analyze agreement PDFs if provided
+      if (agreementFiles.length > 0) {
+        const agResults = [];
+        for (let i = 0; i < agreementFiles.length; i++) {
+          const af = agreementFiles[i];
+          setLoadingMsg(`Analyzing agreement ${i + 1}/${agreementFiles.length}: ${af.name}...`);
+          try {
+            const agText = await extractPDFText(af.file);
+            if (agText.trim().length < 200) {
+              agResults.push({ file: af.name, error: 'Image-based PDF — could not extract text' });
+              continue;
+            }
+            const agRes = await fetch('/api/analyze-agreement', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ text: agText, fileName: af.name, model })
+            });
+            const agData = await agRes.json();
+            if (agRes.ok && agData.success) {
+              agResults.push({ file: af.name, analysis: agData.analysis });
+            } else {
+              agResults.push({ file: af.name, error: agData.error || 'Analysis failed' });
+            }
+          } catch (e) {
+            agResults.push({ file: af.name, error: e.message });
+          }
+        }
+        setAgreementResults(agResults);
+
+        // Phase 3: Cross-reference if we have both statements and agreements
+        const validAgreements = agResults.filter(a => a.analysis).map(a => a.analysis);
+        if (validAgreements.length > 0 && data.analysis) {
+          setLoadingMsg('Cross-referencing agreements against bank statements...');
+          try {
+            const xrefRes = await fetch('/api/cross-reference', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                bankAnalysis: data.analysis,
+                agreementAnalyses: validAgreements,
+                model
+              })
+            });
+            const xrefData = await xrefRes.json();
+            if (xrefRes.ok && xrefData.success) {
+              setCrossRefResult(xrefData);
+            } else {
+              console.error('Cross-reference error:', xrefData.error);
+            }
+          } catch (e) {
+            console.error('Cross-reference error:', e);
+          }
+        }
+      }
     } catch (e) {
       setError(e.message || 'Unknown error');
     }
     setLoading(false); setLoadingMsg('');
   };
 
-  const reset = () => { setFiles([]); setResult(null); setPositions([]); setError(null); setActiveTab(0); };
+  const reset = () => { setFiles([]); setAgreementFiles([]); setResult(null); setPositions([]); setAgreementResults([]); setCrossRefResult(null); setError(null); setActiveTab(0); };
 
   return (
     <div style={S.page}>
@@ -1001,7 +1398,7 @@ export default function FFAnalyzer() {
           <div style={S.logo}>FUNDERS FIRST ANALYZER</div>
           <div style={S.logoSub}>Bank Statement Intelligence Engine</div>
         </div>
-        {!result && files.length > 0 && (
+        {!result && (files.length > 0 || agreementFiles.length > 0) && (
           <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
             <div style={{ display: 'flex', gap: 2, background: 'rgba(255,255,255,0.03)', borderRadius: 8, padding: 3 }}>
               <button onClick={() => setModel('opus')} style={{
@@ -1059,10 +1456,40 @@ export default function FFAnalyzer() {
                   <button style={{ ...S.btn('danger'), padding: '4px 12px', fontSize: 11 }} onClick={() => removeFile(f.id)}>✕</button>
                 </div>
               ))}
-              <div style={{ marginTop: 12, fontSize: 11, color: C.textMuted }}>
-                {files.length} file{files.length > 1 ? 's' : ''} ready •
-                {model === 'opus' ? ' Opus (~$0.45/stmt, recommended for negotiations)' : ' Sonnet (~$0.06/stmt, fast preview)'}
+            </div>
+          )}
+
+          {/* Agreement Upload */}
+          <div style={{ marginTop: 24 }}>
+            <div style={S.sectionTitle}>MCA Agreements (Optional)</div>
+            <div style={{ fontSize: 12, color: C.textMuted, marginBottom: 10 }}>Upload original MCA purchase agreements to scan for bad terms, hidden fees, illegal clauses, and verify revenue representations.</div>
+            <div style={{ ...S.dropzone(draggingAg), padding: '32px 24px' }}
+              onDragOver={e => { e.preventDefault(); setDraggingAg(true); }}
+              onDragLeave={() => setDraggingAg(false)}
+              onDrop={e => { e.preventDefault(); setDraggingAg(false); handleAgreementFiles(e.dataTransfer.files); }}
+              onClick={() => agFileRef.current?.click()}>
+              <input ref={agFileRef} type="file" accept=".pdf" multiple hidden onChange={e => handleAgreementFiles(e.target.files)} />
+              <div style={{ fontSize: 24, marginBottom: 8, opacity: 0.5 }}>📋</div>
+              <div style={{ fontSize: 14, fontWeight: 600 }}>Drop MCA agreements here</div>
+              <div style={{ fontSize: 11, color: C.textMuted, marginTop: 4 }}>PDF contracts / purchase agreements from each funder</div>
+            </div>
+            {agreementFiles.length > 0 && (
+              <div style={{ marginTop: 10 }}>
+                {agreementFiles.map(f => (
+                  <div key={f.id} style={{ ...S.card, display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '10px 16px', borderLeft: `3px solid ${C.gold}` }}>
+                    <div style={{ fontSize: 13 }}>📋 {f.name}</div>
+                    <button style={{ ...S.btn('danger'), padding: '4px 12px', fontSize: 11 }} onClick={() => removeAgreementFile(f.id)}>✕</button>
+                  </div>
+                ))}
               </div>
+            )}
+          </div>
+
+          {(files.length > 0 || agreementFiles.length > 0) && (
+            <div style={{ marginTop: 16, fontSize: 11, color: C.textMuted }}>
+              {files.length} statement{files.length !== 1 ? 's' : ''}{agreementFiles.length > 0 ? ` + ${agreementFiles.length} agreement${agreementFiles.length !== 1 ? 's' : ''}` : ''} ready •
+              {model === 'opus' ? ' Opus (recommended for negotiations)' : ' Sonnet (fast preview)'}
+              {agreementFiles.length > 0 && ' • Agreements will be cross-referenced against statements'}
             </div>
           )}
         </div>
@@ -1080,6 +1507,10 @@ export default function FFAnalyzer() {
                 {result.analysis?.analysis_period ? `${result.analysis.analysis_period.months_covered} months analyzed` : result.analysis?.statement_period?.start}
                 {' • '}
                 {result.model_used?.includes('opus') ? 'Opus' : 'Sonnet'}
+                {agreementResults.length > 0 && (
+                  <span> • {agreementResults.filter(a => a.analysis).length} agreement{agreementResults.filter(a => a.analysis).length !== 1 ? 's' : ''} analyzed</span>
+                )}
+                {crossRefResult && <span style={{ color: C.green }}> • Cross-referenced</span>}
                 {result.analysis?.analysis_confidence && (
                   <span> • Confidence: <span style={{ color: { high: C.green, medium: C.gold, low: C.red }[result.analysis.analysis_confidence.overall] || C.gold }}>{(result.analysis.analysis_confidence.overall || '').toUpperCase()}</span></span>
                 )}
@@ -1106,8 +1537,10 @@ export default function FFAnalyzer() {
             {activeTab === 2 && <MCATab a={result.analysis} positions={positions} setPositions={setPositions} />}
             {activeTab === 3 && <RiskTab a={result.analysis} />}
             {activeTab === 4 && <NegotiationTab a={result.analysis} />}
-            {activeTab === 5 && <ConfidenceTab a={result.analysis} />}
-            {activeTab === 6 && <ExportTab a={result.analysis} positions={positions} fileName={files[0]?.name} />}
+            {activeTab === 5 && <AgreementTab agreements={agreementResults} />}
+            {activeTab === 6 && <CrossReferenceTab xref={crossRefResult} />}
+            {activeTab === 7 && <ConfidenceTab a={result.analysis} />}
+            {activeTab === 8 && <ExportTab a={result.analysis} positions={positions} fileName={files[0]?.name} />}
           </div>
         </div>
       )}
