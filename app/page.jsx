@@ -113,6 +113,11 @@ const S = {
     border: `2px dashed ${dragging ? C.cyan : C.cardBorder}`, borderRadius: 14, padding: '56px 48px', textAlign: 'center',
     cursor: 'pointer', background: dragging ? C.cyanDim : 'rgba(255,255,255,0.01)', transition: 'all 0.3s',
   }),
+  input: {
+    background: 'rgba(255,255,255,0.06)', border: `1px solid ${C.cardBorder}`, borderRadius: 6,
+    padding: '6px 10px', color: C.text, fontSize: 12, fontFamily: 'inherit', outline: 'none',
+    boxSizing: 'border-box',
+  },
 };
 
 const fmt = (n) => {
@@ -130,7 +135,7 @@ const tierLabel = { healthy: 'HEALTHY', elevated: 'ELEVATED', stressed: 'STRESSE
 
 // ─── Confidence Badge ───
 function ConfidenceBadge({ level }) {
-  const colors = { high: C.green, medium: C.gold, low: C.red };
+  const colors = { high: C.green, medium: C.gold, low: C.red, manual: '#8b5cf6' };
   return <span style={S.badge(colors[level] || C.textMuted)}>{(level || 'unknown').toUpperCase()}</span>;
 }
 
@@ -188,7 +193,24 @@ function WaterfallChart({ waterfall }) {
 // ─── Revenue Tab ───
 function RevenueTab({ a }) {
   const gp = a.gross_profit || a.gross_profit_analysis || {};
-  const rev = a.revenue || {};
+  // Pull revenue from new revenue_breakdown field, OR compute averages from monthly_summary
+  const rb = a.revenue_breakdown || {};
+  const ms = a.monthly_summary || [];
+  const avgField = (field) => {
+    if (rb[field]) return rb[field];
+    if (ms.length === 0) return null;
+    const vals = ms.map(m => m[field] || 0).filter(v => v > 0);
+    return vals.length > 0 ? vals.reduce((a, b) => a + b, 0) / vals.length : null;
+  };
+  const rev = {
+    card_processing: avgField('card_processing'),
+    cash_deposits: avgField('cash_deposits'),
+    ach_credits: avgField('ach_credits'),
+    vendor_credits: avgField('vendor_credits'),
+    total_true_revenue: rb.card_processing ? (rb.card_processing + (rb.cash_deposits || 0) + (rb.ach_credits || 0) + (rb.vendor_credits || 0)) : null,
+    excluded_items: a.revenue?.excluded_items || [],
+    ...(a.revenue || {})
+  };
   const wf = a.cash_flow_waterfall;
 
   return (<div>
@@ -220,6 +242,11 @@ function RevenueTab({ a }) {
         <div><span style={{ color: C.textMuted, fontSize: 11 }}>ACH Credits</span><br /><strong>{fmt(rev.ach_credits)}</strong></div>
         <div><span style={{ color: C.textMuted, fontSize: 11 }}>Vendor Credits</span><br /><strong>{fmt(rev.vendor_credits)}</strong></div>
       </div>
+      {(rb.detail || a.revenue_breakdown?.detail) && (
+        <div style={{ marginTop: 10, padding: '8px 12px', background: 'rgba(255,255,255,0.02)', borderRadius: 6, fontSize: 11, color: C.textMuted }}>
+          {rb.detail || a.revenue_breakdown?.detail}
+        </div>
+      )}
     </div>
 
     {rev.excluded_items?.length > 0 && (<>
@@ -330,18 +357,56 @@ function TrendTab({ a }) {
 
 // ─── MCA Positions Tab ───
 function MCATab({ a, positions, setPositions }) {
+  const [showAdd, setShowAdd] = useState(false);
+  const [addForm, setAddForm] = useState({ funder_name: '', payment_amount: '', frequency: 'weekly', status: 'active', notes: '' });
+  const [editIdx, setEditIdx] = useState(null);
+
   // Calculate using GROSS PROFIT as denominator (not revenue)
   const gp = a.gross_profit?.gross_profit_amount || a.gross_profit_analysis?.avg_gross_profit || 0;
-  const totalMCA = positions.filter(p => !p._excluded).reduce((s, p) => s + (p.monthly_estimate || p.monthly_total || 0), 0);
+  const totalMCA = positions.filter(p => !p._excluded && p.status !== 'paid_off').reduce((s, p) => s + (p.monthly_estimate || p.monthly_total || 0), 0);
   const otherDebt = (a.other_debt_service || []).reduce((s, d) => s + (d.monthly_amount || 0), 0);
   const dsrMCA = gp > 0 ? (totalMCA / gp * 100) : 0;
   const dsrAll = gp > 0 ? ((totalMCA + otherDebt) / gp * 100) : 0;
-  const totalWeekly = positions.filter(p => !p._excluded).reduce((s, p) => s + (p.current_payment_amount || p.payment_amount || 0), 0);
+  const totalWeekly = positions.filter(p => !p._excluded && p.status !== 'paid_off').reduce((s, p) => s + (p.current_payment_amount || p.payment_amount || 0), 0);
   const totalEstRemaining = positions.filter(p => !p._excluded).reduce((s, p) => s + (p.estimated_remaining_balance || 0), 0);
 
   const togglePosition = (i) => {
     setPositions(prev => prev.map((p, idx) => idx === i ? { ...p, _excluded: !p._excluded } : p));
   };
+
+  const addPosition = () => {
+    const amt = parseFloat(addForm.payment_amount) || 0;
+    const freq = addForm.frequency || 'weekly';
+    const monthlyMult = freq === 'daily' ? 21.67 : freq === 'weekly' ? 4.33 : freq === 'biweekly' ? 2.17 : 1;
+    const newPos = {
+      funder_name: addForm.funder_name,
+      descriptor: 'Manually added',
+      current_payment_amount: amt,
+      frequency: freq,
+      monthly_estimate: Math.round(amt * monthlyMult * 100) / 100,
+      confidence: 'manual',
+      status: addForm.status,
+      notes: addForm.notes || 'Manually added position',
+      _excluded: false,
+      _manual: true,
+    };
+    setPositions(prev => [...prev, newPos]);
+    setAddForm({ funder_name: '', payment_amount: '', frequency: 'weekly', status: 'active', notes: '' });
+    setShowAdd(false);
+  };
+
+  const saveEdit = (idx) => {
+    setPositions(prev => prev.map((p, i) => {
+      if (i !== idx) return p;
+      const amt = parseFloat(p._editAmt) || p.current_payment_amount || 0;
+      const freq = p._editFreq || p.frequency || 'weekly';
+      const monthlyMult = freq === 'daily' ? 21.67 : freq === 'weekly' ? 4.33 : freq === 'biweekly' ? 2.17 : 1;
+      return { ...p, current_payment_amount: amt, payment_amount: amt, frequency: freq, monthly_estimate: Math.round(amt * monthlyMult * 100) / 100, _editAmt: undefined, _editFreq: undefined };
+    }));
+    setEditIdx(null);
+  };
+
+  const statusColor = (s) => s === 'paid_off' ? '#6b7280' : s === 'unmatched_payments' ? '#f59e0b' : s === 'default' || s === 'returned' ? C.red : s === 'refinanced' || s === 'modified' ? C.orange : C.cyan;
 
   return (<div>
     <div style={S.statGrid}>
@@ -368,31 +433,98 @@ function MCATab({ a, positions, setPositions }) {
       </div>
     </div>
 
-    <div style={S.sectionTitle}>MCA Positions</div>
-    <div style={{ fontSize: 11, color: C.textMuted, textAlign: 'right', marginBottom: 8 }}>Toggle positions to exclude from calculations & export</div>
+    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+      <div style={S.sectionTitle}>MCA Positions</div>
+      <button style={{ ...S.btn(), padding: '6px 16px', fontSize: 12, background: C.cyan + '22', color: C.cyan, border: `1px solid ${C.cyan}44` }} onClick={() => setShowAdd(!showAdd)}>
+        {showAdd ? '✕ Cancel' : '+ Add Position'}
+      </button>
+    </div>
+
+    {showAdd && (
+      <div style={{ ...S.card, borderLeft: `3px solid ${C.green}`, marginBottom: 12 }}>
+        <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 10, color: C.green }}>Add Missing Position</div>
+        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr 1fr', gap: 10 }}>
+          <div>
+            <label style={{ fontSize: 10, color: C.textMuted, textTransform: 'uppercase' }}>Funder Name</label>
+            <input style={{ ...S.input, width: '100%', marginTop: 4 }} value={addForm.funder_name} onChange={e => setAddForm(f => ({ ...f, funder_name: e.target.value }))} placeholder="e.g. Merchant Marketplace" />
+          </div>
+          <div>
+            <label style={{ fontSize: 10, color: C.textMuted, textTransform: 'uppercase' }}>Payment Amount ($)</label>
+            <input style={{ ...S.input, width: '100%', marginTop: 4 }} type="number" value={addForm.payment_amount} onChange={e => setAddForm(f => ({ ...f, payment_amount: e.target.value }))} placeholder="9838" />
+          </div>
+          <div>
+            <label style={{ fontSize: 10, color: C.textMuted, textTransform: 'uppercase' }}>Frequency</label>
+            <select style={{ ...S.input, width: '100%', marginTop: 4 }} value={addForm.frequency} onChange={e => setAddForm(f => ({ ...f, frequency: e.target.value }))}>
+              <option value="daily">Daily</option>
+              <option value="weekly">Weekly</option>
+              <option value="biweekly">Bi-weekly</option>
+              <option value="monthly">Monthly</option>
+            </select>
+          </div>
+          <div>
+            <label style={{ fontSize: 10, color: C.textMuted, textTransform: 'uppercase' }}>Status</label>
+            <select style={{ ...S.input, width: '100%', marginTop: 4 }} value={addForm.status} onChange={e => setAddForm(f => ({ ...f, status: e.target.value }))}>
+              <option value="active">Active</option>
+              <option value="paid_off">Paid Off</option>
+              <option value="unmatched_payments">Unmatched</option>
+              <option value="default">Default</option>
+            </select>
+          </div>
+        </div>
+        <div style={{ marginTop: 8 }}>
+          <label style={{ fontSize: 10, color: C.textMuted, textTransform: 'uppercase' }}>Notes (optional)</label>
+          <input style={{ ...S.input, width: '100%', marginTop: 4 }} value={addForm.notes} onChange={e => setAddForm(f => ({ ...f, notes: e.target.value }))} placeholder="e.g. Position #2 - different ref number" />
+        </div>
+        <button style={{ ...S.btn(), padding: '8px 24px', fontSize: 12, marginTop: 10, background: C.green + '22', color: C.green, border: `1px solid ${C.green}44` }} onClick={addPosition} disabled={!addForm.funder_name || !addForm.payment_amount}>
+          ✓ Add Position
+        </button>
+      </div>
+    )}
+
+    <div style={{ fontSize: 11, color: C.textMuted, textAlign: 'right', marginBottom: 8 }}>Toggle positions to exclude from calculations & export — click Edit to adjust amounts</div>
 
     {positions.map((p, i) => (
       <div key={i} style={{
-        ...S.card, opacity: p._excluded ? 0.35 : 1,
-        borderLeft: `3px solid ${p.status === 'default' || p.status === 'returned' ? C.red : p.status === 'refinanced' ? C.orange : C.cyan}`,
+        ...S.card, opacity: p._excluded ? 0.35 : p.status === 'paid_off' ? 0.55 : 1,
+        borderLeft: `3px solid ${statusColor(p.status)}`,
         transition: 'opacity 0.2s',
       }}>
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start' }}>
           <div style={{ flex: 1 }}>
-            <div style={{ fontSize: 15, fontWeight: 700 }}>{p.funder_name}</div>
+            <div style={{ fontSize: 15, fontWeight: 700 }}>{p.funder_name}{p._manual && <span style={{ fontSize: 10, color: C.green, marginLeft: 6 }}>MANUAL</span>}</div>
             <div style={{ fontSize: 11, color: C.textMuted, marginTop: 2 }}>{p.descriptor || ''}</div>
             <div style={{ display: 'flex', gap: 6, marginTop: 8, flexWrap: 'wrap' }}>
-              {p.status && p.status !== 'active' && <span style={S.badge(p.status === 'default' || p.status === 'returned' ? C.red : C.orange)}>⚠ {p.status.toUpperCase()}</span>}
+              {p.status && p.status !== 'active' && <span style={S.badge(statusColor(p.status))}>{p.status === 'paid_off' ? '✓ PAID OFF' : p.status === 'unmatched_payments' ? '⚠ UNMATCHED' : `⚠ ${p.status.toUpperCase()}`}</span>}
               <ConfidenceBadge level={p.confidence} />
               <span style={S.badge(C.textMuted)}>{(p.frequency || 'weekly').toUpperCase()}</span>
             </div>
           </div>
           <div style={{ textAlign: 'right', minWidth: 180 }}>
-            <div style={{ fontSize: 22, fontWeight: 700, color: C.cyan }}>{fmt(p.monthly_estimate || p.monthly_total)}<span style={{ fontSize: 11, color: C.textMuted }}>/mo</span></div>
-            <div style={{ fontSize: 12, color: C.textSoft }}>{fmt(p.current_payment_amount || p.payment_amount)} × {p.frequency || 'weekly'}</div>
-            <button style={{ ...S.btn(), padding: '4px 14px', fontSize: 11, marginTop: 8 }} onClick={() => togglePosition(i)}>
-              {p._excluded ? '↩ Include' : '✕ Exclude'}
-            </button>
+            {editIdx === i ? (
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 4, alignItems: 'flex-end' }}>
+                <input style={{ ...S.input, width: 120, fontSize: 14, textAlign: 'right' }} type="number" defaultValue={p.current_payment_amount || p.payment_amount || 0}
+                  onChange={e => setPositions(prev => prev.map((pp, idx) => idx === i ? { ...pp, _editAmt: e.target.value } : pp))} />
+                <select style={{ ...S.input, width: 120, fontSize: 11 }} defaultValue={p.frequency || 'weekly'}
+                  onChange={e => setPositions(prev => prev.map((pp, idx) => idx === i ? { ...pp, _editFreq: e.target.value } : pp))}>
+                  <option value="daily">Daily</option><option value="weekly">Weekly</option><option value="biweekly">Bi-weekly</option><option value="monthly">Monthly</option>
+                </select>
+                <div style={{ display: 'flex', gap: 4 }}>
+                  <button style={{ ...S.btn(), padding: '3px 10px', fontSize: 10, color: C.green }} onClick={() => saveEdit(i)}>✓ Save</button>
+                  <button style={{ ...S.btn(), padding: '3px 10px', fontSize: 10 }} onClick={() => setEditIdx(null)}>✕</button>
+                </div>
+              </div>
+            ) : (
+              <>
+                <div style={{ fontSize: 22, fontWeight: 700, color: p.status === 'paid_off' ? '#6b7280' : C.cyan }}>{fmt(p.monthly_estimate || p.monthly_total)}<span style={{ fontSize: 11, color: C.textMuted }}>/mo</span></div>
+                <div style={{ fontSize: 12, color: C.textSoft }}>{fmt(p.current_payment_amount || p.payment_amount)} × {p.frequency || 'weekly'}</div>
+                <div style={{ display: 'flex', gap: 4, justifyContent: 'flex-end', marginTop: 6 }}>
+                  <button style={{ ...S.btn(), padding: '4px 10px', fontSize: 10, color: C.gold }} onClick={() => setEditIdx(i)}>✎ Edit</button>
+                  <button style={{ ...S.btn(), padding: '4px 14px', fontSize: 11 }} onClick={() => togglePosition(i)}>
+                    {p._excluded ? '↩ Include' : '✕ Exclude'}
+                  </button>
+                </div>
+              </>
+            )}
           </div>
         </div>
 

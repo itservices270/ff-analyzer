@@ -32,15 +32,28 @@ Your job is to CROSS-REFERENCE data across all months to identify patterns a sin
 - Match each advance to the payment pattern that followed.
 - Sum total new MCA debt taken on across the entire analysis period.
 
-### 5. REVENUE CLASSIFICATION:
+### 5. REVENUE CLASSIFICATION (CRITICAL — get this right):
+**TRUE REVENUE — Count ALL of these:**
 - Card processing / POS payouts from payment processors = TRUE REVENUE
-- Cash deposits from operations = TRUE REVENUE
-- ACH credits from customers = TRUE REVENUE
-- MCA advance wires = EXCLUDE (debt proceeds)
-- NSF returns, RETURN ITEMs, credit memos = EXCLUDE
-- Staffing company advances = EXCLUDE from revenue
-- Quarterly vendor rebates over $500 = flag separately
+  - THREE SQUARE MAR (Square card processing settlements) — these are LARGE weekly deposits, often $15K-$40K+
+  - LE-USA TECHNOL / LE - USA TECHNOL (cashless vending processor) — these are LARGE biweekly deposits, often $50K-$100K+
+  - Cantaloupe, Inc. PAYMENTS (vending cashless payments) — these are LARGE weekly deposits, often $45K-$75K+
+  - CANTALOUPE PAYOUTS (smaller weekly vending payouts) — typically $1K-$3K
+  - Any other payment processor settlements (Stripe, PayPal, Clover, etc.)
+- Cash deposits from operations = TRUE REVENUE (labeled "DEPOSIT" with no further descriptor)
+- ACH credits from customers / clients = TRUE REVENUE
+- ADVANTECH CORP PAYMENT = TRUE REVENUE (equipment rebate)
+- FERRARA CANDY CO = TRUE REVENUE (vendor rebate/credit)
+- Unified Strategi ePay (rebates) = TRUE REVENUE
+
+**EXCLUDE from revenue:**
+- MCA advance wires = EXCLUDE (debt proceeds, NOT revenue)
+- NSF returns, RETURN ITEMs, credit memos for returned checks = EXCLUDE
+- Staffing company payments/advances = EXCLUDE from revenue
 - Internal account transfers = EXCLUDE
+- Wire transfers FROM known MCA funders = EXCLUDE
+
+**IMPORTANT**: For vending/route businesses, the PRIMARY revenue comes from card processing settlements (THREE SQUARE MAR, LE-USA TECHNOL, Cantaloupe). These are NOT MCA deposits — they are the business's actual revenue from machine transactions. Do NOT confuse these with MCA advance wires. If you see "THREE SQUARE MAR Payment" or "Cantaloupe, Inc. PAYMENTS" or "LE - USA TECHNOL" in credits, these are ALWAYS revenue.
 
 ### 6. TERM LOANS (classify as other_debt_service, NOT mca_positions):
 - Monthly payment with declining balance = amortizing term loan
@@ -49,12 +62,34 @@ Your job is to CROSS-REFERENCE data across all months to identify patterns a sin
 - SBA loans = term loans
 - Equipment leases = term loans
 
-### 7. NOT DEBT (operating expenses):
+### 7. NOT DEBT (operating expenses) — EXPLICIT EXCLUSIONS FROM MCA:
 - Payment processing fees = OpEx
-- Staffing/temp agencies = OpEx (payroll)
+- **AMF Team Inc / AMFTEAM** = STAFFING COMPANY, NOT MCA. This is payroll/labor. Classify as OpEx even if payments are daily.
+- Staffing/temp agencies = OpEx (payroll) — even if they have daily payment patterns like MCAs
 - 401(k)/investment contributions = Owner expense
-- All product/inventory suppliers = COGS
+- All product/inventory suppliers = COGS (ReyesCocaCola, PEPSI BEVERAGECO, AmericanBottling, RedBull, Kitchen Fresh, etc.)
 - Rent, utilities, insurance = OpEx
+- FLEETCOR FUNDING = Fleet fuel card, classify as OpEx/COGS, NOT MCA
+
+### 7b. PAID-OFF DETECTION (CRITICAL):
+- If a funder has CONSISTENT weekly/daily payments in earlier months but ZERO payments in the most recent 1-2 months, mark status as "paid_off" (NOT active).
+- Example: OnDeck Capital paying $3,300/week in Nov-Dec-Jan but $0 in Feb = PAID OFF.
+- If payments stopped MID-MONTH (some payments early in month, none later), check if it looks like final payoff vs default.
+- For paid-off positions, still list them but set status to "paid_off" and note the approximate payoff date.
+
+### 7c. UNMATCHED ADVANCE DEPOSITS (CRITICAL):
+- If you detect a wire transfer deposit FROM a known or suspected MCA funder (especially large wires $50K+) but CANNOT find matching recurring payment debits under the same name:
+  - STILL list it as an MCA position with status "unmatched_payments"
+  - The funder may use DIFFERENT ACH descriptors for debits vs wire deposits
+  - Example: "THE MERCHANT MARKETPLACE CORP" wire deposits may correspond to "Merchant Market 8882711420" ACH debits
+  - Look for ACH debits that START or CHANGE around the same time as the advance wire
+  - If "Merchant Market" debits have MULTIPLE different reference numbers at different amounts, these likely represent SEPARATE MCA positions from the same funder
+- For Merchant Marketplace specifically:
+  - Wire deposits come as "THE MERCHANT MARKETP LACE CORP" or similar
+  - ACH debits come as "Merchant Market 8882711420" with different trailing reference numbers
+  - DIFFERENT reference numbers at DIFFERENT amounts = SEPARATE positions
+  - A $35 debit from "Merchant Market" is likely a fee, not a position payment
+  - Look for the pattern: multiple weekly debits at ~$5,500-$12,000 each from Merchant Market with different ref numbers
 
 ### 8. REMAINING BALANCE ESTIMATION (Critical for negotiations):
 For each MCA position across all months:
@@ -80,18 +115,24 @@ Headway Capital, High Rise Capital, Horizon Funding,
 Ironwood Finance,
 Kapitus, Kinetic Advance, Knight Capital,
 Libertas, Liberty Capital, Limelight Capital,
-Mantis Funding, Melio Funding, Merchant Marketplace, Mulligan Funding,
+Mantis Funding, Melio Funding, Merchant Marketplace, Merchant Market, THE MERCHANT MARKETP, Mulligan Funding,
 National Funding, Newco Capital, Newton Capital,
 ONDECK CAPITAL, Ocelot Capital,
 Payoneer Capital Advance, PayPal Working Capital, Pearl Capital, Pinnacle Funding, Pipe,
-Rapid Finance, Reliant Funding, ROWANADVANCEGROU,
+Rapid Finance, Reliant Funding, ROWANADVANCEGROU, Rowan Advance,
 Shopify Capital, Slice Capital, Square Capital, Swift Capital,
-TBF GRP, Thryve Capital, Tiger Capital,
+TBF GRP, True Business Funding, Thryve Capital, Tiger Capital,
 Unique Funding, United Capital Source,
 Velocity Capital, Vox Funding,
 Wayflyer, World Business Lenders,
 Yellowstone Capital, Zig Capital,
-— and ANY ACH with "CAPITAL", "FUNDING", "ADVANCE", "MCA", "MERCHANT", "FUNDER", "FACTOR" in the description.
+— and ANY ACH with "CAPITAL", "FUNDING", "ADVANCE", "MCA", "FUNDER", "FACTOR" in the description.
+
+**EXPLICIT NOT-MCA LIST (do NOT classify these as MCA positions):**
+- AMF Team Inc / AMFTEAM = staffing company (OpEx)
+- FLEETCOR FUNDING = fleet fuel cards (OpEx)
+- AMERICAN FUNDS INVESTMENT = 401k/investment (owner expense)
+- Any staffing/temp agency with daily payments
 
 ## OUTPUT FORMAT — Return ONLY valid JSON, no markdown fences, no text before or after:
 
@@ -107,6 +148,8 @@ Yellowstone Capital, Zig Capital,
     "true_revenue": 0,
     "card_processing": 0,
     "cash_deposits": 0,
+    "ach_credits": 0,
+    "vendor_credits": 0,
     "cogs": 0,
     "gross_profit": 0,
     "total_opex": 0,
@@ -119,6 +162,14 @@ Yellowstone Capital, Zig Capital,
     "nsf_events": 0,
     "returned_mca_payments": 0
   }],
+
+  "revenue_breakdown": {
+    "card_processing": 0,
+    "cash_deposits": 0,
+    "ach_credits": 0,
+    "vendor_credits": 0,
+    "detail": "string — list the specific processors and their average monthly amounts"
+  },
 
   "revenue_trend": {
     "avg_3_month": 0,
@@ -157,7 +208,7 @@ Yellowstone Capital, Zig Capital,
     "frequency": "weekly",
     "monthly_estimate": 0,
     "confidence": "high|medium|low",
-    "status": "active|modified|refinanced|default",
+    "status": "active|modified|refinanced|default|paid_off|unmatched_payments",
     "first_seen": "YYYY-MM-DD",
     "total_payments_observed": 0,
     "total_returned_observed": 0,
@@ -271,7 +322,7 @@ Yellowstone Capital, Zig Capital,
 ## CALCULATION RULES:
 1. DSR tiers: healthy=0-15%, elevated=15-25%, stressed=25-35%, critical=35-50%, unsustainable=50%+
 2. Monthly MCA estimate = current_weekly × 4.33
-3. Use MOST RECENT month's payment amounts for current calculations.
+3. Use MOST RECENT month's payment amounts for current calculations. But if a position is paid_off, use $0 for current.
 4. DSR = total_mca_monthly / avg_gross_profit × 100. USE GROSS PROFIT as denominator, NOT revenue.
 5. Cross-reference advance wires against payment changes — wire from funder preceded payment increase = refinance, not modification.
 6. Sum all advance wires in the period as "new_debt_in_period".
@@ -281,7 +332,11 @@ Yellowstone Capital, Zig Capital,
 10. recommended_reduction_pct = (current_weekly - sustainable_weekly) / current_weekly × 100
 11. ADB coverage ratio = avg_daily_balance / (weekly_mca / 5)
 12. effective_annual_rate = ((factor_rate - 1) / (term_weeks / 52)) × 100
-13. If seasonal patterns are suspected based on business type or revenue fluctuations, note in seasonal_note.`;
+13. If seasonal patterns are suspected based on business type or revenue fluctuations, note in seasonal_note.
+14. revenue_breakdown averages: card_processing = avg of monthly_summary[].card_processing across all months. Same for cash_deposits, ach_credits, vendor_credits. These MUST sum to approximately equal true_revenue.
+15. For each monthly_summary, card_processing MUST include ALL card processor settlements (THREE SQUARE MAR + LE-USA TECHNOL + Cantaloupe Inc PAYMENTS + CANTALOUPE PAYOUTS). Cash deposits = all generic "DEPOSIT" entries. Vendor credits = FERRARA CANDY, ADVANTECH, etc.
+16. Paid-off positions: Include in the positions array with status "paid_off", current_payment_amount = 0, monthly_estimate = 0. Note the last payment date.
+17. Unmatched advance deposits: Include as positions with status "unmatched_payments". Set payment amount to best estimate if you can match nearby debits, or 0 if truly unknown.`;
 
 export async function POST(request) {
   try {
