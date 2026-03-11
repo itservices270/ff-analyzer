@@ -521,38 +521,42 @@ function MCATab({ a, positions, setPositions, excludedIds, setExcludedIds, other
               </div>
             );
           })}
-          {/* True Free Cash Summary */}
-          {(() => {
-            const activeOther = other.filter((_, i) => !otherExcludedIds.includes(i));
-            const totalOther = activeOther.reduce((s, o) => s + (o.monthly_total || 0), 0);
-            const totalAll = totalMCAMonthly + totalOther + (a.expense_categories?.total_operating_expenses || 0);
-            const trueFree = revenue - totalAll;
-            const totalDebt = totalMCAMonthly + totalOther;
-            const totalDSR = (totalDebt / revenue) * 100;
-            return (
-              <div style={{ background: 'rgba(0,0,0,0.3)', border: '1px solid rgba(255,255,255,0.1)', borderRadius: 10, padding: 16, marginTop: 16 }}>
-                <div style={{ fontSize: 12, letterSpacing: 1, textTransform: 'uppercase', color: 'rgba(232,232,240,0.4)', marginBottom: 14 }}>True Cash Flow Summary (Active Positions)</div>
-                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12, marginBottom: 12 }}>
-                  <div><div style={{ fontSize: 11, color: 'rgba(232,232,240,0.4)', marginBottom: 3 }}>Net Revenue</div><div style={{ fontSize: 16, color: '#00e5ff' }}>{fmt(revenue)}</div></div>
-                  <div><div style={{ fontSize: 11, color: 'rgba(232,232,240,0.4)', marginBottom: 3 }}>MCA Payments</div><div style={{ fontSize: 16, color: '#ef9a9a' }}>− {fmt(totalMCAMonthly)}</div></div>
-                  <div><div style={{ fontSize: 11, color: 'rgba(232,232,240,0.4)', marginBottom: 3 }}>Other Debt Service</div><div style={{ fontSize: 16, color: '#ef9a9a' }}>− {fmt(totalOther)}</div></div>
-                  <div><div style={{ fontSize: 11, color: 'rgba(232,232,240,0.4)', marginBottom: 3 }}>Operating Expenses</div><div style={{ fontSize: 16, color: '#ef9a9a' }}>− {fmt(a.expense_categories?.total_operating_expenses || 0)}</div></div>
-                </div>
-                <div style={{ borderTop: '1px solid rgba(255,255,255,0.08)', paddingTop: 12, display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                  <div>
-                    <div style={{ fontSize: 11, color: 'rgba(232,232,240,0.4)', marginBottom: 3 }}>True Free Cash</div>
-                    <div style={{ fontSize: 24, color: trueFree < 0 ? '#ef5350' : trueFree < 5000 ? '#ff9800' : '#4caf50', fontWeight: 400 }}>{fmt(trueFree)}</div>
-                  </div>
-                  <div style={{ textAlign: 'right' }}>
-                    <div style={{ fontSize: 11, color: 'rgba(232,232,240,0.4)', marginBottom: 3 }}>Total DSR (All Debt)</div>
-                    <div style={{ fontSize: 24, color: totalDSR > 50 ? '#ef5350' : totalDSR > 35 ? '#ff9800' : '#ffd54f' }}>{fmtP(totalDSR)}</div>
-                  </div>
-                </div>
-              </div>
-            );
-          })()}
         </>
       )}
+
+      {/* True Cash Flow Summary — always visible */}
+      {(() => {
+        const activeOther = other.filter((_, i) => !otherExcludedIds.includes(i));
+        const totalOther = activeOther.reduce((s, o) => s + (o.monthly_total || 0), 0);
+        const totalAll = totalMCAMonthly + totalOther + (a.expense_categories?.total_operating_expenses || 0);
+        const trueFree = revenue - totalAll;
+        const totalDebt = totalMCAMonthly + totalOther;
+        const totalDSR = (totalDebt / revenue) * 100;
+        const mcaOnlyDSR = (totalMCAMonthly / revenue) * 100;
+        return (
+          <div style={{ background: 'rgba(0,0,0,0.3)', border: '1px solid rgba(255,255,255,0.1)', borderRadius: 10, padding: 16, marginTop: 16 }}>
+            <div style={{ fontSize: 12, letterSpacing: 1, textTransform: 'uppercase', color: 'rgba(232,232,240,0.4)', marginBottom: 14 }}>True Cash Flow Summary (Active Positions)</div>
+            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12, marginBottom: 12 }}>
+              <div><div style={{ fontSize: 11, color: 'rgba(232,232,240,0.4)', marginBottom: 3 }}>Net Revenue</div><div style={{ fontSize: 18, color: '#00e5ff' }}>{fmt(revenue)}</div></div>
+              <div><div style={{ fontSize: 11, color: 'rgba(232,232,240,0.4)', marginBottom: 3 }}>MCA Payments ({activePositions.length} positions)</div><div style={{ fontSize: 18, color: '#ef9a9a' }}>− {fmt(totalMCAMonthly)}</div></div>
+              {totalOther > 0 && <div><div style={{ fontSize: 11, color: 'rgba(232,232,240,0.4)', marginBottom: 3 }}>Other Debt Service</div><div style={{ fontSize: 18, color: '#ef9a9a' }}>− {fmt(totalOther)}</div></div>}
+              {(a.expense_categories?.total_operating_expenses || 0) > 0 && <div><div style={{ fontSize: 11, color: 'rgba(232,232,240,0.4)', marginBottom: 3 }}>Operating Expenses</div><div style={{ fontSize: 18, color: '#ef9a9a' }}>− {fmt(a.expense_categories.total_operating_expenses)}</div></div>}
+            </div>
+            <div style={{ borderTop: '1px solid rgba(255,255,255,0.08)', paddingTop: 12, display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+              <div>
+                <div style={{ fontSize: 11, color: 'rgba(232,232,240,0.4)', marginBottom: 3 }}>True Free Cash</div>
+                <div style={{ fontSize: 28, color: trueFree < 0 ? '#ef5350' : trueFree < 5000 ? '#ff9800' : '#4caf50', fontWeight: 400 }}>{fmt(trueFree)}</div>
+                <div style={{ fontSize: 11, color: 'rgba(232,232,240,0.35)', marginTop: 3 }}>Available for payroll &amp; liabilities</div>
+              </div>
+              <div style={{ textAlign: 'right' }}>
+                <div style={{ fontSize: 11, color: 'rgba(232,232,240,0.4)', marginBottom: 3 }}>MCA Burden of Revenue</div>
+                <div style={{ fontSize: 28, color: mcaOnlyDSR > 50 ? '#ef5350' : mcaOnlyDSR > 35 ? '#ff9800' : '#ffd54f' }}>{fmtP(mcaOnlyDSR)}</div>
+                {totalOther > 0 && <div style={{ fontSize: 11, color: 'rgba(232,232,240,0.45)', marginTop: 3 }}>Total DSR w/ all debt: {fmtP(totalDSR)}</div>}
+              </div>
+            </div>
+          </div>
+        );
+      })()}
     </div>
   );
 }
@@ -777,11 +781,11 @@ function NegotiationTab({ a, positions, excludedIds, otherExcludedIds, excludedD
       )}
 
       {/* Per-funder revenue take */}
-      {(a.mca_positions || []).length > 0 && (
+      {activePositions.length > 0 && (
         <>
           <div style={S.divider} />
           <div style={S.sectionTitle}>Per-Funder Revenue Take</div>
-          {a.mca_positions.map((p, i) => {
+          {activePositions.map((p, i) => {
             const pct = (p.estimated_monthly_total / (a.revenue.monthly_average_revenue || a.revenue.net_verified_revenue || 1)) * 100;
             return (
               <div key={i} style={{ marginBottom: 14 }}>
