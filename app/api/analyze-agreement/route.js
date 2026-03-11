@@ -205,39 +205,39 @@ RULES:
 
 export async function POST(request) {
   try {
-    const body = await request.json();
-    const { text, images, fileName, model } = body;
+    const contentType = request.headers.get('content-type') || '';
+    let text = null, fileName = 'unknown', selectedModel, pdfBase64 = null;
+
+    if (contentType.includes('multipart/form-data')) {
+      // FormData path — scanned PDF sent directly
+      const formData = await request.formData();
+      const file = formData.get('pdf');
+      const model = formData.get('model') || 'opus';
+      if (!file) return Response.json({ error: 'No file provided' }, { status: 400 });
+      const bytes = await file.arrayBuffer();
+      pdfBase64 = Buffer.from(bytes).toString('base64');
+      fileName = file.name || 'agreement.pdf';
+      selectedModel = model === 'sonnet' ? 'claude-sonnet-4-20250514' : 'claude-opus-4-20250514';
+    } else {
+      // JSON path — text already extracted
+      const body = await request.json();
+      text = body.text;
+      fileName = body.fileName || 'unknown';
+      const model = body.model || 'opus';
+      selectedModel = model === 'sonnet' ? 'claude-sonnet-4-20250514' : 'claude-opus-4-20250514';
+    }
 
     const hasText = text && typeof text === 'string' && text.trim().length >= 200;
-    const hasImages = images && Array.isArray(images) && images.length > 0;
-
-    if (!hasText && !hasImages) {
-      return Response.json({
-        error: 'No agreement data received. Upload a valid PDF.'
-      }, { status: 400 });
+    if (!hasText && !pdfBase64) {
+      return Response.json({ error: 'No agreement data received.' }, { status: 400 });
     }
-
-    const selectedModel = model === 'sonnet' ? 'claude-sonnet-4-20250514' : 'claude-opus-4-20250514';
 
     // Build content blocks
-    const contentBlocks = [{ type: 'text', text: AGREEMENT_PROMPT + '\n\nMCA AGREEMENT:' }];
-
-    if (hasText) {
-      const truncated = text.length > 100000
-        ? text.slice(0, 100000) + '\n[TRUNCATED]'
-        : text;
-      contentBlocks.push({ type: 'text', text: truncated });
+    const contentBlocks = [];
+    if (pdfBase64) {
+      contentBlocks.push({ type: 'document', source: { type: 'base64', media_type: 'application/pdf', data: pdfBase64 } });
     }
-
-    if (hasImages) {
-      const pageImages = images.slice(0, 20);
-      for (const b64 of pageImages) {
-        contentBlocks.push({ type: 'image', source: { type: 'base64', media_type: 'image/jpeg', data: b64 } });
-      }
-      if (!hasText) {
-        contentBlocks.push({ type: 'text', text: '\n[This is a scanned MCA agreement. Read all pages above carefully and extract every contractual term.]' });
-      }
-    }
+    contentBlocks.push({ type: 'text', text: AGREEMENT_PROMPT + (hasText ? '\n\nMCA AGREEMENT TEXT:\n\n' + (text.length > 100000 ? text.slice(0, 100000) + '\n[TRUNCATED]' : text) : '\n\n[Read the PDF document above and extract all agreement terms.]') });
 
     const response = await client.messages.create({
       model: selectedModel,

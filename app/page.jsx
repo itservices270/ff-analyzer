@@ -1333,38 +1333,40 @@ export default function FFAnalyzer() {
     }
   }, []);
 
-  // ─── Vision Scan Single File ───
+  // ─── Scan Single File (sends raw PDF to Claude via FormData) ───
   const scanFile = async (fileId) => {
     const file = files.find(f => f.id === fileId);
     if (!file) return;
     updateFile(fileId, { status: 'scanning' });
     try {
-      const images = await extractPDFImages(file.file);
-      if (!images || images.length === 0) {
-        updateFile(fileId, { status: 'error', error: 'Could not render PDF pages' }); return;
-      }
-      const res = await fetch('/api/analyze', {
-        method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ images, fileName: file.name, model: file.scanModel })
-      });
-      // Handle non-JSON error responses (Vercel body size limit, timeouts, etc.)
+      const fd = new FormData();
+      fd.append('pdf', file.file);
+      fd.append('model', file.scanModel || 'opus');
+
+      const res = await fetch('/api/scan-statement', { method: 'POST', body: fd });
       const contentType = res.headers.get('content-type') || '';
       if (!contentType.includes('application/json')) {
-        const errText = await res.text();
-        updateFile(fileId, { status: 'error', error: `Server error (${res.status}). The scanned PDF may have too many pages — try a shorter statement.` });
+        updateFile(fileId, { status: 'error', error: `Server error (${res.status}). Try again or switch models.` });
         return;
       }
       const data = await res.json();
       if (res.ok && data.success) {
         updateFile(fileId, {
-          status: 'scanned', images, preAnalysis: data.analysis,
+          status: 'scanned',
+          text: data.text_content || '',
+          preAnalysis: data.analysis,
           label: data.analysis?.business_name
-            ? `${data.analysis.business_name} — ${data.analysis?.statement_period?.start || ''}`
+            ? `${data.analysis.business_name} — ${data.analysis?.statement_month || data.analysis?.statement_period?.start || ''}`
             : file.label,
-          info: { account_name: data.analysis?.business_name, statement_month: data.analysis?.statement_period?.start, bank_name: data.analysis?.bank_name }
+          info: {
+            account_name: data.analysis?.business_name,
+            statement_month: data.analysis?.statement_month || data.analysis?.statement_period?.start,
+            bank_name: data.analysis?.bank_name,
+            account_number: data.analysis?.account_last4
+          }
         });
       } else {
-        updateFile(fileId, { status: 'error', error: data.error || 'Vision scan failed' });
+        updateFile(fileId, { status: 'error', error: data.error || 'Scan failed' });
       }
     } catch (e) {
       updateFile(fileId, { status: 'error', error: e.message });
@@ -1395,10 +1397,9 @@ export default function FFAnalyzer() {
     if (!file) return;
     setAgreementFiles(prev => prev.map(f => f.id === fileId ? { ...f, status: 'scanning' } : f));
     try {
-      const images = await extractPDFImages(file.file);
-      setAgreementFiles(prev => prev.map(f => f.id === fileId
-        ? { ...f, status: images?.length > 0 ? 'scanned' : 'error', images: images || null }
-        : f));
+      // For agreements, we just mark as ready for FormData upload during analysis phase
+      // The analyze-agreement route will handle the PDF natively
+      setAgreementFiles(prev => prev.map(f => f.id === fileId ? { ...f, status: 'scanned', useFormData: true } : f));
     } catch {
       setAgreementFiles(prev => prev.map(f => f.id === fileId ? { ...f, status: 'error' } : f));
     }
@@ -1441,8 +1442,21 @@ export default function FFAnalyzer() {
           const af = readyAg[i];
           setLoadingMsg(`Analyzing agreement ${i + 1}/${readyAg.length}: ${af.label}...`);
           try {
-            const agBody = af.text ? { text: af.text, fileName: af.name, model } : { images: af.images, fileName: af.name, model };
-            const { ok: agOk, data: agData } = await safeFetchJson('/api/analyze-agreement', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(agBody) });
+            let agRes;
+            if (af.text) {
+              // Text-based — send as JSON
+              agRes = await safeFetchJson('/api/analyze-agreement', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ text: af.text, fileName: af.name, model }) });
+            } else if (af.useFormData && af.file) {
+              // Scanned — send raw PDF via FormData
+              const fd = new FormData();
+              fd.append('pdf', af.file);
+              fd.append('model', model);
+              agRes = await safeFetchJson('/api/analyze-agreement', { method: 'POST', body: fd });
+            } else {
+              agResults.push({ file: af.name, error: 'No data available — scan or re-upload' });
+              continue;
+            }
+            const { ok: agOk, data: agData } = agRes;
             agResults.push(agOk && agData.success ? { file: af.name, analysis: agData.analysis } : { file: af.name, error: agData.error || 'Failed' });
           } catch (e) { agResults.push({ file: af.name, error: e.message }); }
         }
@@ -1467,7 +1481,7 @@ export default function FFAnalyzer() {
   const statusBadge = (status) => {
     const map = {
       'detecting': { color: C.gold, label: 'DETECTING...' }, 'text-ready': { color: C.green, label: 'TEXT READY' },
-      'needs-scan': { color: C.orange, label: 'NEEDS VISION SCAN' }, 'scanning': { color: C.gold, label: 'SCANNING...' },
+      'needs-scan': { color: C.orange, label: 'NEEDS SCAN' }, 'scanning': { color: C.gold, label: 'SCANNING...' },
       'scanned': { color: C.green, label: 'SCANNED' }, 'error': { color: C.red, label: 'ERROR' },
     };
     const s = map[status] || { color: C.textMuted, label: status };
@@ -1549,7 +1563,7 @@ export default function FFAnalyzer() {
                             <button onClick={() => updateFile(f.id, { scanModel: 'opus' })} style={{ fontSize: 10, padding: '3px 8px', borderRadius: 4, border: 'none', cursor: 'pointer', fontFamily: 'inherit', background: f.scanModel === 'opus' ? C.cyanGlow : 'rgba(255,255,255,0.04)', color: f.scanModel === 'opus' ? C.cyan : C.textMuted }}>Opus</button>
                             <button onClick={() => updateFile(f.id, { scanModel: 'sonnet' })} style={{ fontSize: 10, padding: '3px 8px', borderRadius: 4, border: 'none', cursor: 'pointer', fontFamily: 'inherit', background: f.scanModel === 'sonnet' ? C.goldDim : 'rgba(255,255,255,0.04)', color: f.scanModel === 'sonnet' ? C.gold : C.textMuted }}>Sonnet</button>
                           </div>
-                          <button style={{ ...S.btn('primary'), padding: '6px 14px', fontSize: 11 }} onClick={() => scanFile(f.id)}>Scan with Vision</button>
+                          <button style={{ ...S.btn('primary'), padding: '6px 14px', fontSize: 11 }} onClick={() => scanFile(f.id)}>Scan with Claude</button>
                           <div style={{ fontSize: 10, color: C.textMuted }}>~{f.scanModel === 'opus' ? '$1.50-2.00' : '$0.25-0.40'}</div>
                         </div>
                       )}
@@ -1585,7 +1599,7 @@ export default function FFAnalyzer() {
                       {statusBadge(f.status)}
                     </div>
                     <div style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
-                      {f.status === 'needs-scan' && <button style={{ ...S.btn('primary'), padding: '4px 12px', fontSize: 10 }} onClick={() => scanAgreementFile(f.id)}>Render for Vision (~$0.50)</button>}
+                      {f.status === 'needs-scan' && <button style={{ ...S.btn('primary'), padding: '4px 12px', fontSize: 10 }} onClick={() => scanAgreementFile(f.id)}>Scan with Claude</button>}
                       {f.status === 'scanning' && <span style={{ fontSize: 11, color: C.gold }}>Rendering...</span>}
                       <button style={{ background: 'none', border: 'none', cursor: 'pointer', color: C.red, fontSize: 16, padding: '4px' }} onClick={() => removeAgreementFile(f.id)}>✕</button>
                     </div>
@@ -1598,7 +1612,7 @@ export default function FFAnalyzer() {
           {files.length > 0 && (
             <div style={{ marginTop: 16, fontSize: 11, color: C.textMuted }}>
               {readyFiles.length} of {files.length} statement{files.length !== 1 ? 's' : ''} ready
-              {files.some(f => f.status === 'needs-scan') && ` • ${files.filter(f => f.status === 'needs-scan').length} need vision scan`}
+              {files.some(f => f.status === 'needs-scan') && ` • ${files.filter(f => f.status === 'needs-scan').length} need scanning`}
               {agreementFiles.length > 0 && ` • ${agreementFiles.filter(f => f.status === 'text-ready' || f.status === 'scanned').length}/${agreementFiles.length} agreements ready`}
               {readyFiles.length > 0 && ` • Analysis: ${model === 'opus' ? 'Opus (~$0.45/stmt)' : 'Sonnet (~$0.06/stmt)'}`}
             </div>
