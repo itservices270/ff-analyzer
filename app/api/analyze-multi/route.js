@@ -296,7 +296,9 @@ export async function POST(request) {
     const skipped = [];
     for (let i = 0; i < statements.length; i++) {
       const s = statements[i];
-      if (!s || !s.text || typeof s.text !== 'string' || s.text.trim().length < 100) {
+      const hasText = s && s.text && typeof s.text === 'string' && s.text.trim().length >= 100;
+      const hasImages = s && s.images && Array.isArray(s.images) && s.images.length > 0;
+      if (!hasText && !hasImages) {
         skipped.push(s?.accountLabel || `Statement ${i + 1}`);
       } else {
         validStatements.push(s);
@@ -305,31 +307,40 @@ export async function POST(request) {
 
     if (validStatements.length === 0) {
       return Response.json({
-        error: 'None of the provided statements contained extractable text. They may be image-based PDFs.',
+        error: 'None of the provided statements contained usable data.',
         skipped
       }, { status: 400 });
     }
 
     const selectedModel = model === 'sonnet' ? 'claude-sonnet-4-20250514' : 'claude-opus-4-20250514';
+    const hasAnyImages = validStatements.some(s => s.images && s.images.length > 0);
 
-    // Build combined text with clear section labels
-    const combined = validStatements.map((s, i) =>
-      `\n${'='.repeat(60)}\nSTATEMENT ${i + 1}: ${s.accountLabel || 'Unknown'} — ${s.month || 'Unknown'}\n${'='.repeat(60)}\n${s.text}`
-    ).join('\n\n');
+    // Build content blocks — mixed text and vision
+    const contentBlocks = [{ type: 'text', text: `${MULTI_PROMPT}\n\nSTATEMENTS TO ANALYZE (${validStatements.length} total):` }];
 
-    // Truncate if needed — scale limit with number of statements
-    const maxChars = Math.min(180000, 40000 * validStatements.length);
-    const truncated = combined.length > maxChars
-      ? combined.slice(0, maxChars) + '\n[TRUNCATED]'
-      : combined;
+    for (let i = 0; i < validStatements.length; i++) {
+      const s = validStatements[i];
+      contentBlocks.push({ type: 'text', text: `\n${'='.repeat(60)}\nSTATEMENT ${i + 1}: ${s.accountLabel || 'Unknown'} — ${s.month || 'Unknown'}\n${'='.repeat(60)}` });
+
+      if (s.images && s.images.length > 0) {
+        // Image-based statement — send page images (cap at 10 per statement)
+        const pageImages = s.images.slice(0, 10);
+        for (const b64 of pageImages) {
+          contentBlocks.push({ type: 'image', source: { type: 'base64', media_type: 'image/jpeg', data: b64 } });
+        }
+        contentBlocks.push({ type: 'text', text: '[Scanned statement — read images above]' });
+      } else if (s.text) {
+        // Text-based — truncate per statement
+        const maxPerStmt = Math.min(40000, Math.floor(180000 / validStatements.length));
+        const truncText = s.text.length > maxPerStmt ? s.text.slice(0, maxPerStmt) + '\n[TRUNCATED]' : s.text;
+        contentBlocks.push({ type: 'text', text: truncText });
+      }
+    }
 
     const response = await client.messages.create({
       model: selectedModel,
       max_tokens: 16000,
-      messages: [{
-        role: 'user',
-        content: `${MULTI_PROMPT}\n\nSTATEMENTS TO ANALYZE (${validStatements.length} total):\n${truncated}`
-      }]
+      messages: [{ role: 'user', content: contentBlocks }]
     });
 
     const rawText = response.content.filter(b => b.type === 'text').map(b => b.text).join('');

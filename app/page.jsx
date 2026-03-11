@@ -29,6 +29,30 @@ async function extractPDFText(file) {
   return text;
 }
 
+// ─── PDF page-to-image for scanned/image-based PDFs ───
+async function extractPDFImages(file, maxPages = 20) {
+  const pdfjsLib = await loadPdfJs();
+  const buf = await file.arrayBuffer();
+  const pdf = await pdfjsLib.getDocument({ data: buf }).promise;
+  const images = [];
+  const pages = Math.min(pdf.numPages, maxPages);
+  for (let i = 1; i <= pages; i++) {
+    const page = await pdf.getPage(i);
+    const scale = 2.0; // High-res for OCR accuracy
+    const viewport = page.getViewport({ scale });
+    const canvas = document.createElement('canvas');
+    canvas.width = viewport.width;
+    canvas.height = viewport.height;
+    const ctx = canvas.getContext('2d');
+    await page.render({ canvasContext: ctx, viewport }).promise;
+    // Convert to JPEG base64 (smaller than PNG, good enough for vision)
+    const dataUrl = canvas.toDataURL('image/jpeg', 0.85);
+    const base64 = dataUrl.split(',')[1];
+    images.push(base64);
+  }
+  return images;
+}
+
 // ─── Design Tokens ───
 const C = {
   bg: '#0a0e14',
@@ -1294,10 +1318,22 @@ export default function FFAnalyzer() {
         try {
           const text = await extractPDFText(f.file);
           if (text.trim().length > 100) {
-            statements.push({ text, accountLabel: f.name, month: f.name });
+            statements.push({ text, accountLabel: f.name, month: f.name, mode: 'text' });
           } else {
-            setError(`${f.name} appears to be scanned/image-based. Text extraction returned minimal content. Try a digitally-generated bank statement PDF.`);
-            setLoading(false); return;
+            // Scanned/image-based PDF — fall back to vision
+            setLoadingMsg(`${f.name} is scanned — rendering pages as images for vision analysis...`);
+            try {
+              const images = await extractPDFImages(f.file);
+              if (images.length > 0) {
+                statements.push({ images, accountLabel: f.name, month: f.name, mode: 'vision' });
+              } else {
+                setError(`${f.name}: Could not extract text or render images.`);
+                setLoading(false); return;
+              }
+            } catch (imgErr) {
+              setError(`${f.name}: Failed to render scanned PDF — ${imgErr.message}`);
+              setLoading(false); return;
+            }
           }
         } catch (e) {
           setError(`Failed to extract text from ${f.name}: ${e.message}`);
@@ -1305,12 +1341,13 @@ export default function FFAnalyzer() {
         }
       }
 
-      setLoadingMsg(`Analyzing ${statements.length} statement${statements.length > 1 ? 's' : ''} with ${model === 'opus' ? 'Opus (deep analysis)' : 'Sonnet (fast)'}...`);
+      const hasVision = statements.some(s => s.mode === 'vision');
+      setLoadingMsg(`Analyzing ${statements.length} statement${statements.length > 1 ? 's' : ''} with ${model === 'opus' ? 'Opus' : 'Sonnet'}${hasVision ? ' (includes vision for scanned PDFs)' : ''}...`);
 
       const endpoint = statements.length > 1 ? '/api/analyze-multi' : '/api/analyze';
       const body = statements.length > 1
-        ? { statements, model }
-        : { text: statements[0].text, fileName: files[0].name, model };
+        ? { statements: statements.map(s => ({ text: s.text || '', images: s.images || null, accountLabel: s.accountLabel, month: s.month })), model }
+        : { text: statements[0].text || '', images: statements[0].images || null, fileName: files[0].name, model };
 
       const res = await fetch(endpoint, {
         method: 'POST',
@@ -1337,14 +1374,24 @@ export default function FFAnalyzer() {
           setLoadingMsg(`Analyzing agreement ${i + 1}/${agreementFiles.length}: ${af.name}...`);
           try {
             const agText = await extractPDFText(af.file);
-            if (agText.trim().length < 200) {
-              agResults.push({ file: af.name, error: 'Image-based PDF — could not extract text' });
-              continue;
+            let agBody;
+            if (agText.trim().length >= 200) {
+              agBody = { text: agText, fileName: af.name, model };
+            } else {
+              // Scanned agreement — use vision
+              setLoadingMsg(`Agreement ${af.name} is scanned — rendering for vision...`);
+              const agImages = await extractPDFImages(af.file);
+              if (agImages.length > 0) {
+                agBody = { images: agImages, fileName: af.name, model };
+              } else {
+                agResults.push({ file: af.name, error: 'Could not extract text or images' });
+                continue;
+              }
             }
             const agRes = await fetch('/api/analyze-agreement', {
               method: 'POST',
               headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({ text: agText, fileName: af.name, model })
+              body: JSON.stringify(agBody)
             });
             const agData = await agRes.json();
             if (agRes.ok && agData.success) {

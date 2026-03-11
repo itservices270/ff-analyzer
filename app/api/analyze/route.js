@@ -279,41 +279,44 @@ Yellowstone Capital, Zig Capital,
 export async function POST(request) {
   try {
     const body = await request.json();
-    const { text, fileName, model } = body;
+    const { text, images, fileName, model } = body;
 
-    if (!text || typeof text !== 'string') {
+    const hasText = text && typeof text === 'string' && text.trim().length >= 100;
+    const hasImages = images && Array.isArray(images) && images.length > 0;
+
+    if (!hasText && !hasImages) {
       return Response.json({
-        error: 'No statement text received. Please upload a valid PDF.'
+        error: 'No statement data received. Upload a valid PDF (text-based or scanned).'
       }, { status: 400 });
     }
-
-    if (text.trim().length < 100) {
-      return Response.json({
-        error: 'PDF appears to be image-based or contains minimal extractable text. Try uploading a digitally-generated bank statement PDF (not a scanned image).'
-      }, { status: 400 });
-    }
-
-    // Validate payload size before sending to API
-    const textBytes = new TextEncoder().encode(text).length;
-    if (textBytes > 25 * 1024 * 1024) {
-      return Response.json({
-        error: 'Statement text exceeds maximum size. Try uploading fewer pages.'
-      }, { status: 413 });
-    }
-
-    const truncated = text.length > 80000
-      ? text.slice(0, 80000) + '\n[TRUNCATED - first 80k chars analyzed]'
-      : text;
 
     const selectedModel = model === 'sonnet' ? 'claude-sonnet-4-20250514' : 'claude-opus-4-20250514';
+
+    // Build content blocks — text or vision
+    const contentBlocks = [{ type: 'text', text: ANALYSIS_PROMPT + '\n\nBANK STATEMENT:' }];
+
+    if (hasText) {
+      const truncated = text.length > 80000
+        ? text.slice(0, 80000) + '\n[TRUNCATED - first 80k chars analyzed]'
+        : text;
+      contentBlocks.push({ type: 'text', text: truncated });
+    }
+
+    if (hasImages) {
+      // Cap at 15 pages for vision to control costs
+      const pageImages = images.slice(0, 15);
+      for (const b64 of pageImages) {
+        contentBlocks.push({ type: 'image', source: { type: 'base64', media_type: 'image/jpeg', data: b64 } });
+      }
+      if (!hasText) {
+        contentBlocks.push({ type: 'text', text: '\n[This is a scanned/image-based bank statement. Read the images above carefully and extract all data.]' });
+      }
+    }
 
     const response = await client.messages.create({
       model: selectedModel,
       max_tokens: 16000,
-      messages: [{
-        role: 'user',
-        content: `${ANALYSIS_PROMPT}\n\nBANK STATEMENT TEXT:\n\n${truncated}`
-      }]
+      messages: [{ role: 'user', content: contentBlocks }]
     });
 
     const rawText = response.content.filter(b => b.type === 'text').map(b => b.text).join('');

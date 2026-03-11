@@ -206,33 +206,43 @@ RULES:
 export async function POST(request) {
   try {
     const body = await request.json();
-    const { text, fileName, model } = body;
+    const { text, images, fileName, model } = body;
 
-    if (!text || typeof text !== 'string') {
+    const hasText = text && typeof text === 'string' && text.trim().length >= 200;
+    const hasImages = images && Array.isArray(images) && images.length > 0;
+
+    if (!hasText && !hasImages) {
       return Response.json({
-        error: 'No agreement text received. Please upload a valid PDF.'
+        error: 'No agreement data received. Upload a valid PDF.'
       }, { status: 400 });
     }
-
-    if (text.trim().length < 200) {
-      return Response.json({
-        error: 'PDF appears to be image-based or contains minimal extractable text. MCA agreements must be text-based PDFs for analysis.'
-      }, { status: 400 });
-    }
-
-    const truncated = text.length > 100000
-      ? text.slice(0, 100000) + '\n[TRUNCATED - first 100k chars analyzed]'
-      : text;
 
     const selectedModel = model === 'sonnet' ? 'claude-sonnet-4-20250514' : 'claude-opus-4-20250514';
+
+    // Build content blocks
+    const contentBlocks = [{ type: 'text', text: AGREEMENT_PROMPT + '\n\nMCA AGREEMENT:' }];
+
+    if (hasText) {
+      const truncated = text.length > 100000
+        ? text.slice(0, 100000) + '\n[TRUNCATED]'
+        : text;
+      contentBlocks.push({ type: 'text', text: truncated });
+    }
+
+    if (hasImages) {
+      const pageImages = images.slice(0, 20);
+      for (const b64 of pageImages) {
+        contentBlocks.push({ type: 'image', source: { type: 'base64', media_type: 'image/jpeg', data: b64 } });
+      }
+      if (!hasText) {
+        contentBlocks.push({ type: 'text', text: '\n[This is a scanned MCA agreement. Read all pages above carefully and extract every contractual term.]' });
+      }
+    }
 
     const response = await client.messages.create({
       model: selectedModel,
       max_tokens: 12000,
-      messages: [{
-        role: 'user',
-        content: `${AGREEMENT_PROMPT}\n\nMCA AGREEMENT TEXT:\n\n${truncated}`
-      }]
+      messages: [{ role: 'user', content: contentBlocks }]
     });
 
     const rawText = response.content.filter(b => b.type === 'text').map(b => b.text).join('');
