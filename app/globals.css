@@ -1,0 +1,39 @@
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+:root {
+  --bg: linear-gradient(135deg, #0a0a0f 0%, #1a1a2e 50%, #0a0a0f 100%);
+  --card: rgba(255,255,255,0.07);
+  --card-hover: rgba(255,255,255,0.11);
+  --border: rgba(255,255,255,0.12);
+  --border-light: rgba(255,255,255,0.06);
+  --teal: #00e5ff;
+  --teal-mid: #00acc1;
+  --gold: #EAD068;
+  --gold-mid: #CFA529;
+  --text: #e8e8f0;
+  --text-dim: rgba(232,232,240,0.6);
+  --text-faint: rgba(232,232,240,0.35);
+  --green: #4caf50;
+  --amber: #f9a825;
+  --red: #ef5350;
+  --orange: #ff7043;
+  --radius: 12px;
+  --radius-sm: 8px;
+}
+
+html, body {
+  min-height: 100vh;
+  background: var(--bg);
+  color: var(--text);
+  font-family: 'Questrial', system-ui, sans-serif;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* Scrollbar */
+::-webkit-scrollbar { width: 6px; height: 6px; }
+::-webkit-scrollbar-track { background: rgba(255,255,255,0.03); }
+::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.15); border-radius: 3px; }
+::-webkit-scrollbar-thumb:hover { background: rgba(0,229,255,0.3); }
+
+/* Selection */
+::selection { background: rgba(0,229,255,0.2); color: #fff; }
