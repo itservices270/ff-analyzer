@@ -827,52 +827,109 @@ function AgreementsTab({ agreementResults }) {
     <div>
       <div style={S.sectionTitle}>Analyzed Agreements ({agreementResults.length})</div>
       {agreementResults.map((ag, i) => {
+        // API returns nested structure — unwrap all sub-objects
         const d = ag.analysis || ag;
+        const ft = d.financial_terms || {};
+        const fa = d.fee_analysis || {};
+        const sc = d.state_compliance || {};
+        const sa = d.stacking_analysis || {};
+        const nl = d.negotiation_leverage || {};
+        const rv = d.revenue_verification || {};
+
+        // Derive flat fields from nested structure
+        const purchasePrice   = ft.purchase_price || 0;
+        const purchasedAmt    = ft.purchased_amount || 0;
+        const factorRate      = ft.factor_rate || d.factor_rate || 0;
+        const weeklyPayment   = ft.specified_weekly_payment || ft.specified_daily_payment * 7 || 0;
+        const specifiedPct    = ft.specified_receivable_percentage || rv.withhold_percentage_stated || 0;
+        const originationFee  = fa.origination_fee || 0;
+        const netProceeds     = fa.net_proceeds_to_merchant || (purchasePrice - (fa.total_fees || 0)) || 0;
+        const priorBalance    = (fa.other_fees || []).find(f => /prior|buyout|payoff/i.test(f.name))?.amount || 0;
+        const govLaw          = sc.governing_law_state || d.governing_law || '—';
+
+        // Clause flags — search problematic_clauses array
+        const clauses = d.problematic_clauses || [];
+        const protections = d.merchant_protections || [];
+        const hasRecon       = protections.some(p => p.protection_type === 'reconciliation') || sa.notes?.toLowerCase().includes('reconcil');
+        const hasAntiStack   = sa.has_anti_stacking_clause || clauses.some(c => c.clause_type === 'anti_stacking');
+        const hasCOJ         = clauses.some(c => c.clause_type === 'coj');
+        const hasArbitration = clauses.some(c => c.clause_type === 'arbitration') || d.agreement_type?.includes('arbitration');
+        const hasJuryWaiver  = clauses.some(c => c.clause_type === 'jury_waiver');
+        const hasPG          = clauses.some(c => c.clause_type === 'personal_guarantee');
+        const hasUCC         = clauses.some(c => /ucc/i.test(c.clause_type));
+
+        // COJ enforceability
+        const cojClause = clauses.find(c => c.clause_type === 'coj');
+        const cojUnenforceable = cojClause?.enforceability === 'unenforceable' || (hasCOJ && ['NY','New York'].includes(govLaw));
+
+        // Reconciliation details
+        const reconProtection = protections.find(p => p.protection_type === 'reconciliation');
+        const reconDetails = reconProtection?.description || reconProtection?.merchant_action_required || '';
+
+        // Anti-stacking details
+        const antiStackClause = clauses.find(c => c.clause_type === 'anti_stacking');
+        const antiStackDetails = antiStackClause?.clause_text_summary || sa.anti_stacking_text_summary || '';
+
+        // Leverage notes
+        const leverageNotes = nl.top_leverage_points?.join(' · ') || nl.recommended_approach || '';
+
+        // Red flags
+        const redFlags = d.contract_red_flags || [];
+
         return (
-          <div key={i} style={{ ...S.card, background: 'rgba(255,255,255,0.04)' }}>
+          <div key={i} style={{ ...S.card, background: 'rgba(255,255,255,0.04)', marginBottom: 24 }}>
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 12 }}>
               <div>
                 <div style={{ fontSize: 16, color: '#e8e8f0', marginBottom: 4 }}>{d.funder_name || d.buyer_name || 'Unknown Funder'}</div>
-                <div style={{ fontSize: 12, color: 'rgba(232,232,240,0.4)' }}>Dated: {d.agreement_date || d.effective_date || '—'} · {ag.fileName || ''}</div>
+                <div style={{ fontSize: 12, color: 'rgba(232,232,240,0.4)' }}>Dated: {d.agreement_date || '—'} · {ag.fileName || ''}</div>
               </div>
-              <span style={S.tag('gold')}>{d.governing_law || '—'} law</span>
+              <span style={S.tag('gold')}>{govLaw} LAW</span>
             </div>
 
             <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(160px, 1fr))', gap: 10, marginBottom: 12 }}>
-              <div><div style={S.statLabel}>Purchase Price</div><div style={{ fontSize: 15, color: '#00e5ff' }}>{fmt(d.purchase_price || d.purchase_amount)}</div></div>
-              <div><div style={S.statLabel}>Payback Amount</div><div style={{ fontSize: 15, color: '#ef9a9a' }}>{fmt(d.purchased_amount || d.payback_amount)}</div></div>
-              <div><div style={S.statLabel}>Factor Rate</div><div style={{ fontSize: 15, color: '#e8e8f0' }}>{d.factor_rate || '—'}</div></div>
-              <div><div style={S.statLabel}>Weekly Payment</div><div style={{ fontSize: 15, color: '#ffd54f' }}>{fmtD(d.weekly_payment || d.periodic_amount)}</div></div>
-              <div><div style={S.statLabel}>Specified %</div><div style={{ fontSize: 15, color: '#e8e8f0' }}>{d.specified_percentage ? d.specified_percentage + '%' : '—'}</div></div>
-              <div><div style={S.statLabel}>Origination Fee</div><div style={{ fontSize: 15, color: '#e8e8f0' }}>{fmt(d.origination_fee)}</div></div>
-              <div><div style={S.statLabel}>Net to Merchant</div><div style={{ fontSize: 15, color: '#81c784' }}>{fmt(d.net_to_merchant || d.net_funded)}</div></div>
-              <div><div style={S.statLabel}>Prior Balance</div><div style={{ fontSize: 15, color: (d.prior_balance || 0) > 0 ? '#ff9800' : '#e8e8f0' }}>{fmt(d.prior_balance)}</div></div>
+              <div><div style={S.statLabel}>Purchase Price</div><div style={{ fontSize: 15, color: '#00e5ff' }}>{fmt(purchasePrice)}</div></div>
+              <div><div style={S.statLabel}>Payback Amount</div><div style={{ fontSize: 15, color: '#ef9a9a' }}>{fmt(purchasedAmt)}</div></div>
+              <div><div style={S.statLabel}>Factor Rate</div><div style={{ fontSize: 15, color: '#e8e8f0' }}>{factorRate ? factorRate.toFixed(2) : '—'}</div></div>
+              <div><div style={S.statLabel}>Weekly Payment</div><div style={{ fontSize: 15, color: '#ffd54f' }}>{fmtD(weeklyPayment)}</div></div>
+              <div><div style={S.statLabel}>Specified %</div><div style={{ fontSize: 15, color: '#e8e8f0' }}>{specifiedPct ? specifiedPct + '%' : '—'}</div></div>
+              <div><div style={S.statLabel}>Origination Fee</div><div style={{ fontSize: 15, color: '#e8e8f0' }}>{fmt(originationFee)}</div></div>
+              <div><div style={S.statLabel}>Net to Merchant</div><div style={{ fontSize: 15, color: '#81c784' }}>{fmt(netProceeds)}</div></div>
+              <div><div style={S.statLabel}>Prior Balance</div><div style={{ fontSize: 15, color: priorBalance > 0 ? '#ff9800' : '#e8e8f0' }}>{fmt(priorBalance)}</div></div>
             </div>
 
             <div style={S.divider} />
             <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginBottom: 8 }}>
-              {d.has_reconciliation && <span style={S.tag('green')}>✓ Reconciliation</span>}
-              {d.has_anti_stacking && <span style={S.tag('amber')}>Anti-Stacking</span>}
-              {d.has_coj && <span style={S.tag('red')}>COJ</span>}
-              {d.has_arbitration && <span style={{ ...S.tag('grey'), background: 'rgba(156,39,176,0.15)', color: '#ce93d8', border: '1px solid rgba(156,39,176,0.25)' }}>Arbitration</span>}
-              {d.has_jury_waiver && <span style={S.tag('grey')}>Jury Waiver</span>}
-              {d.has_personal_guarantee && <span style={S.tag('red')}>PG</span>}
-              {d.has_ucc && <span style={S.tag('grey')}>UCC Filed</span>}
+              {hasRecon      && <span style={S.tag('green')}>✓ Reconciliation</span>}
+              {hasAntiStack  && <span style={S.tag('amber')}>Anti-Stacking</span>}
+              {hasCOJ        && <span style={cojUnenforceable ? { ...S.tag('red'), textDecoration: 'line-through', opacity: 0.7 } : S.tag('red')}>COJ{cojUnenforceable ? ' (VOID)' : ''}</span>}
+              {hasArbitration && <span style={{ ...S.tag('grey'), background: 'rgba(156,39,176,0.15)', color: '#ce93d8', border: '1px solid rgba(156,39,176,0.25)' }}>Arbitration</span>}
+              {hasJuryWaiver && <span style={S.tag('grey')}>Jury Waiver</span>}
+              {hasPG         && <span style={S.tag('red')}>PG</span>}
+              {hasUCC        && <span style={S.tag('grey')}>UCC Filed</span>}
             </div>
 
-            {d.reconciliation_details && (
+            {reconDetails && (
               <div style={{ display: 'flex', gap: 8, alignItems: 'flex-start', padding: '10px 14px', borderRadius: 8, background: 'rgba(0,229,255,0.06)', border: '1px solid rgba(0,229,255,0.15)', marginBottom: 8, fontSize: 12, color: '#80deea', lineHeight: 1.6 }}>
-                <span>📋</span><div><strong>Reconciliation:</strong> {d.reconciliation_details}</div>
+                <span>📋</span><div><strong>Reconciliation:</strong> {reconDetails}</div>
               </div>
             )}
-            {d.anti_stacking_details && (
+            {antiStackDetails && (
               <div style={{ display: 'flex', gap: 8, alignItems: 'flex-start', padding: '10px 14px', borderRadius: 8, background: 'rgba(249,168,37,0.06)', border: '1px solid rgba(249,168,37,0.15)', marginBottom: 8, fontSize: 12, color: '#ffd54f', lineHeight: 1.6 }}>
-                <span>⚠️</span><div><strong>Anti-Stacking:</strong> {d.anti_stacking_details}</div>
+                <span>⚠️</span><div><strong>Anti-Stacking:</strong> {antiStackDetails}</div>
               </div>
             )}
-            {d.leverage_notes && (
-              <div style={{ display: 'flex', gap: 8, alignItems: 'flex-start', padding: '10px 14px', borderRadius: 8, background: 'rgba(0,229,255,0.06)', border: '1px solid rgba(0,229,255,0.15)', fontSize: 12, color: '#80deea', lineHeight: 1.6 }}>
-                <span>💡</span><div><strong>Leverage:</strong> {d.leverage_notes}</div>
+            {leverageNotes && (
+              <div style={{ display: 'flex', gap: 8, alignItems: 'flex-start', padding: '10px 14px', borderRadius: 8, background: 'rgba(0,229,255,0.06)', border: '1px solid rgba(0,229,255,0.15)', marginBottom: 8, fontSize: 12, color: '#80deea', lineHeight: 1.6 }}>
+                <span>💡</span><div><strong>Leverage:</strong> {leverageNotes}</div>
+              </div>
+            )}
+            {redFlags.length > 0 && (
+              <div style={{ marginTop: 8 }}>
+                {redFlags.filter(f => f.severity === 'critical').map((f, j) => (
+                  <div key={j} style={{ display: 'flex', gap: 8, alignItems: 'flex-start', padding: '8px 14px', borderRadius: 8, background: 'rgba(239,83,80,0.06)', border: '1px solid rgba(239,83,80,0.2)', marginBottom: 6, fontSize: 12, color: '#ef9a9a', lineHeight: 1.5 }}>
+                    <span>🚩</span><div><strong>{f.flag}:</strong> {f.explanation}</div>
+                  </div>
+                ))}
               </div>
             )}
           </div>
@@ -1342,13 +1399,26 @@ export default function FFAnalyzer() {
   };
 
   const runCrossReference = async () => {
-    if (!result?.analysis || agreementResults.length === 0) return;
+    if (!result?.analysis) { alert('Run bank statement analysis first.'); return; }
+    if (agreementResults.length === 0) { alert('Analyze at least one MCA agreement first.'); return; }
     setCrossRefLoading(true);
+    setCrossRefResult(null);
     try {
-      const res = await fetch('/api/cross-reference', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ bankAnalysis: result.analysis, agreements: agreementResults.map(a => a.analysis), model }) });
+      const res = await fetch('/api/cross-reference', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ bankAnalysis: result.analysis, agreements: agreementResults.map(a => a.analysis), model })
+      });
       const data = await res.json();
-      if (data.analysis) setCrossRefResult(data);
-    } catch (err) { console.error('Cross-ref error:', err); }
+      if (data.analysis) {
+        setCrossRefResult(data);
+        setActiveTab(6);
+      } else {
+        alert('Cross-reference failed: ' + (data.error || 'Unknown error'));
+      }
+    } catch (err) {
+      alert('Cross-reference request failed: ' + err.message);
+    }
     setCrossRefLoading(false);
   };
 
