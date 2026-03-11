@@ -1871,7 +1871,19 @@ export default function FFAnalyzer() {
       clearInterval(interval);
       if (!res.ok || data.error) { setError(data.error || 'Analysis failed'); setLoading(false); return; }
       setResult(data);
-      setPositions((data.analysis.mca_positions || []).map((p, i) => ({ ...p, _id: i })));
+      setPositions((data.analysis.mca_positions || []).map((p, i) => {
+        const pa = parseFloat(p.payment_amount_current || p.payment_amount) || 0;
+        const freq = p.frequency || 'weekly';
+        const freqMult = freq === 'daily' ? 22 : freq === 'bi-weekly' ? 2.17 : freq === 'monthly' ? 1 : 4.33;
+        const computedMonthly = pa * freqMult;
+        return {
+          ...p,
+          _id: i,
+          estimated_monthly_total: (p.estimated_monthly_total && p.estimated_monthly_total > 0)
+            ? p.estimated_monthly_total
+            : computedMonthly,
+        };
+      }));
       setExcludedIds([]);
       setOtherExcludedIds([]);
       setActiveTab(0);
