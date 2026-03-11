@@ -30,7 +30,7 @@ async function extractPDFText(file) {
 }
 
 // ─── PDF page-to-image for scanned/image-based PDFs ───
-async function extractPDFImages(file, maxPages = 20) {
+async function extractPDFImages(file, maxPages = 10) {
   const pdfjsLib = await loadPdfJs();
   const buf = await file.arrayBuffer();
   const pdf = await pdfjsLib.getDocument({ data: buf }).promise;
@@ -38,15 +38,14 @@ async function extractPDFImages(file, maxPages = 20) {
   const pages = Math.min(pdf.numPages, maxPages);
   for (let i = 1; i <= pages; i++) {
     const page = await pdf.getPage(i);
-    const scale = 2.0; // High-res for OCR accuracy
+    const scale = 1.5; // Balance between readability and payload size
     const viewport = page.getViewport({ scale });
     const canvas = document.createElement('canvas');
     canvas.width = viewport.width;
     canvas.height = viewport.height;
     const ctx = canvas.getContext('2d');
     await page.render({ canvasContext: ctx, viewport }).promise;
-    // Convert to JPEG base64 (smaller than PNG, good enough for vision)
-    const dataUrl = canvas.toDataURL('image/jpeg', 0.85);
+    const dataUrl = canvas.toDataURL('image/jpeg', 0.65);
     const base64 = dataUrl.split(',')[1];
     images.push(base64);
   }
@@ -1259,6 +1258,18 @@ function CrossReferenceTab({ xref }) {
   </div>);
 }
 
+// ─── Safe JSON fetch (handles Vercel non-JSON errors) ───
+async function safeFetchJson(url, options) {
+  const res = await fetch(url, options);
+  const contentType = res.headers.get('content-type') || '';
+  if (!contentType.includes('application/json')) {
+    const text = await res.text();
+    return { ok: false, data: { error: `Server error (${res.status}): Request may be too large or timed out.` } };
+  }
+  const data = await res.json();
+  return { ok: res.ok, data };
+}
+
 // ─── Main Component ───
 const TABS = ['Revenue', 'Trend', 'MCA Positions', 'Risk & Capacity', 'Negotiation Intel', 'Agreements', 'Cross-Reference', 'Confidence', 'Export'];
 
@@ -1336,6 +1347,13 @@ export default function FFAnalyzer() {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ images, fileName: file.name, model: file.scanModel })
       });
+      // Handle non-JSON error responses (Vercel body size limit, timeouts, etc.)
+      const contentType = res.headers.get('content-type') || '';
+      if (!contentType.includes('application/json')) {
+        const errText = await res.text();
+        updateFile(fileId, { status: 'error', error: `Server error (${res.status}). The scanned PDF may have too many pages — try a shorter statement.` });
+        return;
+      }
       const data = await res.json();
       if (res.ok && data.success) {
         updateFile(fileId, {
@@ -1408,9 +1426,8 @@ export default function FFAnalyzer() {
         ? { statements, model }
         : { text: statements[0].text || '', images: statements[0].images || null, fileName: readyFiles[0].name, model };
 
-      const res = await fetch(endpoint, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
-      const data = await res.json();
-      if (!res.ok || data.error) { setError(data.error || 'Analysis failed'); setLoading(false); return; }
+      const { ok, data } = await safeFetchJson(endpoint, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+      if (!ok || data.error) { setError(data.error || 'Analysis failed'); setLoading(false); return; }
 
       setResult(data);
       setPositions((data.analysis?.mca_positions || []).map(p => ({ ...p, _excluded: false })));
@@ -1425,9 +1442,8 @@ export default function FFAnalyzer() {
           setLoadingMsg(`Analyzing agreement ${i + 1}/${readyAg.length}: ${af.label}...`);
           try {
             const agBody = af.text ? { text: af.text, fileName: af.name, model } : { images: af.images, fileName: af.name, model };
-            const agRes = await fetch('/api/analyze-agreement', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(agBody) });
-            const agData = await agRes.json();
-            agResults.push(agRes.ok && agData.success ? { file: af.name, analysis: agData.analysis } : { file: af.name, error: agData.error || 'Failed' });
+            const { ok: agOk, data: agData } = await safeFetchJson('/api/analyze-agreement', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(agBody) });
+            agResults.push(agOk && agData.success ? { file: af.name, analysis: agData.analysis } : { file: af.name, error: agData.error || 'Failed' });
           } catch (e) { agResults.push({ file: af.name, error: e.message }); }
         }
         setAgreementResults(agResults);
@@ -1437,9 +1453,8 @@ export default function FFAnalyzer() {
         if (validAg.length > 0 && data.analysis) {
           setLoadingMsg('Cross-referencing agreements against bank statements...');
           try {
-            const xrefRes = await fetch('/api/cross-reference', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ bankAnalysis: data.analysis, agreementAnalyses: validAg, model }) });
-            const xrefData = await xrefRes.json();
-            if (xrefRes.ok && xrefData.success) setCrossRefResult(xrefData);
+            const { ok: xOk, data: xrefData } = await safeFetchJson('/api/cross-reference', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ bankAnalysis: data.analysis, agreementAnalyses: validAg, model }) });
+            if (xOk && xrefData.success) setCrossRefResult(xrefData);
           } catch (e) { console.error('Cross-ref error:', e); }
         }
       }
