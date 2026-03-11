@@ -231,9 +231,7 @@ export async function POST(request) {
         imageEntries.sort((a, b) => parseInt(a.key.split('_')[1]) - parseInt(b.key.split('_')[1]));
         // Build image content blocks directly (set below)
         const imgBlocks = imageEntries.map(e => ({ type: 'image', source: { type: 'base64', media_type: 'image/jpeg', data: e.b64 } }));
-        imgBlocks.push({ type: 'text', text: AGREEMENT_PROMPT + '
-
-[Read the agreement pages above and extract all terms.]' });
+        imgBlocks.push({ type: 'text', text: AGREEMENT_PROMPT + '\n\n[Read the agreement pages above and extract all terms.]' });
         const response = await client.messages.create({
           model: selectedModel, max_tokens: 12000, temperature: 0,
           messages: [{ role: 'user', content: imgBlocks }]
