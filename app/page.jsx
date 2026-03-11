@@ -1263,6 +1263,7 @@ function CrossReferenceTab({ xref }) {
 const TABS = ['Revenue', 'Trend', 'MCA Positions', 'Risk & Capacity', 'Negotiation Intel', 'Agreements', 'Cross-Reference', 'Confidence', 'Export'];
 
 export default function FFAnalyzer() {
+  // File states: 'detecting' | 'text-ready' | 'needs-scan' | 'scanning' | 'scanned' | 'error'
   const [files, setFiles] = useState([]);
   const [agreementFiles, setAgreementFiles] = useState([]);
   const [loading, setLoading] = useState(false);
@@ -1279,164 +1280,184 @@ export default function FFAnalyzer() {
   const fileRef = useRef(null);
   const agFileRef = useRef(null);
 
-  // File handling with deduplication
-  const handleFiles = useCallback((newFiles) => {
+  const updateFile = (id, updates) => setFiles(prev => prev.map(f => f.id === id ? { ...f, ...updates } : f));
+
+  // ─── Statement Upload + Auto-Detect ───
+  const handleFiles = useCallback(async (newFiles) => {
     const pdfs = Array.from(newFiles).filter(f => f.type === 'application/pdf' || f.name.endsWith('.pdf'));
-    setFiles(prev => {
-      const existingNames = new Set(prev.map(f => f.name + '_' + f.file?.size));
-      const unique = pdfs.filter(f => !existingNames.has(f.name + '_' + f.size));
-      if (unique.length < pdfs.length) {
-        // Some duplicates were filtered
+    const currentNames = new Set();
+    setFiles(prev => { prev.forEach(f => currentNames.add(f.name + '_' + f.file?.size)); return prev; });
+
+    for (const pdf of pdfs) {
+      if (currentNames.has(pdf.name + '_' + pdf.size)) continue;
+      const fileId = Math.random().toString(36).slice(2);
+      setFiles(prev => [...prev, {
+        id: fileId, file: pdf, name: pdf.name, label: pdf.name.replace('.pdf', ''),
+        status: 'detecting', text: null, images: null, info: null, scanModel: 'opus', error: null,
+      }]);
+
+      try {
+        const text = await extractPDFText(pdf);
+        if (text.trim().length > 100) {
+          try {
+            const detectRes = await fetch('/api/detect-statement', {
+              method: 'POST', headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ text, fileName: pdf.name })
+            });
+            const detectData = await detectRes.json();
+            const info = detectData.success ? detectData.info : null;
+            setFiles(prev => prev.map(f => f.id === fileId ? {
+              ...f, status: 'text-ready', text, info,
+              label: info?.account_name ? `${info.account_name} — ${info.statement_month || ''}` : f.label,
+            } : f));
+          } catch {
+            setFiles(prev => prev.map(f => f.id === fileId ? { ...f, status: 'text-ready', text } : f));
+          }
+        } else {
+          setFiles(prev => prev.map(f => f.id === fileId ? { ...f, status: 'needs-scan' } : f));
+        }
+      } catch (e) {
+        setFiles(prev => prev.map(f => f.id === fileId ? { ...f, status: 'error', error: e.message } : f));
       }
-      return [...prev, ...unique.map(f => ({ id: Math.random().toString(36).slice(2), file: f, name: f.name, status: 'ready' }))];
-    });
+    }
   }, []);
+
+  // ─── Vision Scan Single File ───
+  const scanFile = async (fileId) => {
+    const file = files.find(f => f.id === fileId);
+    if (!file) return;
+    updateFile(fileId, { status: 'scanning' });
+    try {
+      const images = await extractPDFImages(file.file);
+      if (!images || images.length === 0) {
+        updateFile(fileId, { status: 'error', error: 'Could not render PDF pages' }); return;
+      }
+      const res = await fetch('/api/analyze', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ images, fileName: file.name, model: file.scanModel })
+      });
+      const data = await res.json();
+      if (res.ok && data.success) {
+        updateFile(fileId, {
+          status: 'scanned', images, preAnalysis: data.analysis,
+          label: data.analysis?.business_name
+            ? `${data.analysis.business_name} — ${data.analysis?.statement_period?.start || ''}`
+            : file.label,
+          info: { account_name: data.analysis?.business_name, statement_month: data.analysis?.statement_period?.start, bank_name: data.analysis?.bank_name }
+        });
+      } else {
+        updateFile(fileId, { status: 'error', error: data.error || 'Vision scan failed' });
+      }
+    } catch (e) {
+      updateFile(fileId, { status: 'error', error: e.message });
+    }
+  };
 
   const removeFile = (id) => setFiles(prev => prev.filter(f => f.id !== id));
 
-  // Agreement file handling
-  const handleAgreementFiles = useCallback((newFiles) => {
+  // ─── Agreement Files ───
+  const handleAgreementFiles = useCallback(async (newFiles) => {
     const pdfs = Array.from(newFiles).filter(f => f.type === 'application/pdf' || f.name.endsWith('.pdf'));
-    setAgreementFiles(prev => {
-      const existingNames = new Set(prev.map(f => f.name + '_' + f.file?.size));
-      const unique = pdfs.filter(f => !existingNames.has(f.name + '_' + f.size));
-      return [...prev, ...unique.map(f => ({ id: Math.random().toString(36).slice(2), file: f, name: f.name, status: 'ready' }))];
-    });
+    for (const pdf of pdfs) {
+      const fileId = Math.random().toString(36).slice(2);
+      setAgreementFiles(prev => [...prev, { id: fileId, file: pdf, name: pdf.name, label: pdf.name.replace('.pdf', ''), status: 'detecting', text: null, images: null }]);
+      try {
+        const text = await extractPDFText(pdf);
+        setAgreementFiles(prev => prev.map(f => f.id === fileId
+          ? { ...f, status: text.trim().length >= 200 ? 'text-ready' : 'needs-scan', text: text.trim().length >= 200 ? text : null }
+          : f));
+      } catch {
+        setAgreementFiles(prev => prev.map(f => f.id === fileId ? { ...f, status: 'needs-scan' } : f));
+      }
+    }
   }, []);
+
+  const scanAgreementFile = async (fileId) => {
+    const file = agreementFiles.find(f => f.id === fileId);
+    if (!file) return;
+    setAgreementFiles(prev => prev.map(f => f.id === fileId ? { ...f, status: 'scanning' } : f));
+    try {
+      const images = await extractPDFImages(file.file);
+      setAgreementFiles(prev => prev.map(f => f.id === fileId
+        ? { ...f, status: images?.length > 0 ? 'scanned' : 'error', images: images || null }
+        : f));
+    } catch {
+      setAgreementFiles(prev => prev.map(f => f.id === fileId ? { ...f, status: 'error' } : f));
+    }
+  };
 
   const removeAgreementFile = (id) => setAgreementFiles(prev => prev.filter(f => f.id !== id));
 
+  // ─── Main Analysis ───
+  const readyFiles = files.filter(f => f.status === 'text-ready' || f.status === 'scanned');
+  const canAnalyze = readyFiles.length > 0 && !loading;
+
   const analyze = async () => {
-    if (files.length === 0) return;
+    if (readyFiles.length === 0) return;
     setLoading(true); setError(null); setResult(null);
-
     try {
-      const statements = [];
-      for (let i = 0; i < files.length; i++) {
-        const f = files[i];
-        setLoadingMsg(`Extracting text from ${f.name} (${i + 1}/${files.length})...`);
-        try {
-          const text = await extractPDFText(f.file);
-          if (text.trim().length > 100) {
-            statements.push({ text, accountLabel: f.name, month: f.name, mode: 'text' });
-          } else {
-            // Scanned/image-based PDF — fall back to vision
-            setLoadingMsg(`${f.name} is scanned — rendering pages as images for vision analysis...`);
-            try {
-              const images = await extractPDFImages(f.file);
-              if (images.length > 0) {
-                statements.push({ images, accountLabel: f.name, month: f.name, mode: 'vision' });
-              } else {
-                setError(`${f.name}: Could not extract text or render images.`);
-                setLoading(false); return;
-              }
-            } catch (imgErr) {
-              setError(`${f.name}: Failed to render scanned PDF — ${imgErr.message}`);
-              setLoading(false); return;
-            }
-          }
-        } catch (e) {
-          setError(`Failed to extract text from ${f.name}: ${e.message}`);
-          setLoading(false); return;
-        }
-      }
+      const statements = readyFiles.map(f => ({
+        text: f.text || '', images: f.images || null,
+        accountLabel: f.label || f.name, month: f.info?.statement_month || f.label || f.name,
+      }));
 
-      const hasVision = statements.some(s => s.mode === 'vision');
-      setLoadingMsg(`Analyzing ${statements.length} statement${statements.length > 1 ? 's' : ''} with ${model === 'opus' ? 'Opus' : 'Sonnet'}${hasVision ? ' (includes vision for scanned PDFs)' : ''}...`);
+      setLoadingMsg(`Analyzing ${statements.length} statement${statements.length > 1 ? 's' : ''} with ${model === 'opus' ? 'Opus' : 'Sonnet'}...`);
 
       const endpoint = statements.length > 1 ? '/api/analyze-multi' : '/api/analyze';
       const body = statements.length > 1
-        ? { statements: statements.map(s => ({ text: s.text || '', images: s.images || null, accountLabel: s.accountLabel, month: s.month })), model }
-        : { text: statements[0].text || '', images: statements[0].images || null, fileName: files[0].name, model };
+        ? { statements, model }
+        : { text: statements[0].text || '', images: statements[0].images || null, fileName: readyFiles[0].name, model };
 
-      const res = await fetch(endpoint, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(body)
-      });
-
+      const res = await fetch(endpoint, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
       const data = await res.json();
-      if (!res.ok || data.error) {
-        setError(data.error || 'Analysis failed');
-        if (data.debug) console.log('Debug:', data.debug);
-        setLoading(false); return;
-      }
+      if (!res.ok || data.error) { setError(data.error || 'Analysis failed'); setLoading(false); return; }
 
       setResult(data);
       setPositions((data.analysis?.mca_positions || []).map(p => ({ ...p, _excluded: false })));
       setActiveTab(0);
 
-      // Phase 2: Analyze agreement PDFs if provided
-      if (agreementFiles.length > 0) {
+      // Phase 2: Agreements
+      const readyAg = agreementFiles.filter(f => f.status === 'text-ready' || f.status === 'scanned');
+      if (readyAg.length > 0) {
         const agResults = [];
-        for (let i = 0; i < agreementFiles.length; i++) {
-          const af = agreementFiles[i];
-          setLoadingMsg(`Analyzing agreement ${i + 1}/${agreementFiles.length}: ${af.name}...`);
+        for (let i = 0; i < readyAg.length; i++) {
+          const af = readyAg[i];
+          setLoadingMsg(`Analyzing agreement ${i + 1}/${readyAg.length}: ${af.label}...`);
           try {
-            const agText = await extractPDFText(af.file);
-            let agBody;
-            if (agText.trim().length >= 200) {
-              agBody = { text: agText, fileName: af.name, model };
-            } else {
-              // Scanned agreement — use vision
-              setLoadingMsg(`Agreement ${af.name} is scanned — rendering for vision...`);
-              const agImages = await extractPDFImages(af.file);
-              if (agImages.length > 0) {
-                agBody = { images: agImages, fileName: af.name, model };
-              } else {
-                agResults.push({ file: af.name, error: 'Could not extract text or images' });
-                continue;
-              }
-            }
-            const agRes = await fetch('/api/analyze-agreement', {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify(agBody)
-            });
+            const agBody = af.text ? { text: af.text, fileName: af.name, model } : { images: af.images, fileName: af.name, model };
+            const agRes = await fetch('/api/analyze-agreement', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(agBody) });
             const agData = await agRes.json();
-            if (agRes.ok && agData.success) {
-              agResults.push({ file: af.name, analysis: agData.analysis });
-            } else {
-              agResults.push({ file: af.name, error: agData.error || 'Analysis failed' });
-            }
-          } catch (e) {
-            agResults.push({ file: af.name, error: e.message });
-          }
+            agResults.push(agRes.ok && agData.success ? { file: af.name, analysis: agData.analysis } : { file: af.name, error: agData.error || 'Failed' });
+          } catch (e) { agResults.push({ file: af.name, error: e.message }); }
         }
         setAgreementResults(agResults);
 
-        // Phase 3: Cross-reference if we have both statements and agreements
-        const validAgreements = agResults.filter(a => a.analysis).map(a => a.analysis);
-        if (validAgreements.length > 0 && data.analysis) {
+        // Phase 3: Cross-reference
+        const validAg = agResults.filter(a => a.analysis).map(a => a.analysis);
+        if (validAg.length > 0 && data.analysis) {
           setLoadingMsg('Cross-referencing agreements against bank statements...');
           try {
-            const xrefRes = await fetch('/api/cross-reference', {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({
-                bankAnalysis: data.analysis,
-                agreementAnalyses: validAgreements,
-                model
-              })
-            });
+            const xrefRes = await fetch('/api/cross-reference', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ bankAnalysis: data.analysis, agreementAnalyses: validAg, model }) });
             const xrefData = await xrefRes.json();
-            if (xrefRes.ok && xrefData.success) {
-              setCrossRefResult(xrefData);
-            } else {
-              console.error('Cross-reference error:', xrefData.error);
-            }
-          } catch (e) {
-            console.error('Cross-reference error:', e);
-          }
+            if (xrefRes.ok && xrefData.success) setCrossRefResult(xrefData);
+          } catch (e) { console.error('Cross-ref error:', e); }
         }
       }
-    } catch (e) {
-      setError(e.message || 'Unknown error');
-    }
+    } catch (e) { setError(e.message || 'Unknown error'); }
     setLoading(false); setLoadingMsg('');
   };
 
   const reset = () => { setFiles([]); setAgreementFiles([]); setResult(null); setPositions([]); setAgreementResults([]); setCrossRefResult(null); setError(null); setActiveTab(0); };
+
+  const statusBadge = (status) => {
+    const map = {
+      'detecting': { color: C.gold, label: 'DETECTING...' }, 'text-ready': { color: C.green, label: 'TEXT READY' },
+      'needs-scan': { color: C.orange, label: 'NEEDS VISION SCAN' }, 'scanning': { color: C.gold, label: 'SCANNING...' },
+      'scanned': { color: C.green, label: 'SCANNED' }, 'error': { color: C.red, label: 'ERROR' },
+    };
+    const s = map[status] || { color: C.textMuted, label: status };
+    return <span style={S.badge(s.color)}>{s.label}</span>;
+  };
 
   return (
     <div style={S.page}>
@@ -1445,43 +1466,31 @@ export default function FFAnalyzer() {
           <div style={S.logo}>FUNDERS FIRST ANALYZER</div>
           <div style={S.logoSub}>Bank Statement Intelligence Engine</div>
         </div>
-        {!result && (files.length > 0 || agreementFiles.length > 0) && (
+        {!result && canAnalyze && (
           <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
             <div style={{ display: 'flex', gap: 2, background: 'rgba(255,255,255,0.03)', borderRadius: 8, padding: 3 }}>
-              <button onClick={() => setModel('opus')} style={{
-                fontSize: 11, padding: '6px 14px', borderRadius: 6, border: 'none', cursor: 'pointer', fontFamily: 'inherit',
-                background: model === 'opus' ? C.cyanGlow : 'transparent', color: model === 'opus' ? C.cyan : C.textMuted,
-              }}>Opus (Deep)</button>
-              <button onClick={() => setModel('sonnet')} style={{
-                fontSize: 11, padding: '6px 14px', borderRadius: 6, border: 'none', cursor: 'pointer', fontFamily: 'inherit',
-                background: model === 'sonnet' ? C.goldDim : 'transparent', color: model === 'sonnet' ? C.gold : C.textMuted,
-              }}>Sonnet (Fast)</button>
+              <button onClick={() => setModel('opus')} style={{ fontSize: 11, padding: '6px 14px', borderRadius: 6, border: 'none', cursor: 'pointer', fontFamily: 'inherit', background: model === 'opus' ? C.cyanGlow : 'transparent', color: model === 'opus' ? C.cyan : C.textMuted }}>Opus (Deep)</button>
+              <button onClick={() => setModel('sonnet')} style={{ fontSize: 11, padding: '6px 14px', borderRadius: 6, border: 'none', cursor: 'pointer', fontFamily: 'inherit', background: model === 'sonnet' ? C.goldDim : 'transparent', color: model === 'sonnet' ? C.gold : C.textMuted }}>Sonnet (Fast)</button>
             </div>
             <button style={S.btn('primary')} onClick={analyze} disabled={loading}>
-              {loading ? '⏳ Analyzing...' : 'Analyze Statements'}
+              {loading ? '⏳ Analyzing...' : `Analyze ${readyFiles.length} Statement${readyFiles.length !== 1 ? 's' : ''}`}
             </button>
           </div>
         )}
       </div>
 
-      {error && (
-        <div style={{ ...S.card, borderLeft: `3px solid ${C.red}`, color: C.red, fontSize: 13 }}>{error}</div>
-      )}
+      {error && <div style={{ ...S.card, borderLeft: `3px solid ${C.red}`, color: C.red, fontSize: 13 }}>{error}</div>}
 
       {loading && (
         <div style={{ ...S.card, textAlign: 'center', padding: 40 }}>
-          <div style={{ fontSize: 28, marginBottom: 12 }}>
-            <span style={{ display: 'inline-block', animation: 'pulse 1.5s infinite' }}>⚡</span>
-          </div>
+          <div style={{ fontSize: 28, marginBottom: 12 }}><span style={{ display: 'inline-block', animation: 'pulse 1.5s infinite' }}>⚡</span></div>
           <div style={{ fontSize: 14, color: C.textSoft }}>{loadingMsg}</div>
-          <div style={{ fontSize: 11, color: C.textMuted, marginTop: 8 }}>
-            {model === 'opus' ? 'Deep analysis typically takes 30-90 seconds' : 'Fast analysis typically takes 10-30 seconds'}
-          </div>
+          <div style={{ fontSize: 11, color: C.textMuted, marginTop: 8 }}>{model === 'opus' ? 'Deep analysis typically takes 30-90 seconds' : 'Fast analysis typically takes 10-30 seconds'}</div>
           <style>{`@keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.4; } }`}</style>
         </div>
       )}
 
-      {/* Upload View */}
+      {/* ─── Upload View ─── */}
       {!result && !loading && (
         <div>
           <div style={S.dropzone(dragging)}
@@ -1489,33 +1498,65 @@ export default function FFAnalyzer() {
             onDragLeave={() => setDragging(false)}
             onDrop={e => { e.preventDefault(); setDragging(false); handleFiles(e.dataTransfer.files); }}
             onClick={() => fileRef.current?.click()}>
-            <input ref={fileRef} type="file" accept=".pdf" multiple hidden onChange={e => handleFiles(e.target.files)} />
+            <input ref={fileRef} type="file" accept=".pdf" multiple hidden onChange={e => { handleFiles(e.target.files); e.target.value = ''; }} />
             <div style={{ fontSize: 40, marginBottom: 16, opacity: 0.6 }}>📄</div>
             <div style={{ fontSize: 17, fontWeight: 600, marginBottom: 6 }}>Drop bank statements here</div>
-            <div style={{ fontSize: 13, color: C.textMuted }}>Upload 1-6 months of PDF bank statements for analysis</div>
-            <div style={{ fontSize: 11, color: C.textMuted, marginTop: 12 }}>Supports digitally-generated PDFs • Text will be extracted client-side</div>
+            <div style={{ fontSize: 13, color: C.textMuted }}>Upload 1-6 months of PDF bank statements</div>
+            <div style={{ fontSize: 11, color: C.textMuted, marginTop: 12 }}>Text extracted automatically • Scanned PDFs can be vision-scanned</div>
           </div>
+
+          {/* ─── Statement File Cards ─── */}
           {files.length > 0 && (
             <div style={{ marginTop: 16 }}>
               {files.map(f => (
-                <div key={f.id} style={{ ...S.card, display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '10px 16px' }}>
-                  <div style={{ fontSize: 13 }}>📄 {f.name}</div>
-                  <button style={{ ...S.btn('danger'), padding: '4px 12px', fontSize: 11 }} onClick={() => removeFile(f.id)}>✕</button>
+                <div key={f.id} style={{
+                  ...S.card, padding: '14px 18px', marginBottom: 10,
+                  borderLeft: `3px solid ${f.status === 'text-ready' || f.status === 'scanned' ? C.green : f.status === 'needs-scan' ? C.orange : f.status === 'error' ? C.red : C.gold}`,
+                  opacity: f.status === 'detecting' || f.status === 'scanning' ? 0.7 : 1,
+                }}>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: 12 }}>
+                    <div style={{ flex: 1 }}>
+                      <input type="text" value={f.label} onChange={e => updateFile(f.id, { label: e.target.value })}
+                        style={{ background: 'rgba(255,255,255,0.04)', border: `1px solid ${C.cardBorder}`, borderRadius: 6, padding: '6px 10px', color: C.text, fontSize: 14, fontWeight: 600, fontFamily: 'inherit', width: '100%', outline: 'none' }}
+                        onFocus={e => e.target.style.borderColor = C.cyan} onBlur={e => e.target.style.borderColor = C.cardBorder} />
+                      <div style={{ display: 'flex', gap: 8, alignItems: 'center', marginTop: 8, flexWrap: 'wrap' }}>
+                        {statusBadge(f.status)}
+                        {f.info?.bank_name && <span style={{ fontSize: 11, color: C.textMuted }}>{f.info.bank_name}</span>}
+                        {f.info?.statement_month && <span style={{ fontSize: 11, color: C.textMuted }}>• {f.info.statement_month}</span>}
+                        {f.info?.account_number && <span style={{ fontSize: 11, color: C.textMuted }}>• ****{f.info.account_number}</span>}
+                      </div>
+                      {f.error && <div style={{ fontSize: 11, color: C.red, marginTop: 4 }}>{f.error}</div>}
+                    </div>
+                    <div style={{ display: 'flex', gap: 6, alignItems: 'center', flexShrink: 0 }}>
+                      {f.status === 'needs-scan' && (
+                        <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-end', gap: 4 }}>
+                          <div style={{ display: 'flex', gap: 4 }}>
+                            <button onClick={() => updateFile(f.id, { scanModel: 'opus' })} style={{ fontSize: 10, padding: '3px 8px', borderRadius: 4, border: 'none', cursor: 'pointer', fontFamily: 'inherit', background: f.scanModel === 'opus' ? C.cyanGlow : 'rgba(255,255,255,0.04)', color: f.scanModel === 'opus' ? C.cyan : C.textMuted }}>Opus</button>
+                            <button onClick={() => updateFile(f.id, { scanModel: 'sonnet' })} style={{ fontSize: 10, padding: '3px 8px', borderRadius: 4, border: 'none', cursor: 'pointer', fontFamily: 'inherit', background: f.scanModel === 'sonnet' ? C.goldDim : 'rgba(255,255,255,0.04)', color: f.scanModel === 'sonnet' ? C.gold : C.textMuted }}>Sonnet</button>
+                          </div>
+                          <button style={{ ...S.btn('primary'), padding: '6px 14px', fontSize: 11 }} onClick={() => scanFile(f.id)}>Scan with Vision</button>
+                          <div style={{ fontSize: 10, color: C.textMuted }}>~{f.scanModel === 'opus' ? '$1.50-2.00' : '$0.25-0.40'}</div>
+                        </div>
+                      )}
+                      {f.status === 'scanning' && <div style={{ fontSize: 12, color: C.gold }}>⏳ Scanning...</div>}
+                      {f.status === 'error' && <button style={{ ...S.btn(), padding: '6px 12px', fontSize: 11 }} onClick={() => updateFile(f.id, { status: 'needs-scan', error: null })}>Retry</button>}
+                      <button style={{ background: 'none', border: 'none', cursor: 'pointer', color: C.red, fontSize: 16, padding: '4px' }} onClick={() => removeFile(f.id)}>✕</button>
+                    </div>
+                  </div>
                 </div>
               ))}
             </div>
           )}
 
-          {/* Agreement Upload */}
-          <div style={{ marginTop: 24 }}>
+          {/* ─── Agreement Upload ─── */}
+          <div style={{ marginTop: 28 }}>
             <div style={S.sectionTitle}>MCA Agreements (Optional)</div>
             <div style={{ fontSize: 12, color: C.textMuted, marginBottom: 10 }}>Upload original MCA purchase agreements to scan for bad terms, hidden fees, illegal clauses, and verify revenue representations.</div>
             <div style={{ ...S.dropzone(draggingAg), padding: '32px 24px' }}
-              onDragOver={e => { e.preventDefault(); setDraggingAg(true); }}
-              onDragLeave={() => setDraggingAg(false)}
+              onDragOver={e => { e.preventDefault(); setDraggingAg(true); }} onDragLeave={() => setDraggingAg(false)}
               onDrop={e => { e.preventDefault(); setDraggingAg(false); handleAgreementFiles(e.dataTransfer.files); }}
               onClick={() => agFileRef.current?.click()}>
-              <input ref={agFileRef} type="file" accept=".pdf" multiple hidden onChange={e => handleAgreementFiles(e.target.files)} />
+              <input ref={agFileRef} type="file" accept=".pdf" multiple hidden onChange={e => { handleAgreementFiles(e.target.files); e.target.value = ''; }} />
               <div style={{ fontSize: 24, marginBottom: 8, opacity: 0.5 }}>📋</div>
               <div style={{ fontSize: 14, fontWeight: 600 }}>Drop MCA agreements here</div>
               <div style={{ fontSize: 11, color: C.textMuted, marginTop: 4 }}>PDF contracts / purchase agreements from each funder</div>
@@ -1523,59 +1564,55 @@ export default function FFAnalyzer() {
             {agreementFiles.length > 0 && (
               <div style={{ marginTop: 10 }}>
                 {agreementFiles.map(f => (
-                  <div key={f.id} style={{ ...S.card, display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '10px 16px', borderLeft: `3px solid ${C.gold}` }}>
-                    <div style={{ fontSize: 13 }}>📋 {f.name}</div>
-                    <button style={{ ...S.btn('danger'), padding: '4px 12px', fontSize: 11 }} onClick={() => removeAgreementFile(f.id)}>✕</button>
+                  <div key={f.id} style={{ ...S.card, display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '10px 16px', borderLeft: `3px solid ${f.status === 'text-ready' || f.status === 'scanned' ? C.green : f.status === 'needs-scan' ? C.orange : C.gold}` }}>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+                      <span style={{ fontSize: 13 }}>📋 {f.label}</span>
+                      {statusBadge(f.status)}
+                    </div>
+                    <div style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
+                      {f.status === 'needs-scan' && <button style={{ ...S.btn('primary'), padding: '4px 12px', fontSize: 10 }} onClick={() => scanAgreementFile(f.id)}>Render for Vision (~$0.50)</button>}
+                      {f.status === 'scanning' && <span style={{ fontSize: 11, color: C.gold }}>Rendering...</span>}
+                      <button style={{ background: 'none', border: 'none', cursor: 'pointer', color: C.red, fontSize: 16, padding: '4px' }} onClick={() => removeAgreementFile(f.id)}>✕</button>
+                    </div>
                   </div>
                 ))}
               </div>
             )}
           </div>
 
-          {(files.length > 0 || agreementFiles.length > 0) && (
+          {files.length > 0 && (
             <div style={{ marginTop: 16, fontSize: 11, color: C.textMuted }}>
-              {files.length} statement{files.length !== 1 ? 's' : ''}{agreementFiles.length > 0 ? ` + ${agreementFiles.length} agreement${agreementFiles.length !== 1 ? 's' : ''}` : ''} ready •
-              {model === 'opus' ? ' Opus (recommended for negotiations)' : ' Sonnet (fast preview)'}
-              {agreementFiles.length > 0 && ' • Agreements will be cross-referenced against statements'}
+              {readyFiles.length} of {files.length} statement{files.length !== 1 ? 's' : ''} ready
+              {files.some(f => f.status === 'needs-scan') && ` • ${files.filter(f => f.status === 'needs-scan').length} need vision scan`}
+              {agreementFiles.length > 0 && ` • ${agreementFiles.filter(f => f.status === 'text-ready' || f.status === 'scanned').length}/${agreementFiles.length} agreements ready`}
+              {readyFiles.length > 0 && ` • Analysis: ${model === 'opus' ? 'Opus (~$0.45/stmt)' : 'Sonnet (~$0.06/stmt)'}`}
             </div>
           )}
         </div>
       )}
 
-      {/* Results View */}
+      {/* ─── Results View ─── */}
       {result && (
         <div>
           <div style={{ ...S.card, display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
             <div>
               <div style={{ fontSize: 18, fontWeight: 700 }}>{result.analysis?.business_name || 'Analysis Complete'}</div>
               <div style={{ fontSize: 12, color: C.textMuted }}>
-                {result.analysis?.bank_name}
-                {' • '}
-                {result.analysis?.analysis_period ? `${result.analysis.analysis_period.months_covered} months analyzed` : result.analysis?.statement_period?.start}
-                {' • '}
-                {result.model_used?.includes('opus') ? 'Opus' : 'Sonnet'}
-                {agreementResults.length > 0 && (
-                  <span> • {agreementResults.filter(a => a.analysis).length} agreement{agreementResults.filter(a => a.analysis).length !== 1 ? 's' : ''} analyzed</span>
-                )}
+                {result.analysis?.bank_name}{' • '}{result.analysis?.analysis_period ? `${result.analysis.analysis_period.months_covered} months analyzed` : result.analysis?.statement_period?.start}{' • '}{result.model_used?.includes('opus') ? 'Opus' : 'Sonnet'}
+                {agreementResults.length > 0 && <span> • {agreementResults.filter(a => a.analysis).length} agreement{agreementResults.filter(a => a.analysis).length !== 1 ? 's' : ''} analyzed</span>}
                 {crossRefResult && <span style={{ color: C.green }}> • Cross-referenced</span>}
-                {result.analysis?.analysis_confidence && (
-                  <span> • Confidence: <span style={{ color: { high: C.green, medium: C.gold, low: C.red }[result.analysis.analysis_confidence.overall] || C.gold }}>{(result.analysis.analysis_confidence.overall || '').toUpperCase()}</span></span>
-                )}
+                {result.analysis?.analysis_confidence && <span> • Confidence: <span style={{ color: { high: C.green, medium: C.gold, low: C.red }[result.analysis.analysis_confidence.overall] || C.gold }}>{(result.analysis.analysis_confidence.overall || '').toUpperCase()}</span></span>}
               </div>
             </div>
             <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
-              <span style={S.badge(tierColor[result.analysis?.risk_metrics?.dsr_tier] || C.red)}>
-                {tierLabel[result.analysis?.risk_metrics?.dsr_tier] || 'ANALYZING'}
-              </span>
+              <span style={S.badge(tierColor[result.analysis?.risk_metrics?.dsr_tier] || C.red)}>{tierLabel[result.analysis?.risk_metrics?.dsr_tier] || 'ANALYZING'}</span>
               <button style={{ ...S.btn(), padding: '6px 14px', fontSize: 11 }} onClick={reset}>New Analysis</button>
               <button style={{ ...S.btn(), padding: '6px 14px', fontSize: 11 }} onClick={analyze}>Re-analyze</button>
             </div>
           </div>
 
           <div style={S.tabs}>
-            {TABS.map((t, i) => (
-              <button key={i} style={S.tab(activeTab === i)} onClick={() => setActiveTab(i)}>{t}</button>
-            ))}
+            {TABS.map((t, i) => <button key={i} style={S.tab(activeTab === i)} onClick={() => setActiveTab(i)}>{t}</button>)}
           </div>
 
           <div>
