@@ -277,6 +277,8 @@ function MCATab({ a, positions, setPositions, excludedIds, setExcludedIds, other
   const [addError, setAddError] = useState(null);
   const [editingId, setEditingId] = useState(null);
   const [editValues, setEditValues] = useState({});
+  const [showDirectForm, setShowDirectForm] = useState(false);
+  const [directForm, setDirectForm] = useState({ funder_name: '', payment_amount: '', frequency: 'weekly', estimated_balance: '', notes: '' });
 
   const startEdit = (p) => {
     setEditingId(p._id);
@@ -296,8 +298,33 @@ function MCATab({ a, positions, setPositions, excludedIds, setExcludedIds, other
       frequency: v.frequency,
       payments_detected: pd,
       estimated_monthly_total: monthly,
+      isEdited: true,
     } : p));
     setEditingId(null);
+  };
+
+  const addDirect = () => {
+    const pa = parseFloat(directForm.payment_amount) || 0;
+    const freqMultiplier = directForm.frequency === 'daily' ? 22 : directForm.frequency === 'bi-weekly' ? 2.17 : directForm.frequency === 'monthly' ? 1 : 4.33;
+    const monthly = pa * (directForm.frequency === 'monthly' ? 1 : freqMultiplier);
+    const newPos = {
+      _id: Date.now(),
+      funder_name: directForm.funder_name || 'Unknown Funder',
+      payment_amount: pa,
+      payment_amount_current: pa,
+      frequency: directForm.frequency,
+      estimated_monthly_total: monthly,
+      estimated_balance: parseFloat(directForm.estimated_balance) || null,
+      payments_detected: directForm.frequency === 'weekly' ? 4 : directForm.frequency === 'daily' ? 22 : 4,
+      pattern_description: directForm.notes || 'Manually added position',
+      confidence: 'manual',
+      status: 'active',
+      flag: 'manual',
+      isManual: true,
+    };
+    setPositions(prev => [...prev, newPos]);
+    setDirectForm({ funder_name: '', payment_amount: '', frequency: 'weekly', estimated_balance: '', notes: '' });
+    setShowDirectForm(false);
   };
 
   const activePositions = positions.filter(p => !excludedIds.includes(p._id));
@@ -367,14 +394,16 @@ function MCATab({ a, positions, setPositions, excludedIds, setExcludedIds, other
       )}
 
       {activePositions.map((p) => (
-        <div key={p._id} style={S.funderCard}>
+        <div key={p._id} style={{ ...S.funderCard, ...(p.status === 'paid_off' ? { opacity: 0.6, borderColor: 'rgba(150,150,150,0.3)', background: 'rgba(80,80,80,0.15)' } : {}) }}>
           <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', flexWrap: 'wrap', gap: 8, marginBottom: 10 }}>
             <div>
               <div style={{ fontSize: 16, color: '#e8e8f0', marginBottom: 4 }}>{p.funder_name}</div>
               <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
-                <span style={S.tag(p.flag === 'undisclosed' ? 'red' : p.flag === 'default_modified' ? 'red' : p.flag === 'modified' ? 'amber' : 'teal')}>{p.flag === 'default_modified' ? '⚠ default modified' : p.flag || 'standard'}</span>
-                <span style={S.tag(p.confidence === 'high' ? 'green' : p.confidence === 'medium' ? 'amber' : 'grey')}>{p.confidence || 'medium'} confidence</span>
+                <span style={S.tag(p.flag === 'undisclosed' ? 'red' : p.flag === 'default_modified' ? 'red' : p.flag === 'modified' ? 'amber' : p.flag === 'manual' ? 'cyan' : 'teal')}>{p.flag === 'default_modified' ? '⚠ default modified' : p.flag === 'manual' ? '＋ manual' : p.flag || 'standard'}</span>
+                {(p.isEdited || p.isManual) && <span style={S.tag('cyan')}>(edited)</span>}
+                <span style={S.tag(p.confidence === 'high' ? 'green' : p.confidence === 'medium' ? 'amber' : p.confidence === 'manual' ? 'cyan' : 'grey')}>{p.confidence === 'manual' ? 'manual entry' : (p.confidence || 'medium') + ' confidence'}</span>
                 <span style={S.tag('grey')}>{p.frequency}</span>
+                {p.status === 'paid_off' && <span style={S.tag('grey')}>PAID OFF - Verify</span>}
               </div>
             </div>
             <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
@@ -468,26 +497,70 @@ function MCATab({ a, positions, setPositions, excludedIds, setExcludedIds, other
 
       {/* Add missing position */}
       <div style={S.divider} />
-      <div style={S.sectionTitle}>Add Missing Position</div>
-      <div style={{ fontSize: 12, color: 'rgba(232,232,240,0.4)', marginBottom: 10, lineHeight: 1.6 }}>
-        Describe a position Claude missed — e.g. "The Merchant Marketplace $8,500 weekly, first seen Oct 3"
-      </div>
-      <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap' }}>
-        <input
-          value={addText}
-          onChange={e => setAddText(e.target.value)}
-          onKeyDown={e => e.key === 'Enter' && parseAndAdd()}
-          placeholder="Funder name, payment amount, frequency..."
-          style={{ flex: 1, minWidth: 260, padding: '10px 14px', borderRadius: 8, border: '1px solid rgba(255,255,255,0.15)', background: 'rgba(255,255,255,0.05)', color: '#e8e8f0', fontSize: 13, fontFamily: 'inherit', outline: 'none' }}
-        />
-        <button
-          onClick={parseAndAdd}
-          disabled={addLoading || !addText.trim()}
-          style={{ ...S.btn('primary'), opacity: addLoading || !addText.trim() ? 0.5 : 1, padding: '10px 20px' }}>
-          {addLoading ? '⏳ Parsing…' : '＋ Add Position'}
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 10 }}>
+        <div style={S.sectionTitle}>Add Missing Position</div>
+        <button onClick={() => setShowDirectForm(!showDirectForm)} style={{ padding: '4px 12px', borderRadius: 6, border: '1px solid rgba(0,229,255,0.25)', background: 'rgba(0,229,255,0.08)', color: '#00e5ff', cursor: 'pointer', fontSize: 11, fontFamily: 'inherit' }}>
+          {showDirectForm ? '← Use text input' : '📝 Direct form'}
         </button>
       </div>
-      {addError && <div style={{ ...S.alert('critical'), marginTop: 10 }}><span>⚠</span><div>{addError}</div></div>}
+
+      {showDirectForm ? (
+        <div style={{ background: 'rgba(0,229,255,0.04)', border: '1px solid rgba(0,229,255,0.15)', borderRadius: 10, padding: 16 }}>
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12, marginBottom: 12 }}>
+            <div>
+              <label style={{ fontSize: 11, color: 'rgba(232,232,240,0.5)', display: 'block', marginBottom: 4 }}>Funder Name *</label>
+              <input value={directForm.funder_name} onChange={e => setDirectForm(v => ({...v, funder_name: e.target.value}))} placeholder="e.g. The Merchant Marketplace" style={{ width: '100%', padding: '8px 12px', borderRadius: 6, border: '1px solid rgba(0,229,255,0.2)', background: 'rgba(0,0,0,0.3)', color: '#e8e8f0', fontSize: 13, fontFamily: 'inherit' }} />
+            </div>
+            <div>
+              <label style={{ fontSize: 11, color: 'rgba(232,232,240,0.5)', display: 'block', marginBottom: 4 }}>Payment Amount *</label>
+              <input value={directForm.payment_amount} onChange={e => setDirectForm(v => ({...v, payment_amount: e.target.value}))} placeholder="8500" type="number" style={{ width: '100%', padding: '8px 12px', borderRadius: 6, border: '1px solid rgba(0,229,255,0.2)', background: 'rgba(0,0,0,0.3)', color: '#e8e8f0', fontSize: 13, fontFamily: 'inherit' }} />
+            </div>
+            <div>
+              <label style={{ fontSize: 11, color: 'rgba(232,232,240,0.5)', display: 'block', marginBottom: 4 }}>Frequency</label>
+              <select value={directForm.frequency} onChange={e => setDirectForm(v => ({...v, frequency: e.target.value}))} style={{ width: '100%', padding: '8px 12px', borderRadius: 6, border: '1px solid rgba(0,229,255,0.2)', background: 'rgba(0,0,0,0.3)', color: '#e8e8f0', fontSize: 13, fontFamily: 'inherit' }}>
+                <option value="daily">Daily</option>
+                <option value="weekly">Weekly</option>
+                <option value="bi-weekly">Bi-weekly</option>
+                <option value="monthly">Monthly</option>
+              </select>
+            </div>
+            <div>
+              <label style={{ fontSize: 11, color: 'rgba(232,232,240,0.5)', display: 'block', marginBottom: 4 }}>Estimated Balance (optional)</label>
+              <input value={directForm.estimated_balance} onChange={e => setDirectForm(v => ({...v, estimated_balance: e.target.value}))} placeholder="50000" type="number" style={{ width: '100%', padding: '8px 12px', borderRadius: 6, border: '1px solid rgba(0,229,255,0.2)', background: 'rgba(0,0,0,0.3)', color: '#e8e8f0', fontSize: 13, fontFamily: 'inherit' }} />
+            </div>
+          </div>
+          <div style={{ marginBottom: 12 }}>
+            <label style={{ fontSize: 11, color: 'rgba(232,232,240,0.5)', display: 'block', marginBottom: 4 }}>Notes (optional)</label>
+            <input value={directForm.notes} onChange={e => setDirectForm(v => ({...v, notes: e.target.value}))} placeholder="Any additional notes about this position..." style={{ width: '100%', padding: '8px 12px', borderRadius: 6, border: '1px solid rgba(0,229,255,0.2)', background: 'rgba(0,0,0,0.3)', color: '#e8e8f0', fontSize: 13, fontFamily: 'inherit' }} />
+          </div>
+          <div style={{ display: 'flex', gap: 10 }}>
+            <button onClick={addDirect} disabled={!directForm.funder_name || !directForm.payment_amount} style={{ ...S.btn('primary'), opacity: !directForm.funder_name || !directForm.payment_amount ? 0.5 : 1, padding: '10px 20px' }}>＋ Add Position</button>
+            <button onClick={() => setShowDirectForm(false)} style={{ padding: '10px 16px', borderRadius: 8, border: '1px solid rgba(255,255,255,0.15)', background: 'transparent', color: 'rgba(232,232,240,0.6)', cursor: 'pointer', fontSize: 13, fontFamily: 'inherit' }}>Cancel</button>
+          </div>
+        </div>
+      ) : (
+        <>
+          <div style={{ fontSize: 12, color: 'rgba(232,232,240,0.4)', marginBottom: 10, lineHeight: 1.6 }}>
+            Describe a position Claude missed — e.g. "The Merchant Marketplace $8,500 weekly, first seen Oct 3"
+          </div>
+          <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap' }}>
+            <input
+              value={addText}
+              onChange={e => setAddText(e.target.value)}
+              onKeyDown={e => e.key === 'Enter' && parseAndAdd()}
+              placeholder="Funder name, payment amount, frequency..."
+              style={{ flex: 1, minWidth: 260, padding: '10px 14px', borderRadius: 8, border: '1px solid rgba(255,255,255,0.15)', background: 'rgba(255,255,255,0.05)', color: '#e8e8f0', fontSize: 13, fontFamily: 'inherit', outline: 'none' }}
+            />
+            <button
+              onClick={parseAndAdd}
+              disabled={addLoading || !addText.trim()}
+              style={{ ...S.btn('primary'), opacity: addLoading || !addText.trim() ? 0.5 : 1, padding: '10px 20px' }}>
+              {addLoading ? '⏳ Parsing…' : '＋ Add Position'}
+            </button>
+          </div>
+          {addError && <div style={{ ...S.alert('critical'), marginTop: 10 }}><span>⚠</span><div>{addError}</div></div>}
+        </>
+      )}
 
       {/* Other debt service */}
       {other.length > 0 && (
@@ -1630,11 +1703,11 @@ export default function FFAnalyzer() {
     setUploadedFiles(prev => prev.map(f => f.id === id ? { ...f, status: 'detecting', error: null } : f));
     try {
       const images = await renderPDFAsImages(file);
-      // Quick detect on first page image
+      // Quick detect on first 2 page images (statement period sometimes on page 2)
       const res = await fetch('/api/detect-statement', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ text: '', fileName: file.name, images: [images[0]] }),
+        body: JSON.stringify({ text: '', fileName: file.name, images: images.slice(0, 2) }),
       });
       const data = await res.json();
       setUploadedFiles(prev => prev.map(f => f.id === id ? {
@@ -1737,8 +1810,41 @@ export default function FFAnalyzer() {
         }
         const data = await res.json();
         if (data.analysis) {
-          setAgreementResults(prev => [...prev, { fileName: ag.name, analysis: data.analysis }]);
-          setUploadedAgreements(prev => prev.map(a => a.id === ag.id ? { ...a, status: 'done' } : a));
+          // Check if extraction looks incomplete (blank pages likely) — auto-retry with images
+          const analysis = data.analysis;
+          const hasLowConfidence = analysis.analysis_confidence?.overall === 'low';
+          const missingCriticalFields = !analysis.financial_terms?.purchase_price && !analysis.financial_terms?.purchased_amount;
+          const noProtections = (!analysis.merchant_protections || analysis.merchant_protections.length === 0);
+          const noDefaultTriggers = (!analysis.default_triggers || analysis.default_triggers.length === 0);
+          const looksIncomplete = hasLowConfidence || (missingCriticalFields && noProtections && noDefaultTriggers);
+
+          if (looksIncomplete && !ag.autoRetried) {
+            // Auto-retry with image scan — pages likely blank
+            setUploadedAgreements(prev => prev.map(a => a.id === ag.id ? { ...a, status: 'analyzing', autoRetried: true, error: 'Some pages appear blank — auto-retrying with image scan...' } : a));
+            try {
+              const images = await renderPDFToImages(ag.file);
+              const formData = new FormData();
+              images.forEach((img, i) => formData.append(`image_${i}`, img));
+              formData.append('model', model);
+              formData.append('fileName', ag.name);
+              formData.append('useImages', 'true');
+              const retryRes = await fetch('/api/analyze-agreement', { method: 'POST', body: formData });
+              const retryData = await retryRes.json();
+              if (retryData.analysis) {
+                setAgreementResults(prev => [...prev, { fileName: ag.name, analysis: retryData.analysis }]);
+                setUploadedAgreements(prev => prev.map(a => a.id === ag.id ? { ...a, status: 'done', isScanned: true, error: null } : a));
+              } else {
+                setAgreementResults(prev => [...prev, { fileName: ag.name, analysis: data.analysis }]);
+                setUploadedAgreements(prev => prev.map(a => a.id === ag.id ? { ...a, status: 'done', error: 'Image retry failed — using partial data' } : a));
+              }
+            } catch (retryErr) {
+              setAgreementResults(prev => [...prev, { fileName: ag.name, analysis: data.analysis }]);
+              setUploadedAgreements(prev => prev.map(a => a.id === ag.id ? { ...a, status: 'done', error: 'Image retry failed — using partial data' } : a));
+            }
+          } else {
+            setAgreementResults(prev => [...prev, { fileName: ag.name, analysis: data.analysis }]);
+            setUploadedAgreements(prev => prev.map(a => a.id === ag.id ? { ...a, status: 'done' } : a));
+          }
         } else {
           setUploadedAgreements(prev => prev.map(a => a.id === ag.id ? { ...a, status: 'error', error: data.error || 'Failed' } : a));
         }
@@ -1916,6 +2022,71 @@ export default function FFAnalyzer() {
       setActiveTab(0);
     } catch (e) {
       clearInterval(interval);
+      setError(e.message);
+    }
+    setLoading(false);
+  };
+
+  const reanalyze = async () => {
+    const ready = uploadedFiles.filter(f => f.status === 'ready' && (f.text || (f.images && f.images.length > 0)));
+    if (!ready.length) return;
+
+    // Preserve manual/edited positions to restore after re-analysis
+    const manualPositions = positions.filter(p => p.isManual || p.isEdited);
+    const prevExcludedIds = [...excludedIds];
+    const prevOtherExcludedIds = [...otherExcludedIds];
+    const prevExcludedDepositIds = [...excludedDepositIds];
+
+    setLoading(true);
+    setError(null);
+    setLoadingMsg(`Re-analyzing with ${model === 'opus' ? 'Opus' : 'Sonnet'}…`);
+
+    try {
+      const statements = ready.map(f => ({
+        accountLabel: f.accountLabel,
+        month: f.month,
+        text: f.text || null,
+        images: f.images || null,
+        isScanned: f.isScanned || false,
+      }));
+      const endpoint = statements.length === 1 ? '/api/analyze' : '/api/analyze-multi';
+      const body = statements.length === 1
+        ? { text: statements[0].text, fileName: ready[0].file.name, model }
+        : { statements, model };
+
+      const res = await fetch(endpoint, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      });
+      const data = await res.json();
+      if (!res.ok || data.error) { setError(data.error || 'Re-analysis failed'); setLoading(false); return; }
+      setResult(data);
+
+      // Merge new positions with preserved manual ones
+      const newPositions = (data.analysis.mca_positions || []).map((p, i) => {
+        const pa = parseFloat(p.payment_amount_current || p.payment_amount) || 0;
+        const freq = p.frequency || 'weekly';
+        const freqMult = freq === 'daily' ? 22 : freq === 'bi-weekly' ? 2.17 : freq === 'monthly' ? 1 : 4.33;
+        const computedMonthly = pa * freqMult;
+        return {
+          ...p,
+          _id: i,
+          estimated_monthly_total: (p.estimated_monthly_total && p.estimated_monthly_total > 0) ? p.estimated_monthly_total : computedMonthly,
+        };
+      });
+      // Add manual positions back with new IDs
+      const maxId = Math.max(...newPositions.map(p => p._id), 0);
+      manualPositions.forEach((mp, i) => {
+        newPositions.push({ ...mp, _id: maxId + i + 1 });
+      });
+      setPositions(newPositions);
+
+      // Restore exclusion lists (best effort — IDs may have shifted)
+      setExcludedIds(prevExcludedIds.filter(id => newPositions.some(p => p._id === id)));
+      setOtherExcludedIds(prevOtherExcludedIds);
+      setExcludedDepositIds(prevExcludedDepositIds);
+    } catch (e) {
       setError(e.message);
     }
     setLoading(false);
@@ -2149,7 +2320,7 @@ export default function FFAnalyzer() {
                   {(result.analysis.balance_summary?.ending_balance ?? result.analysis.balance_summary?.most_recent_ending_balance) < 0 ? '⚠ Negative Balance' : '✓ Positive Balance'}
                 </span>
                 <button style={{ ...S.btn('secondary'), padding: '6px 14px', fontSize: 12 }} onClick={reset}>↩ New Analysis</button>
-                <button style={{ ...S.btn('secondary'), padding: '6px 14px', fontSize: 12 }} onClick={analyze}>🔄 Re-analyze</button>
+                <button style={{ ...S.btn('secondary'), padding: '6px 14px', fontSize: 12 }} onClick={reanalyze} title="Re-runs analysis with current model. Manual positions will be preserved.">🔄 Re-analyze</button>
               </div>
             </div>
             {/* Post-analysis agreement controls */}
