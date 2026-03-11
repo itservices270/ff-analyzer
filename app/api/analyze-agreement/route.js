@@ -110,6 +110,7 @@ You are analyzing an MCA agreement (also called a Merchant Cash Advance Agreemen
     "ach_fee": 0,
     "ucc_fee": 0,
     "technology_fee": 0,
+    "prior_balance_paid": 0,
     "other_fees": [{ "name": "", "amount": 0 }],
     "total_fees": 0,
     "total_fees_pct_of_purchase": 0,
@@ -199,6 +200,7 @@ RULES:
 5. If reconciliation rights exist, this is always HIGH leverage — the merchant can demand payment adjustment
 6. If anti-stacking clause exists AND merchant had prior positions when this funder funded, the FUNDER breached first
 7. Always calculate net_proceeds = purchase_price - total_fees. This is what the merchant actually got.
+7b. prior_balance_paid: If the new advance paid off an earlier position with the SAME funder (or any funder), record that payoff amount in prior_balance_paid. This shows the merchant received LESS cash than purchase_price suggests. Example: TBF funded $450K but $250,125 went to pay off their prior TBF position — prior_balance_paid = 250125.
 8. daily_payment_implied_annual_revenue = (daily_payment / specified_receivable_percentage) × 365 if percentage is given
 9. Be precise with clause references — cite section numbers when visible
 10. Every fee matters. Even a $495 closing fee on a $50K advance is 1% — it adds up.`;

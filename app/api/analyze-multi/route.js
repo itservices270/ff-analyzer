@@ -167,6 +167,7 @@ CRITICAL RULES:
 7. Use the MOST RECENT month's MCA payments for estimated_monthly_total and DSR calculations. But if a position is PAID OFF (see rule 12), use $0 for current.
 7b. monthly_average_revenue = net_verified_revenue ÷ number of months analyzed. This is the correct denominator for DSR.
 8. DSR posture: healthy=0-15%, elevated=15-25%, stressed=25-35%, critical=35-50%, unsustainable=50%+
+8b. weeks_to_insolvency: If free_cash_after_mca is NEGATIVE, calculate how many weeks until the account hits zero. Formula: most_recent_ending_balance / weekly_mca_total. If balance is already negative or account has 3+ days negative in most recent month, set a low number (4-12 weeks). If cash flow is positive and stable, set null.
 
 REVENUE CLASSIFICATION (CRITICAL — get this right):
 9. Card processing settlements are TRUE REVENUE — these are the business's actual income:

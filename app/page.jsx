@@ -611,7 +611,7 @@ function RiskTab({ a, positions, excludedIds, otherExcludedIds, excludedDepositI
         <div style={S.stat}>
           <div style={S.statLabel}>Weeks to Insolvency</div>
           <div style={S.statValue(m.weeks_to_insolvency && m.weeks_to_insolvency < 8 ? '#ef5350' : '#e8e8f0')}>
-            {m.weeks_to_insolvency ? `${m.weeks_to_insolvency}w` : 'N/A'}
+            {m.weeks_to_insolvency != null && m.weeks_to_insolvency !== '' ? `${m.weeks_to_insolvency}w` : <span style={{fontSize:12,color:'rgba(232,232,240,0.35)'}}>Calculate →</span>}
           </div>
           <div style={S.statSub}>{m.trend_direction} trend</div>
         </div>
@@ -823,8 +823,76 @@ function AgreementsTab({ agreementResults }) {
     );
   }
 
+  // Build cross-agreement key
+  const CLAUSE_DEFS = [
+    { key: 'reconciliation', label: 'Reconciliation', color: 'green', desc: 'Merchant can request payment reduction if revenue drops. Most powerful renegotiation lever.' },
+    { key: 'anti_stacking', label: 'Anti-Stacking', color: 'amber', desc: 'Prohibits taking additional MCA positions. If funder violated this themselves by funding into existing stack, their enforcement position is weakened.' },
+    { key: 'coj', label: 'COJ (Confession of Judgment)', color: 'red', desc: 'Allows funder to enter judgment without lawsuit. UNENFORCEABLE in NY as of Feb 2026 under FAIR Act.' },
+    { key: 'arbitration', label: 'Arbitration', color: 'purple', desc: 'Disputes resolved by arbitrator, not court. Can cut both ways — faster but limits appeal rights.' },
+    { key: 'jury_waiver', label: 'Jury Waiver', color: 'grey', desc: 'Merchant waives right to jury trial. Standard in most MCA agreements.' },
+    { key: 'pg', label: 'Personal Guarantee', color: 'red', desc: 'Owner personally liable for the MCA. Scope matters — full PG vs performance obligations only.' },
+    { key: 'ucc', label: 'UCC Lien', color: 'grey', desc: 'Blanket lien on business assets filed with the state. Public record that affects future financing.' },
+  ];
+
+  const getClauseStatus = (ag, key) => {
+    const d = ag.analysis || ag;
+    const clauses = d.problematic_clauses || [];
+    const protections = d.merchant_protections || [];
+    const sa = d.stacking_analysis || {};
+    switch(key) {
+      case 'reconciliation': return protections.some(p => p.protection_type === 'reconciliation');
+      case 'anti_stacking':  return sa.has_anti_stacking_clause || clauses.some(c => c.clause_type === 'anti_stacking');
+      case 'coj':            return clauses.some(c => c.clause_type === 'coj');
+      case 'arbitration':    return clauses.some(c => c.clause_type === 'arbitration') || (d.agreement_type||'').includes('arbitration');
+      case 'jury_waiver':    return clauses.some(c => c.clause_type === 'jury_waiver');
+      case 'pg':             return clauses.some(c => c.clause_type === 'personal_guarantee');
+      case 'ucc':            return clauses.some(c => /ucc/i.test(c.clause_type));
+      default:               return false;
+    }
+  };
+
+  const tagColors = { green: '#4caf50', amber: '#ff9800', red: '#ef5350', purple: '#ce93d8', grey: 'rgba(232,232,240,0.4)' };
+
   return (
     <div>
+      {/* ── Agreement Key / Comparison Grid ── */}
+      <div style={{ ...S.card, background: 'rgba(255,255,255,0.04)', marginBottom: 24 }}>
+        <div style={S.sectionTitle}>Agreement Clause Comparison</div>
+        <div style={{ overflowX: 'auto' }}>
+          <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 12 }}>
+            <thead>
+              <tr>
+                <th style={{ textAlign: 'left', padding: '8px 12px', color: 'rgba(232,232,240,0.4)', fontWeight: 400, letterSpacing: 1, borderBottom: '1px solid rgba(255,255,255,0.08)', minWidth: 180 }}>CLAUSE</th>
+                {agreementResults.map((ag, i) => {
+                  const d = ag.analysis || ag;
+                  return <th key={i} style={{ textAlign: 'center', padding: '8px 12px', color: '#00e5ff', fontWeight: 400, borderBottom: '1px solid rgba(255,255,255,0.08)', minWidth: 120 }}>{d.funder_name || ag.fileName?.replace('.pdf','') || `Agreement ${i+1}`}</th>;
+                })}
+                <th style={{ textAlign: 'left', padding: '8px 12px', color: 'rgba(232,232,240,0.4)', fontWeight: 400, letterSpacing: 1, borderBottom: '1px solid rgba(255,255,255,0.08)' }}>WHAT IT MEANS</th>
+              </tr>
+            </thead>
+            <tbody>
+              {CLAUSE_DEFS.map((def) => (
+                <tr key={def.key} style={{ borderBottom: '1px solid rgba(255,255,255,0.04)' }}>
+                  <td style={{ padding: '10px 12px', color: tagColors[def.color], fontWeight: 500 }}>{def.label}</td>
+                  {agreementResults.map((ag, i) => {
+                    const has = getClauseStatus(ag, def.key);
+                    return (
+                      <td key={i} style={{ textAlign: 'center', padding: '10px 12px' }}>
+                        {has
+                          ? <span style={{ color: def.key === 'reconciliation' ? '#4caf50' : def.color === 'grey' ? 'rgba(232,232,240,0.5)' : tagColors[def.color], fontSize: 16 }}>✓</span>
+                          : <span style={{ color: 'rgba(255,255,255,0.15)', fontSize: 14 }}>—</span>
+                        }
+                      </td>
+                    );
+                  })}
+                  <td style={{ padding: '10px 12px', color: 'rgba(232,232,240,0.45)', lineHeight: 1.5, fontSize: 11 }}>{def.desc}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      </div>
+
       <div style={S.sectionTitle}>Analyzed Agreements ({agreementResults.length})</div>
       {agreementResults.map((ag, i) => {
         // API returns nested structure — unwrap all sub-objects
@@ -844,7 +912,13 @@ function AgreementsTab({ agreementResults }) {
         const specifiedPct    = ft.specified_receivable_percentage || rv.withhold_percentage_stated || 0;
         const originationFee  = fa.origination_fee || 0;
         const netProceeds     = fa.net_proceeds_to_merchant || (purchasePrice - (fa.total_fees || 0)) || 0;
-        const priorBalance    = (fa.other_fees || []).find(f => /prior|buyout|payoff/i.test(f.name))?.amount || 0;
+        const priorBalance    = (() => {
+        // Look in other_fees for buyout/prior balance paid to previous position
+        const fromFees = (fa.other_fees || []).find(f => /prior|buyout|payoff|balance/i.test(f.name))?.amount || 0;
+        // Also check fee_analysis for explicit prior_balance field
+        const explicit = fa.prior_balance_paid || fa.prior_balance || 0;
+        return explicit || fromFees;
+      })();
         const govLaw          = sc.governing_law_state || d.governing_law || '—';
 
         // Clause flags — search problematic_clauses array
@@ -1150,14 +1224,15 @@ function TrendTab({ a }) {
         <>
           <div style={S.divider} />
           <div style={S.sectionTitle}>Monthly Revenue</div>
-          <div style={{ display: 'flex', gap: 8, alignItems: 'flex-end', height: 160, marginBottom: 8, padding: '0 4px' }}>
+          <div style={{ display: 'flex', gap: 8, alignItems: 'flex-end', height: 180, marginBottom: 8, padding: '0 4px', position: 'relative' }}>
             {revenues.map((r, i) => {
-              const pct = (r.amount / maxRev) * 100;
+              const barH = Math.max(Math.round((r.amount / maxRev) * 130), 4);
+              const isHighest = r.amount === maxRev;
               return (
-                <div key={i} style={{ flex: 1, display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 6 }}>
-                  <div style={{ fontSize: 10, color: 'rgba(232,232,240,0.5)' }}>{fmt(r.amount)}</div>
-                  <div style={{ width: '100%', background: `linear-gradient(180deg, #00e5ff, #00acc1)`, borderRadius: '4px 4px 0 0', height: `${Math.max(pct, 3)}%`, transition: 'height 0.4s ease', opacity: 0.8 + (i / revenues.length) * 0.2 }} />
-                  <div style={{ fontSize: 10, color: 'rgba(232,232,240,0.4)', textAlign: 'center', lineHeight: 1.3 }}>{r.month}</div>
+                <div key={i} style={{ flex: 1, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'flex-end', gap: 4, minWidth: 0 }}>
+                  <div style={{ fontSize: 10, color: 'rgba(232,232,240,0.6)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', maxWidth: '100%' }}>{fmt(r.amount)}</div>
+                  <div style={{ width: '80%', background: isHighest ? 'linear-gradient(180deg, #EAD068, #f0a500)' : 'linear-gradient(180deg, #00e5ff, #00acc1)', borderRadius: '4px 4px 0 0', height: barH + 'px', transition: 'height 0.4s ease', minHeight: 4 }} />
+                  <div style={{ fontSize: 10, color: 'rgba(232,232,240,0.4)', textAlign: 'center', lineHeight: 1.3, whiteSpace: 'nowrap' }}>{r.month}</div>
                 </div>
               );
             })}
@@ -1231,7 +1306,7 @@ export default function FFAnalyzer() {
   const [excludedDepositIds, setExcludedDepositIds] = useState([]);
   const inputRef = useRef(null);
 
-  const TABS = ['📊 Revenue', '📈 Trend', '🏦 MCA Positions', '⚠️ Risk', '🤝 Negotiation', '📋 Agreements', '🔄 Cross-Ref', '🎯 Confidence', '⬇️ Export'];
+  const TABS = ['📊 Revenue', '📈 Trend', '🏦 MCA Positions', '⚠️ Risk', '📋 Agreements', '🔄 Cross-Ref', '🤝 Negotiation', '🎯 Confidence', '⬇️ Export'];
 
   // ─── Agreement state ─────────────────────────────────────────
   const [uploadedAgreements, setUploadedAgreements] = useState([]);
@@ -1362,8 +1437,21 @@ export default function FFAnalyzer() {
     e.preventDefault();
     const files = Array.from(e.dataTransfer?.files || e.target?.files || []);
     if (!files.length) return;
-    const newEntries = files.map(f => ({ id: Date.now() + Math.random(), file: f, name: f.name, status: 'pending' }));
+    const newEntries = files.map(f => ({ id: Date.now() + Math.random(), file: f, name: f.name, status: 'detecting', textLength: 0 }));
     setUploadedAgreements(prev => [...prev, ...newEntries]);
+    // Detect text vs scanned for each agreement
+    for (const entry of newEntries) {
+      try {
+        const text = await extractPDFText(entry.file);
+        const hasText = text && text.trim().length > 200;
+        setUploadedAgreements(prev => prev.map(a =>
+          a.id === entry.id ? { ...a, status: 'pending', textLength: text?.length || 0, isScanned: !hasText } : a
+        ));
+      } catch {
+        setUploadedAgreements(prev => prev.map(a => a.id === entry.id ? { ...a, status: 'pending', isScanned: true } : a));
+      }
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   const analyzeAgreements = async () => {
@@ -1407,7 +1495,7 @@ export default function FFAnalyzer() {
       const res = await fetch('/api/cross-reference', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ bankAnalysis: result.analysis, agreements: agreementResults.map(a => a.analysis), model })
+        body: JSON.stringify({ bankAnalysis: result.analysis, agreements: agreementResults.filter(a => a.analysis).map(a => a.analysis), model })
       });
       const data = await res.json();
       if (data.analysis) {
@@ -1697,10 +1785,12 @@ export default function FFAnalyzer() {
                 {uploadedAgreements.length > 0 && <span style={{ fontSize: 12, color: 'rgba(232,232,240,0.5)' }}>{uploadedAgreements.length} loaded</span>}
               </div>
               {uploadedAgreements.map(ag => (
-                <span key={ag.id} style={{ display: 'inline-flex', alignItems: 'center', gap: 4, background: 'rgba(234,208,104,0.08)', border: '1px solid rgba(234,208,104,0.2)', borderRadius: 6, padding: '3px 8px', marginRight: 6, marginBottom: 4, fontSize: 11 }}>
-                  <span style={{ color: '#EAD068' }}>📋</span>
-                  <span style={{ color: 'rgba(232,232,240,0.6)' }}>{ag.name.slice(0, 25)}{ag.name.length > 25 ? '…' : ''}</span>
-                  <button onClick={() => setUploadedAgreements(prev => prev.filter(a => a.id !== ag.id))} style={{ background: 'none', border: 'none', color: 'rgba(232,232,240,0.3)', cursor: 'pointer', fontSize: 12, padding: 0 }}>✕</button>
+                <span key={ag.id} style={{ display: 'inline-flex', alignItems: 'center', gap: 5, background: ag.isScanned ? 'rgba(249,168,37,0.08)' : 'rgba(234,208,104,0.08)', border: `1px solid ${ag.isScanned ? 'rgba(249,168,37,0.3)' : 'rgba(234,208,104,0.2)'}`, borderRadius: 6, padding: '4px 8px', marginRight: 6, marginBottom: 4, fontSize: 11 }}>
+                  {ag.status === 'detecting' ? <span style={{color:'#00e5ff'}}>⏳</span> : ag.isScanned ? <span style={{color:'#ff9800'}}>🖨️</span> : <span style={{ color: '#EAD068' }}>📋</span>}
+                  <span style={{ color: 'rgba(232,232,240,0.6)' }}>{ag.name.slice(0, 22)}{ag.name.length > 22 ? '…' : ''}</span>
+                  {ag.isScanned && ag.status !== 'detecting' && <span style={{fontSize:9, color:'#ff9800', letterSpacing:0.5}}>SCANNED</span>}
+                  {!ag.isScanned && ag.status === 'pending' && <span style={{fontSize:9, color:'#81c784', letterSpacing:0.5}}>TEXT ✓</span>}
+                  <button onClick={() => setUploadedAgreements(prev => prev.filter(a => a.id !== ag.id))} style={{ background: 'none', border: 'none', color: 'rgba(232,232,240,0.3)', cursor: 'pointer', fontSize: 12, padding: 0, marginLeft: 2 }}>✕</button>
                 </span>
               ))}
             </div>
@@ -1780,8 +1870,13 @@ export default function FFAnalyzer() {
                   </button>
                 )}
                 {uploadedAgreements.map(ag => (
-                  <span key={ag.id} style={{ fontSize: 10, color: ag.status === 'done' ? '#81c784' : ag.status === 'error' ? '#ef9a9a' : 'rgba(232,232,240,0.4)' }}>
-                    {ag.name.slice(0,18)}{ag.name.length>18?'…':''} [{ag.status}]
+                  <span key={ag.id} style={{ display: 'inline-flex', alignItems: 'center', gap: 5, fontSize: 10, color: 'rgba(232,232,240,0.5)', background: 'rgba(255,255,255,0.04)', border: '1px solid rgba(255,255,255,0.08)', borderRadius: 6, padding: '3px 7px' }}>
+                    {ag.status === 'done' && <span style={{ color: '#81c784' }}>✓</span>}
+                    {ag.status === 'error' && <span style={{ color: '#ef9a9a' }}>✕</span>}
+                    {ag.status === 'analyzing' && <span style={{ color: '#00e5ff' }}>⏳</span>}
+                    {ag.status === 'pending' && <span style={{ color: '#EAD068' }}>📋</span>}
+                    {ag.name.slice(0,20)}{ag.name.length>20?'…':''}
+                    {ag.status === 'error' && ag.error && <span style={{ color: '#ef9a9a', fontSize: 9 }}> — {ag.error.slice(0,30)}</span>}
                   </span>
                 ))}
               </div>
@@ -1798,9 +1893,9 @@ export default function FFAnalyzer() {
             {activeTab === 1 && <TrendTab a={result.analysis} />}
             {activeTab === 2 && <MCATab a={result.analysis} positions={positions} setPositions={setPositions} excludedIds={excludedIds} setExcludedIds={setExcludedIds} otherExcludedIds={otherExcludedIds} setOtherExcludedIds={setOtherExcludedIds} excludedDepositIds={excludedDepositIds} />}
             {activeTab === 3 && <RiskTab a={result.analysis} positions={positions} excludedIds={excludedIds} otherExcludedIds={otherExcludedIds} excludedDepositIds={excludedDepositIds} />}
-            {activeTab === 4 && <NegotiationTab a={result.analysis} positions={positions} excludedIds={excludedIds} otherExcludedIds={otherExcludedIds} excludedDepositIds={excludedDepositIds} />}
-            {activeTab === 5 && <AgreementsTab agreementResults={agreementResults} />}
-            {activeTab === 6 && <CrossReferenceTab crossRefResult={crossRefResult} />}
+            {activeTab === 4 && <AgreementsTab agreementResults={agreementResults} />}
+            {activeTab === 5 && <CrossReferenceTab crossRefResult={crossRefResult} />}
+            {activeTab === 6 && <NegotiationTab a={result.analysis} positions={positions} excludedIds={excludedIds} otherExcludedIds={otherExcludedIds} excludedDepositIds={excludedDepositIds} />}
             {activeTab === 7 && <ConfidenceTab a={result.analysis} />}
             {activeTab === 8 && <ExportTab a={result.analysis} fileName={result.file_name || 'analysis'} positions={positions} excludedIds={excludedIds} otherExcludedIds={otherExcludedIds} excludedDepositIds={excludedDepositIds} />}
           </div>
