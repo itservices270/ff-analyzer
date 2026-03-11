@@ -232,6 +232,7 @@ export async function POST(request) {
     const response = await client.messages.create({
       model: selectedModel,
       max_tokens: 16000,
+      temperature: 0,
       messages: [{ role: 'user', content: contentBlocks }]
     });
 

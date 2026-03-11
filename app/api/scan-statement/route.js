@@ -85,6 +85,7 @@ export async function POST(request) {
     const response = await client.messages.create({
       model: selectedModel,
       max_tokens: 12000,
+      temperature: 0,
       messages: [{
         role: 'user',
         content: [contentBlock, { type: 'text', text: SCAN_PROMPT }]

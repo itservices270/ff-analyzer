@@ -146,6 +146,7 @@ export async function POST(request) {
     const response = await client.messages.create({
       model: selectedModel,
       max_tokens: 8000,
+      temperature: 0,
       messages: [{
         role: 'user',
         content: `${ANALYSIS_PROMPT}\n\nBANK STATEMENT TEXT:\n\n${text}`

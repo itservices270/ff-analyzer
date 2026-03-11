@@ -229,6 +229,7 @@ ${agreementAnalyses.map((a, i) => `### Agreement ${i + 1}: ${a.funder_name || 'U
     const response = await client.messages.create({
       model: selectedModel,
       max_tokens: 16000,
+      temperature: 0,
       messages: [{
         role: 'user',
         content: `${XREF_PROMPT}\n\nDATA TO CROSS-REFERENCE:\n\n${truncated}`
