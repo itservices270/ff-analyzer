@@ -211,15 +211,45 @@ export async function POST(request) {
     let text = null, fileName = 'unknown', selectedModel, pdfBase64 = null;
 
     if (contentType.includes('multipart/form-data')) {
-      // FormData path — scanned PDF sent directly
+      // FormData path — scanned PDF or images sent directly
       const formData = await request.formData();
-      const file = formData.get('pdf');
       const model = formData.get('model') || 'opus';
+      const useImages = formData.get('useImages') === 'true';
+      selectedModel = model === 'sonnet' ? 'claude-sonnet-4-20250514' : 'claude-opus-4-20250514';
+      fileName = formData.get('fileName') || 'agreement.pdf';
+
+      if (useImages) {
+        // Image array path — client rendered PDF pages to JPEG
+        const imageEntries = [];
+        for (const [key, val] of formData.entries()) {
+          if (key.startsWith('image_') && val && val.arrayBuffer) {
+            const bytes = await val.arrayBuffer();
+            const b64 = Buffer.from(bytes).toString('base64');
+            imageEntries.push({ key, b64 });
+          }
+        }
+        imageEntries.sort((a, b) => parseInt(a.key.split('_')[1]) - parseInt(b.key.split('_')[1]));
+        // Build image content blocks directly (set below)
+        const imgBlocks = imageEntries.map(e => ({ type: 'image', source: { type: 'base64', media_type: 'image/jpeg', data: e.b64 } }));
+        imgBlocks.push({ type: 'text', text: AGREEMENT_PROMPT + '
+
+[Read the agreement pages above and extract all terms.]' });
+        const response = await client.messages.create({
+          model: selectedModel, max_tokens: 12000, temperature: 0,
+          messages: [{ role: 'user', content: imgBlocks }]
+        });
+        const raw = response.content[0]?.text || '';
+        const cleaned = raw.replace(/```json|```/g, '').trim();
+        let start = cleaned.indexOf('{'), end = cleaned.lastIndexOf('}');
+        if (start === -1 || end === -1) return Response.json({ error: 'No JSON in response' }, { status: 500 });
+        const analysis = JSON.parse(cleaned.slice(start, end + 1));
+        return Response.json({ analysis, fileName });
+      }
+
+      const file = formData.get('pdf');
       if (!file) return Response.json({ error: 'No file provided' }, { status: 400 });
       const bytes = await file.arrayBuffer();
       pdfBase64 = Buffer.from(bytes).toString('base64');
-      fileName = file.name || 'agreement.pdf';
-      selectedModel = model === 'sonnet' ? 'claude-sonnet-4-20250514' : 'claude-opus-4-20250514';
     } else {
       // JSON path — text already extracted
       const body = await request.json();

@@ -1749,6 +1749,29 @@ export default function FFAnalyzer() {
     setAgreementLoading(false);
   };
 
+  const retryAgreementAsImages = async (ag) => {
+    if (!ag.file) return;
+    setUploadedAgreements(prev => prev.map(a => a.id === ag.id ? { ...a, status: 'analyzing', error: null } : a));
+    try {
+      const images = await renderPDFToImages(ag.file);
+      const formData = new FormData();
+      images.forEach((img, i) => formData.append(`image_${i}`, img));
+      formData.append('model', model);
+      formData.append('fileName', ag.name);
+      formData.append('useImages', 'true');
+      const res = await fetch('/api/analyze-agreement', { method: 'POST', body: formData });
+      const data = await res.json();
+      if (data.analysis) {
+        setAgreementResults(prev => [...prev.filter(r => r.fileName !== ag.name), { fileName: ag.name, analysis: data.analysis }]);
+        setUploadedAgreements(prev => prev.map(a => a.id === ag.id ? { ...a, status: 'done', isScanned: true } : a));
+      } else {
+        setUploadedAgreements(prev => prev.map(a => a.id === ag.id ? { ...a, status: 'error', error: data.error || 'Image scan failed' } : a));
+      }
+    } catch (err) {
+      setUploadedAgreements(prev => prev.map(a => a.id === ag.id ? { ...a, status: 'error', error: err.message } : a));
+    }
+  };
+
   const runCrossReference = async () => {
     if (!result?.analysis) { alert('Run bank statement analysis first.'); return; }
     if (agreementResults.length === 0) { alert('Analyze at least one MCA agreement first.'); return; }
@@ -2145,13 +2168,18 @@ export default function FFAnalyzer() {
                   </button>
                 )}
                 {uploadedAgreements.map(ag => (
-                  <span key={ag.id} style={{ display: 'inline-flex', alignItems: 'center', gap: 5, fontSize: 10, color: 'rgba(232,232,240,0.5)', background: 'rgba(255,255,255,0.04)', border: '1px solid rgba(255,255,255,0.08)', borderRadius: 6, padding: '3px 7px' }}>
+                  <span key={ag.id} style={{ display: 'inline-flex', alignItems: 'center', gap: 5, fontSize: 10, color: 'rgba(232,232,240,0.5)', background: ag.status === 'error' ? 'rgba(239,83,80,0.08)' : 'rgba(255,255,255,0.04)', border: `1px solid ${ag.status === 'error' ? 'rgba(239,83,80,0.3)' : 'rgba(255,255,255,0.08)'}`, borderRadius: 6, padding: '3px 7px' }}>
                     {ag.status === 'done' && <span style={{ color: '#81c784' }}>✓</span>}
                     {ag.status === 'error' && <span style={{ color: '#ef9a9a' }}>✕</span>}
                     {ag.status === 'analyzing' && <span style={{ color: '#00e5ff' }}>⏳</span>}
                     {ag.status === 'pending' && <span style={{ color: '#EAD068' }}>📋</span>}
-                    {ag.name.slice(0,20)}{ag.name.length>20?'…':''}
-                    {ag.status === 'error' && ag.error && <span style={{ color: '#ef9a9a', fontSize: 9 }}> — {ag.error.slice(0,30)}</span>}
+                    {ag.name.slice(0,18)}{ag.name.length>18?'…':''}
+                    {ag.status === 'error' && (
+                      <>
+                        <button onClick={() => { setUploadedAgreements(prev => prev.map(a => a.id === ag.id ? {...a, status: 'pending', error: null} : a)); }} style={{ marginLeft: 4, padding: '1px 6px', borderRadius: 4, border: '1px solid rgba(0,229,255,0.3)', background: 'rgba(0,229,255,0.1)', color: '#00e5ff', cursor: 'pointer', fontSize: 9, fontFamily: 'inherit' }}>↺ Retry</button>
+                        <button onClick={() => retryAgreementAsImages(ag)} style={{ padding: '1px 6px', borderRadius: 4, border: '1px solid rgba(234,208,104,0.3)', background: 'rgba(234,208,104,0.1)', color: '#EAD068', cursor: 'pointer', fontSize: 9, fontFamily: 'inherit' }}>📷 Scan</button>
+                      </>
+                    )}
                   </span>
                 ))}
               </div>

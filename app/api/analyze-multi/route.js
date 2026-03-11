@@ -182,6 +182,7 @@ REVENUE CLASSIFICATION (CRITICAL — get this right):
 9e. Each monthly_breakdown entry MUST include card_processing, cash_deposits, ach_credits, vendor_credits that sum to approximately net_verified_revenue.
 
 WIRE TRANSFERS IN: Any large wire transfer deposit (e.g. "WIRE TRANSFER IN", "ACH CREDIT" from a known MCA funder name) must be listed as a revenue_source with is_excluded=true and type="loan". Even if the funder name appears mid-description (e.g. "THE MERCHANT MARKETP" or "ROWAN ADVANCE" or "TBF GRP"), flag it. Do NOT omit large one-time deposits — always include them in revenue_sources so the user can see and manually toggle them.
+CRITICAL — MULTIPLE WIRES FROM SAME FUNDER = SEPARATE ENTRIES: If the same funder (e.g. "THE MERCHANT MARKETP") has wire deposits on DIFFERENT dates at DIFFERENT amounts, list each wire as a SEPARATE revenue_source entry with its own amount and date. Do NOT combine them into one entry. Example: TMM wire of $318,993 in one month AND TMM wire of $121,812 in another month = TWO separate excluded entries, not one combined entry.
 ADVANCE DEPOSITS: When you detect an MCA funder wire in as a deposit, also record it in the corresponding mca_position as advance_deposit_amount and advance_deposit_date.
 
 NOT-MCA EXCLUSIONS (do NOT classify these as MCA positions):
