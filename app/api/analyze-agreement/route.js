@@ -226,10 +226,19 @@ export async function POST(request) {
           messages: [{ role: 'user', content: imgBlocks }]
         });
         const raw = response.content[0]?.text || '';
-        const cleaned = raw.replace(/```json|```/g, '').trim();
-        let start = cleaned.indexOf('{'), end = cleaned.lastIndexOf('}');
-        if (start === -1 || end === -1) return Response.json({ error: 'No JSON in response' }, { status: 500 });
-        const analysis = JSON.parse(cleaned.slice(start, end + 1));
+        const cleaned = raw.replace(/```json\n?/g, '').replace(/```\n?/g, '').trim();
+        let analysis;
+        try {
+          analysis = JSON.parse(cleaned);
+        } catch {
+          let depth = 0, start = -1, end = -1;
+          for (let i = 0; i < cleaned.length; i++) {
+            if (cleaned[i] === '{') { if (depth === 0) start = i; depth++; }
+            else if (cleaned[i] === '}') { depth--; if (depth === 0 && start >= 0) { end = i + 1; break; } }
+          }
+          if (start < 0 || end <= start) return Response.json({ error: 'No JSON in response' }, { status: 500 });
+          analysis = JSON.parse(cleaned.slice(start, end));
+        }
         return Response.json({ analysis, fileName });
       }
 

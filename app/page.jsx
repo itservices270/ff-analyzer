@@ -1454,8 +1454,8 @@ function AgreementsTab({ agreementResults }) {
     return (
       <div style={{ textAlign: 'center', padding: 40, color: 'rgba(232,232,240,0.4)' }}>
         <div style={{ fontSize: 40, marginBottom: 12 }}>📋</div>
-        <div style={{ fontSize: 15, marginBottom: 8 }}>No agreements analyzed yet</div>
-        <div style={{ fontSize: 13 }}>Upload MCA agreements using the controls above, then analyze them.</div>
+        <div style={{ fontSize: 15, marginBottom: 8, color: '#ffd54f' }}>Upload agreements to enable</div>
+        <div style={{ fontSize: 13, lineHeight: 1.7 }}>Upload MCA agreements using the "Add Agreements" button in the header above, then click "Analyze Agreements" to extract contract terms. Cross-reference analysis requires at least one analyzed agreement.</div>
       </div>
     );
   }
@@ -1651,51 +1651,177 @@ function AgreementsTab({ agreementResults }) {
 }
 
 // ─── Cross-Reference Tab (NEW) ───────────────────────────────────────────────
-function CrossReferenceTab({ crossRefResult }) {
+function CrossReferenceTab({ crossRefResult, agreementResults }) {
+  if (!agreementResults || agreementResults.length === 0) {
+    return (
+      <div style={{ textAlign: 'center', padding: 40, color: 'rgba(232,232,240,0.4)' }}>
+        <div style={{ fontSize: 40, marginBottom: 12 }}>📋</div>
+        <div style={{ fontSize: 15, marginBottom: 8, color: '#ffd54f' }}>Upload agreements to enable cross-reference</div>
+        <div style={{ fontSize: 13 }}>Upload MCA agreements and click "Analyze Agreements" first. Then click "Run Cross-Reference" to compare contract terms against bank data.</div>
+      </div>
+    );
+  }
   if (!crossRefResult) {
     return (
       <div style={{ textAlign: 'center', padding: 40, color: 'rgba(232,232,240,0.4)' }}>
         <div style={{ fontSize: 40, marginBottom: 12 }}>🔄</div>
         <div style={{ fontSize: 15, marginBottom: 8 }}>Cross-reference not yet run</div>
-        <div style={{ fontSize: 13 }}>Analyze bank statements and agreements first, then click "Run Cross-Reference" in the header.</div>
+        <div style={{ fontSize: 13 }}>{agreementResults.length} agreement{agreementResults.length > 1 ? 's' : ''} analyzed. Click "Run Cross-Reference" in the header to compare against bank data.</div>
       </div>
     );
   }
   const cr = crossRefResult.analysis || crossRefResult;
-  const comparisons = cr.position_comparisons || cr.comparisons || [];
-  const violations = cr.violations || cr.discrepancies || [];
-  const narrative = cr.stacking_narrative || cr.narrative || '';
+  const chronology = cr.position_chronology || [];
+  const contractVsReality = cr.contract_vs_reality || [];
+  const scorecards = cr.funder_scorecards || [];
+  const cascading = cr.cascading_burden_analysis || {};
+  const recommendation = cr.restructuring_recommendation || {};
+  const revenueReality = cr.revenue_reality || {};
+
+  const gradeColor = (g) => g === 'A' ? '#4caf50' : g === 'B' ? '#81c784' : g === 'C' ? '#ffd54f' : g === 'D' ? '#ff9800' : '#ef5350';
 
   return (
     <div>
-      {narrative && (
-        <div style={{ fontSize: 13, color: 'rgba(232,232,240,0.7)', lineHeight: 1.8, padding: '14px 18px', background: 'rgba(255,255,255,0.03)', borderRadius: 8, marginBottom: 16, whiteSpace: 'pre-line' }}>{narrative}</div>
+      {/* Revenue Reality */}
+      {revenueReality.actual_monthly_revenue > 0 && (
+        <div style={{ ...S.card, background: 'rgba(0,229,255,0.04)', marginBottom: 20 }}>
+          <div style={S.sectionTitle}>Revenue Reality (Bank-Verified)</div>
+          <div style={S.row}>
+            <div style={S.stat}><div style={S.statLabel}>Actual Monthly Revenue</div><div style={S.statValue('#00e5ff')}>{fmt(revenueReality.actual_monthly_revenue)}</div></div>
+            {revenueReality.actual_gross_profit > 0 && <div style={S.stat}><div style={S.statLabel}>Actual Gross Profit</div><div style={S.statValue('#81c784')}>{fmt(revenueReality.actual_gross_profit)}</div></div>}
+            <div style={S.stat}><div style={S.statLabel}>Months Analyzed</div><div style={S.statValue('#e8e8f0')}>{revenueReality.months_analyzed || '—'}</div></div>
+          </div>
+          {revenueReality.revenue_methodology && <div style={{ fontSize: 12, color: 'rgba(232,232,240,0.5)', marginTop: 10, lineHeight: 1.6 }}>{revenueReality.revenue_methodology}</div>}
+        </div>
       )}
-      {comparisons.length > 0 && (
+
+      {/* Cascading Burden Narrative */}
+      {cascading.narrative && (
+        <div style={{ fontSize: 13, color: 'rgba(232,232,240,0.7)', lineHeight: 1.8, padding: '14px 18px', background: 'rgba(255,255,255,0.03)', borderRadius: 8, marginBottom: 16, whiteSpace: 'pre-line' }}>{cascading.narrative}</div>
+      )}
+
+      {/* Position Chronology */}
+      {chronology.length > 0 && (
         <>
-          <div style={S.sectionTitle}>Contract vs Reality</div>
-          {comparisons.map((c, i) => (
-            <div key={i} style={{ ...S.card, background: 'rgba(255,255,255,0.04)', padding: 16 }}>
-              <div style={{ fontSize: 15, color: '#e8e8f0', marginBottom: 10 }}>{c.funder_name || c.funder}</div>
-              <div style={S.grid3}>
-                <div><div style={S.statLabel}>Contract Payment</div><div style={{ fontSize: 15, color: '#ffd54f' }}>{fmtD(c.contracted_payment || c.contract_amount)}</div></div>
-                <div><div style={S.statLabel}>Actual Payment</div><div style={{ fontSize: 15, color: '#00e5ff' }}>{fmtD(c.actual_payment || c.bank_amount)}</div></div>
-                <div><div style={S.statLabel}>Difference</div><div style={{ fontSize: 15, color: Math.abs(c.difference || 0) > 1 ? '#ef5350' : '#4caf50' }}>{fmtD(c.difference || 0)}</div></div>
+          <div style={S.sectionTitle}>Funding Chronology</div>
+          {chronology.map((p, i) => (
+            <div key={i} style={{ ...S.funderCard, marginBottom: 10 }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 8 }}>
+                <div>
+                  <div style={{ fontSize: 14, color: '#e8e8f0' }}><span style={{ color: 'rgba(232,232,240,0.4)', marginRight: 8 }}>#{p.order}</span>{p.funder_name}</div>
+                  <div style={{ fontSize: 12, color: 'rgba(232,232,240,0.45)', marginTop: 2 }}>Funded: {p.funding_date} · Purchase: {fmt(p.purchase_price)} · Net: {fmt(p.net_proceeds)}</div>
+                </div>
+                <div style={{ textAlign: 'right' }}>
+                  <div style={{ fontSize: 15, color: '#ef9a9a' }}>{fmt(p.weekly_payment)}/wk</div>
+                  <div style={{ fontSize: 11, color: 'rgba(232,232,240,0.4)' }}>{fmt(p.monthly_payment)}/mo</div>
+                </div>
               </div>
-              {c.notes && <div style={{ fontSize: 12, color: 'rgba(232,232,240,0.4)', marginTop: 8 }}>{c.notes}</div>}
+              <div style={S.grid2}>
+                <div><div style={S.statLabel}>Existing MCA at Funding</div><div style={{ fontSize: 13, color: '#ffd54f' }}>{fmt(p.existing_weekly_mca_at_funding)}/wk</div></div>
+                <div><div style={S.statLabel}>Available Revenue After</div><div style={{ fontSize: 13, color: p.available_revenue_after_this_position < 0 ? '#ef5350' : '#81c784' }}>{fmt(p.available_revenue_after_this_position)}</div></div>
+              </div>
+              {p.pct_of_available_revenue_consumed > 0 && (
+                <div style={{ marginTop: 6 }}>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 11, color: 'rgba(232,232,240,0.4)', marginBottom: 3 }}>
+                    <span>Revenue consumed</span><span>{fmtP(p.pct_of_available_revenue_consumed)}</span>
+                  </div>
+                  <div style={S.progressTrack}><div style={S.progressBar(p.pct_of_available_revenue_consumed, p.pct_of_available_revenue_consumed > 80 ? '#ef5350' : '#ff9800')} /></div>
+                </div>
+              )}
+              {p.narrative && <div style={{ fontSize: 12, color: 'rgba(232,232,240,0.5)', marginTop: 8, lineHeight: 1.6 }}>{p.narrative}</div>}
             </div>
           ))}
         </>
       )}
-      {violations.length > 0 && (
+
+      {/* Contract vs Reality */}
+      {contractVsReality.length > 0 && (
         <>
-          <div style={S.sectionTitle}>Violations & Discrepancies</div>
-          {violations.map((v, i) => (
-            <div key={i} style={{ display: 'flex', gap: 10, alignItems: 'flex-start', padding: '12px 16px', borderRadius: 8, fontSize: 13, lineHeight: 1.6, marginBottom: 8, ...(v.severity === 'critical' ? { background: 'rgba(239,83,80,0.1)', border: '1px solid rgba(239,83,80,0.25)', color: '#ef9a9a' } : { background: 'rgba(249,168,37,0.1)', border: '1px solid rgba(249,168,37,0.25)', color: '#ffd54f' }) }}>
-              <span>{v.severity === 'critical' ? '🔴' : '🟡'}</span>
-              <div><strong>{v.funder || v.category}:</strong> {v.description || v.message}</div>
+          <div style={{ ...S.divider, marginTop: 20 }} />
+          <div style={S.sectionTitle}>Contract vs Reality</div>
+          {contractVsReality.map((c, i) => (
+            <div key={i} style={{ ...S.card, background: 'rgba(255,255,255,0.04)', padding: 16, marginBottom: 12 }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 }}>
+                <div style={{ fontSize: 15, color: '#e8e8f0' }}>{c.funder_name}</div>
+                <span style={S.tag(c.underwriting_grade === 'A' || c.underwriting_grade === 'B' ? 'green' : c.underwriting_grade === 'C' ? 'amber' : 'red')}>Grade: {c.underwriting_grade || '—'}</span>
+              </div>
+              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(150px, 1fr))', gap: 10, marginBottom: 10 }}>
+                <div><div style={S.statLabel}>Stated Revenue</div><div style={{ fontSize: 13, color: '#ffd54f' }}>{fmt(c.stated_revenue)}</div></div>
+                <div><div style={S.statLabel}>Actual Revenue</div><div style={{ fontSize: 13, color: '#00e5ff' }}>{fmt(c.actual_revenue)}</div></div>
+                <div><div style={S.statLabel}>Revenue Gap</div><div style={{ fontSize: 13, color: c.revenue_discrepancy_pct > 0 ? '#ef5350' : '#4caf50' }}>{c.revenue_discrepancy_pct > 0 ? '+' : ''}{fmtP(c.revenue_discrepancy_pct)} inflated</div></div>
+                <div><div style={S.statLabel}>Contract Withhold</div><div style={{ fontSize: 13, color: '#e8e8f0' }}>{fmtP(c.contracted_withhold_pct)}</div></div>
+                <div><div style={S.statLabel}>Actual Withhold</div><div style={{ fontSize: 13, color: c.actual_withhold_pct > c.contracted_withhold_pct ? '#ef5350' : '#e8e8f0' }}>{fmtP(c.actual_withhold_pct)}</div></div>
+                <div><div style={S.statLabel}>True Factor Rate</div><div style={{ fontSize: 13, color: c.true_factor_rate > 1.5 ? '#ef5350' : '#e8e8f0' }}>{c.true_factor_rate?.toFixed(2) || '—'}</div></div>
+              </div>
+              {(c.underwriting_failures || []).length > 0 && (
+                <div style={{ marginTop: 8 }}>
+                  {c.underwriting_failures.map((f, j) => (
+                    <div key={j} style={{ fontSize: 12, color: '#ef9a9a', lineHeight: 1.6 }}>• {f}</div>
+                  ))}
+                </div>
+              )}
+              {(c.leverage_points || []).length > 0 && (
+                <div style={{ marginTop: 8 }}>
+                  {c.leverage_points.map((lp, j) => (
+                    <div key={j} style={{ fontSize: 12, color: '#81c784', lineHeight: 1.6 }}>+ {lp}</div>
+                  ))}
+                </div>
+              )}
             </div>
           ))}
+        </>
+      )}
+
+      {/* Funder Scorecards */}
+      {scorecards.length > 0 && (
+        <>
+          <div style={{ ...S.divider, marginTop: 20 }} />
+          <div style={S.sectionTitle}>Funder Scorecards</div>
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(280px, 1fr))', gap: 12 }}>
+            {scorecards.map((sc, i) => (
+              <div key={i} style={{ ...S.card, background: 'rgba(255,255,255,0.04)', padding: 16 }}>
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 10 }}>
+                  <div style={{ fontSize: 14, color: '#e8e8f0' }}>{sc.funder_name}</div>
+                  <div style={{ fontSize: 22, fontWeight: 700, color: gradeColor(sc.underwriting_grade) }}>{sc.underwriting_grade}</div>
+                </div>
+                <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', marginBottom: 8 }}>
+                  <span style={S.tag(sc.revenue_verified ? 'green' : 'red')}>{sc.revenue_verified ? '✓' : '✕'} Rev Verified</span>
+                  <span style={S.tag(sc.existing_positions_accounted ? 'green' : 'red')}>{sc.existing_positions_accounted ? '✓' : '✕'} Stack Checked</span>
+                  {sc.anti_stacking_hypocrite && <span style={S.tag('red')}>Anti-Stack Hypocrite</span>}
+                  <span style={S.tag(sc.factor_rate_assessment === 'market' ? 'green' : sc.factor_rate_assessment === 'predatory' ? 'red' : 'amber')}>{sc.factor_rate_assessment}</span>
+                </div>
+                {sc.recommended_approach && <div style={{ fontSize: 12, color: 'rgba(232,232,240,0.55)', lineHeight: 1.6 }}>{sc.recommended_approach}</div>}
+                {sc.estimated_negotiation_outcome && <div style={{ fontSize: 11, color: '#81c784', marginTop: 6 }}>{sc.estimated_negotiation_outcome}</div>}
+              </div>
+            ))}
+          </div>
+        </>
+      )}
+
+      {/* Restructuring Recommendation */}
+      {recommendation.headline && (
+        <>
+          <div style={{ ...S.divider, marginTop: 20 }} />
+          <div style={S.sectionTitle}>Restructuring Recommendation</div>
+          <div style={{ ...S.card, background: 'rgba(76,175,80,0.06)', borderColor: 'rgba(76,175,80,0.2)' }}>
+            <div style={{ fontSize: 14, color: '#81c784', marginBottom: 12, lineHeight: 1.6 }}>{recommendation.headline}</div>
+            <div style={S.row}>
+              <div style={S.stat}><div style={S.statLabel}>Current Weekly</div><div style={{ fontSize: 16, color: '#ef9a9a' }}>{fmt(recommendation.current_total_weekly)}</div></div>
+              <div style={S.stat}><div style={S.statLabel}>Sustainable Weekly</div><div style={{ fontSize: 16, color: '#4caf50' }}>{fmt(recommendation.sustainable_weekly)}</div></div>
+              <div style={S.stat}><div style={S.statLabel}>Reduction</div><div style={{ fontSize: 16, color: '#00e5ff' }}>{fmtP(recommendation.recommended_reduction_pct)}</div></div>
+            </div>
+            {(recommendation.per_funder_recommendation || []).length > 0 && (
+              <div style={{ marginTop: 12 }}>
+                {recommendation.per_funder_recommendation.map((r, i) => (
+                  <div key={i} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '8px 0', borderBottom: '1px solid rgba(255,255,255,0.06)', fontSize: 12 }}>
+                    <span style={{ color: '#e8e8f0' }}>{r.funder}</span>
+                    <span><span style={{ color: '#ef9a9a', textDecoration: 'line-through' }}>{fmt(r.current_weekly)}</span> <span style={{ color: '#4caf50' }}>→ {fmt(r.recommended_weekly)}/wk</span> <span style={{ color: 'rgba(232,232,240,0.4)' }}>({r.recommended_term_weeks}wk)</span></span>
+                  </div>
+                ))}
+              </div>
+            )}
+            {recommendation.repayment_guarantee && <div style={{ fontSize: 12, color: 'rgba(232,232,240,0.5)', marginTop: 12, lineHeight: 1.6 }}>{recommendation.repayment_guarantee}</div>}
+          </div>
         </>
       )}
     </div>
@@ -2291,53 +2417,6 @@ export default function FFAnalyzer() {
     return text;
   };
 
-  const renderPDFAsImages = async (pdfFile) => {
-    await loadPDFJS();
-    const arrayBuffer = await pdfFile.arrayBuffer();
-    const pdf = await window.pdfjsLib.getDocument({ data: arrayBuffer }).promise;
-    const images = [];
-    // Only render first 15 pages to control cost — check copies are at the end anyway
-    const pagesToRender = Math.min(pdf.numPages, 12);
-    for (let i = 1; i <= pagesToRender; i++) {
-      const page = await pdf.getPage(i);
-      const viewport = page.getViewport({ scale: 1.0 });
-      const canvas = document.createElement('canvas');
-      canvas.width = viewport.width;
-      canvas.height = viewport.height;
-      const ctx = canvas.getContext('2d');
-      await page.render({ canvasContext: ctx, viewport }).promise;
-      images.push(canvas.toDataURL('image/jpeg', 0.55).split(',')[1]); // base64
-    }
-    return images;
-  };
-
-  const scanAsImages = async (id, file) => {
-    setUploadedFiles(prev => prev.map(f => f.id === id ? { ...f, status: 'detecting', error: null } : f));
-    try {
-      const images = await renderPDFAsImages(file);
-      // Quick detect on first 2 page images (statement period sometimes on page 2)
-      const res = await fetch('/api/detect-statement', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ text: '', fileName: file.name, images: images.slice(0, 2) }),
-      });
-      const data = await res.json();
-      setUploadedFiles(prev => prev.map(f => f.id === id ? {
-        ...f,
-        images,
-        text: null,
-        isScanned: true,
-        accountLabel: data.info?.account_name || file.name.replace('.pdf',''),
-        month: data.info?.statement_month || 'Unknown',
-        bankName: data.info?.bank_name || '',
-        acctNum: data.info?.account_number || '',
-        status: 'ready',
-      } : f));
-    } catch (err) {
-      setUploadedFiles(prev => prev.map(f => f.id === id ? { ...f, status: 'error', error: 'Image scan failed: ' + err.message } : f));
-    }
-  };
-
   const scanWithClaude = async (id, file, scanModel = 'sonnet') => {
     setUploadedFiles(prev => prev.map(f => f.id === id ? { ...f, status: 'detecting', error: null } : f));
     try {
@@ -2431,27 +2510,25 @@ export default function FFAnalyzer() {
           const looksIncomplete = hasLowConfidence || (missingCriticalFields && noProtections && noDefaultTriggers);
 
           if (looksIncomplete && !ag.autoRetried) {
-            // Auto-retry with image scan — pages likely blank
+            // Auto-retry by sending raw PDF via FormData (server-side processing)
             setUploadedAgreements(prev => prev.map(a => a.id === ag.id ? { ...a, status: 'retrying', autoRetried: true, error: null } : a));
             try {
-              const images = await renderPDFToImages(ag.file);
-              const formData = new FormData();
-              images.forEach((img, i) => formData.append(`image_${i}`, img));
-              formData.append('model', model);
-              formData.append('fileName', ag.name);
-              formData.append('useImages', 'true');
-              const retryRes = await fetch('/api/analyze-agreement', { method: 'POST', body: formData });
+              const retryFormData = new FormData();
+              retryFormData.append('pdf', ag.file);
+              retryFormData.append('model', model === 'sonnet' ? 'opus' : model);
+              retryFormData.append('fileName', ag.name);
+              const retryRes = await fetch('/api/analyze-agreement', { method: 'POST', body: retryFormData });
               const retryData = await retryRes.json();
               if (retryData.analysis) {
                 setAgreementResults(prev => [...prev, { fileName: ag.name, analysis: retryData.analysis }]);
                 setUploadedAgreements(prev => prev.map(a => a.id === ag.id ? { ...a, status: 'done', isScanned: true, error: null } : a));
               } else {
                 setAgreementResults(prev => [...prev, { fileName: ag.name, analysis: data.analysis }]);
-                setUploadedAgreements(prev => prev.map(a => a.id === ag.id ? { ...a, status: 'done', error: 'Image retry failed — using partial data' } : a));
+                setUploadedAgreements(prev => prev.map(a => a.id === ag.id ? { ...a, status: 'done', error: 'Retry failed — using partial data' } : a));
               }
             } catch (retryErr) {
               setAgreementResults(prev => [...prev, { fileName: ag.name, analysis: data.analysis }]);
-              setUploadedAgreements(prev => prev.map(a => a.id === ag.id ? { ...a, status: 'done', error: 'Image retry failed — using partial data' } : a));
+              setUploadedAgreements(prev => prev.map(a => a.id === ag.id ? { ...a, status: 'done', error: 'Retry failed — using partial data' } : a));
             }
           } else {
             setAgreementResults(prev => [...prev, { fileName: ag.name, analysis: data.analysis }]);
@@ -2467,23 +2544,21 @@ export default function FFAnalyzer() {
     setAgreementLoading(false);
   };
 
-  const retryAgreementAsImages = async (ag) => {
+  const retryAgreementAsPDF = async (ag) => {
     if (!ag.file) return;
     setUploadedAgreements(prev => prev.map(a => a.id === ag.id ? { ...a, status: 'retrying', error: null } : a));
     try {
-      const images = await renderPDFToImages(ag.file);
       const formData = new FormData();
-      images.forEach((img, i) => formData.append(`image_${i}`, img));
-      formData.append('model', model);
+      formData.append('pdf', ag.file);
+      formData.append('model', model === 'sonnet' ? 'opus' : model);
       formData.append('fileName', ag.name);
-      formData.append('useImages', 'true');
       const res = await fetch('/api/analyze-agreement', { method: 'POST', body: formData });
       const data = await res.json();
       if (data.analysis) {
         setAgreementResults(prev => [...prev.filter(r => r.fileName !== ag.name), { fileName: ag.name, analysis: data.analysis }]);
         setUploadedAgreements(prev => prev.map(a => a.id === ag.id ? { ...a, status: 'done', isScanned: true } : a));
       } else {
-        setUploadedAgreements(prev => prev.map(a => a.id === ag.id ? { ...a, status: 'error', error: data.error || 'Image scan failed' } : a));
+        setUploadedAgreements(prev => prev.map(a => a.id === ag.id ? { ...a, status: 'error', error: data.error || 'PDF scan failed' } : a));
       }
     } catch (err) {
       setUploadedAgreements(prev => prev.map(a => a.id === ag.id ? { ...a, status: 'error', error: err.message } : a));
@@ -2499,7 +2574,7 @@ export default function FFAnalyzer() {
       const res = await fetch('/api/cross-reference', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ bankAnalysis: result.analysis, agreements: agreementResults.filter(a => a.analysis).map(a => a.analysis), model })
+        body: JSON.stringify({ bankAnalysis: result.analysis, agreementAnalyses: agreementResults.filter(a => a.analysis).map(a => a.analysis), model })
       });
       const data = await res.json();
       if (data.analysis) {
@@ -2778,7 +2853,6 @@ export default function FFAnalyzer() {
                         <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
                           <button onClick={() => scanWithClaude(f.id, f.file, 'sonnet')} style={{ padding: '5px 10px', borderRadius: 6, border: '1px solid rgba(0,229,255,0.3)', background: 'rgba(0,229,255,0.08)', color: '#00e5ff', cursor: 'pointer', fontSize: 11, fontFamily: 'inherit' }}>🔍 Scan (Sonnet)</button>
                           <button onClick={() => scanWithClaude(f.id, f.file, 'opus')} style={{ padding: '5px 10px', borderRadius: 6, border: '1px solid rgba(76,175,80,0.3)', background: 'rgba(76,175,80,0.08)', color: '#4caf50', cursor: 'pointer', fontSize: 11, fontFamily: 'inherit' }}>🔍 Scan (Opus)</button>
-                          <button onClick={() => scanAsImages(f.id, f.file)} style={{ padding: '5px 10px', borderRadius: 6, border: '1px solid rgba(234,208,104,0.3)', background: 'rgba(234,208,104,0.08)', color: '#EAD068', cursor: 'pointer', fontSize: 11, fontFamily: 'inherit' }}>📷 As Images</button>
                         </div>
                       </div>
                     )}
@@ -2788,7 +2862,6 @@ export default function FFAnalyzer() {
                         <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
                           <button onClick={() => scanWithClaude(f.id, f.file, 'sonnet')} style={{ padding: '5px 10px', borderRadius: 6, border: '1px solid rgba(0,229,255,0.3)', background: 'rgba(0,229,255,0.08)', color: '#00e5ff', cursor: 'pointer', fontSize: 11, fontFamily: 'inherit' }}>🔍 Scan with Claude (Sonnet)</button>
                           <button onClick={() => scanWithClaude(f.id, f.file, 'opus')} style={{ padding: '5px 10px', borderRadius: 6, border: '1px solid rgba(76,175,80,0.3)', background: 'rgba(76,175,80,0.08)', color: '#4caf50', cursor: 'pointer', fontSize: 11, fontFamily: 'inherit' }}>🔍 Scan with Opus</button>
-                          <button onClick={() => scanAsImages(f.id, f.file)} style={{ padding: '5px 10px', borderRadius: 6, border: '1px solid rgba(234,208,104,0.3)', background: 'rgba(234,208,104,0.08)', color: '#EAD068', cursor: 'pointer', fontSize: 11, fontFamily: 'inherit' }}>📷 Scan as Images</button>
                         </div>
                       </div>
                     )}
@@ -2892,7 +2965,7 @@ export default function FFAnalyzer() {
                   {ag.status === 'error' && (
                     <>
                       <button onClick={() => { setUploadedAgreements(prev => prev.map(a => a.id === ag.id ? {...a, status: 'pending', error: null} : a)); }} style={{ marginLeft: 4, padding: '1px 6px', borderRadius: 4, border: '1px solid rgba(0,229,255,0.3)', background: 'rgba(0,229,255,0.1)', color: '#00e5ff', cursor: 'pointer', fontSize: 9, fontFamily: 'inherit' }}>↺</button>
-                      <button onClick={() => retryAgreementAsImages(ag)} style={{ padding: '1px 6px', borderRadius: 4, border: '1px solid rgba(234,208,104,0.3)', background: 'rgba(234,208,104,0.1)', color: '#EAD068', cursor: 'pointer', fontSize: 9, fontFamily: 'inherit' }}>📷</button>
+                      <button onClick={() => retryAgreementAsPDF(ag)} style={{ padding: '1px 6px', borderRadius: 4, border: '1px solid rgba(234,208,104,0.3)', background: 'rgba(234,208,104,0.1)', color: '#EAD068', cursor: 'pointer', fontSize: 9, fontFamily: 'inherit' }}>🔍 Rescan</button>
                     </>
                   )}
                   {ag.status !== 'analyzing' && ag.status !== 'retrying' && ag.status !== 'detecting' && <button onClick={() => setUploadedAgreements(prev => prev.filter(a => a.id !== ag.id))} style={{ background: 'none', border: 'none', color: 'rgba(232,232,240,0.3)', cursor: 'pointer', fontSize: 12, padding: 0, marginLeft: 2 }}>✕</button>}
@@ -2986,7 +3059,7 @@ export default function FFAnalyzer() {
                     {ag.status === 'error' && (
                       <>
                         <button onClick={() => { setUploadedAgreements(prev => prev.map(a => a.id === ag.id ? {...a, status: 'pending', error: null} : a)); }} style={{ marginLeft: 4, padding: '1px 6px', borderRadius: 4, border: '1px solid rgba(0,229,255,0.3)', background: 'rgba(0,229,255,0.1)', color: '#00e5ff', cursor: 'pointer', fontSize: 9, fontFamily: 'inherit' }}>↺ Retry</button>
-                        <button onClick={() => retryAgreementAsImages(ag)} style={{ padding: '1px 6px', borderRadius: 4, border: '1px solid rgba(234,208,104,0.3)', background: 'rgba(234,208,104,0.1)', color: '#EAD068', cursor: 'pointer', fontSize: 9, fontFamily: 'inherit' }}>📷 Scan</button>
+                        <button onClick={() => retryAgreementAsPDF(ag)} style={{ padding: '1px 6px', borderRadius: 4, border: '1px solid rgba(234,208,104,0.3)', background: 'rgba(234,208,104,0.1)', color: '#EAD068', cursor: 'pointer', fontSize: 9, fontFamily: 'inherit' }}>🔍 Rescan Scan</button>
                       </>
                     )}
                   </span>
@@ -3006,7 +3079,7 @@ export default function FFAnalyzer() {
             {activeTab === 2 && <MCATab a={result.analysis} positions={positions} setPositions={setPositions} excludedIds={excludedIds} setExcludedIds={setExcludedIds} otherExcludedIds={otherExcludedIds} setOtherExcludedIds={setOtherExcludedIds} excludedDepositIds={excludedDepositIds} />}
             {activeTab === 3 && <RiskTab a={result.analysis} positions={positions} excludedIds={excludedIds} otherExcludedIds={otherExcludedIds} excludedDepositIds={excludedDepositIds} />}
             {activeTab === 4 && <AgreementsTab agreementResults={agreementResults} />}
-            {activeTab === 5 && <CrossReferenceTab crossRefResult={crossRefResult} />}
+            {activeTab === 5 && <CrossReferenceTab crossRefResult={crossRefResult} agreementResults={agreementResults} />}
             {activeTab === 6 && <NegotiationTab a={result.analysis} positions={positions} excludedIds={excludedIds} otherExcludedIds={otherExcludedIds} excludedDepositIds={excludedDepositIds} agreementResults={agreementResults} />}
             {activeTab === 7 && <ConfidenceTab a={result.analysis} positions={positions} excludedIds={excludedIds} excludedDepositIds={excludedDepositIds} />}
             {activeTab === 8 && <ExportTab a={result.analysis} fileName={result.file_name || 'analysis'} positions={positions} excludedIds={excludedIds} otherExcludedIds={otherExcludedIds} excludedDepositIds={excludedDepositIds} agreementResults={agreementResults} />}
