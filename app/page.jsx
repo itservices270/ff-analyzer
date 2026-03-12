@@ -1734,7 +1734,7 @@ function NegotiationEmailEngine({ fTiers, revenue, a, totalWeeklyBurden, enrolle
   const [copiedEmail, setCopiedEmail] = useState(null);
 
   const negTierColors = ['#00bcd4', '#f59e0b', '#ef5350'];
-  const negTierLabels = ['Opening (50%)', 'Revised (75%)', 'Final (100%)'];
+  const negTierLabels = ['Opening (80%)', 'Revised (90%)', 'Final (100%)'];
 
   const biz = a.business_name || 'Business';
   const withholdPct = revenue > 0 ? ((totalWeeklyBurden * 4.33 / revenue) * 100).toFixed(1) : '0';
@@ -1796,7 +1796,7 @@ function NegotiationEmailEngine({ fTiers, revenue, a, totalWeeklyBurden, enrolle
           <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 12 }}>
             <thead>
               <tr style={{ borderBottom: '1px solid rgba(255,255,255,0.1)' }}>
-                {['Funder', 'Balance', 'Current Pmt', 'Allocation', '50% Term', '75% Term', '100% Term'].map(h => (
+                {['Funder', 'Balance', 'Current Pmt', 'Orig Remaining', '80% Term', '90% Term', '100% Term'].map(h => (
                   <th key={h} style={{ padding: '6px 8px', textAlign: h === 'Funder' ? 'left' : 'right', fontSize: 10, color: 'rgba(232,232,240,0.4)', fontWeight: 600, textTransform: 'uppercase', letterSpacing: 0.5 }}>{h}</th>
                 ))}
               </tr>
@@ -1807,7 +1807,7 @@ function NegotiationEmailEngine({ fTiers, revenue, a, totalWeeklyBurden, enrolle
                   <td style={{ padding: '8px 8px', color: '#e8e8f0', fontWeight: 600 }}>{ft.name}{ft._advCount > 1 ? ` (${ft._advCount} advances)` : ''}</td>
                   <td style={{ padding: '8px 8px', color: '#ef9a9a', textAlign: 'right' }}>{fmt(ft.balance)}</td>
                   <td style={{ padding: '8px 8px', color: 'rgba(232,232,240,0.5)', textAlign: 'right' }}>{fmt(ft.originalWeekly)}/wk</td>
-                  <td style={{ padding: '8px 8px', color: '#00e5ff', textAlign: 'right' }}>{fmtD(ft.allocation)}/wk</td>
+                  <td style={{ padding: '8px 8px', color: 'rgba(232,232,240,0.4)', textAlign: 'right' }}>{ft.originalTermWeeks} wks</td>
                   <td style={{ padding: '8px 8px', color: negTierColors[0], textAlign: 'right' }}>{ft.tiers[0].proposedTermWeeks} wks</td>
                   <td style={{ padding: '8px 8px', color: negTierColors[1], textAlign: 'right' }}>{ft.tiers[1].proposedTermWeeks} wks</td>
                   <td style={{ padding: '8px 8px', color: negTierColors[2], textAlign: 'right', fontWeight: 700 }}>{ft.tiers[2].proposedTermWeeks} wks</td>
@@ -2622,52 +2622,62 @@ function calcWaterfall({ merchantWeeklyToFF, totalDebtStack, ffFeePct, isoPoints
   return { merchantWeeklyToFF, ffFeePerWeek, isoCommPerWeek, tad: Math.max(tad, 0), totalDebtStack, maxTermWeeks };
 }
 
-// Per-funder allocation and 3-tier term calculation
+// Per-funder proportional extension model — 3-tier term calculation
 function calcFunderTiers(funders, tad, agreementResults) {
   const totalBalance = funders.reduce((s, f) => s + f.balance, 0);
   if (totalBalance <= 0 || tad <= 0) return [];
 
   const tierDefs = [
-    { key: 'email1', label: 'Opening Proposal', pct: 0.50 },
-    { key: 'email2', label: 'Revised Proposal', pct: 0.75 },
+    { key: 'email1', label: 'Opening Proposal', pct: 0.80 },
+    { key: 'email2', label: 'Revised Proposal', pct: 0.90 },
     { key: 'email3', label: 'Final Proposal', pct: 1.00 },
   ];
 
-  return funders.map(f => {
-    const allocation = tad * (f.balance / totalBalance);
-    const originalWeekly = toWeeklyEquiv(f.payment, f.frequency);
-    // Try to get original term from agreement data
-    const agMatch = (agreementResults || []).find(ag => {
-      const agName = (ag?.analysis?.funder_name || '').toLowerCase();
-      const fName = (f.name || '').toLowerCase();
-      return agName && fName && (agName.includes(fName.split(' ')[0]) || fName.includes(agName.split(' ')[0]));
-    });
-    const originalTermWeeks = agMatch?.analysis?.financial_terms?.estimated_term_weeks
-      || (originalWeekly > 0 ? Math.round(f.balance / originalWeekly) : 52);
+  // Step 1: For each funder, determine contract_payment (agreement → actual fallback)
+  const funderData = funders.map(f => {
+    const actualWeekly = toWeeklyEquiv(f.payment, f.frequency);
+    const agMatch = matchAgreementToPosition(f.name, agreementResults);
+    const contractWeekly = getContractWeekly(agMatch);
+    // Use contract payment if available, otherwise actual bank statement weekly
+    const effectiveWeekly = (contractWeekly && contractWeekly > 0) ? contractWeekly : actualWeekly;
+    const originalRemainingWeeks = effectiveWeekly > 0 ? f.balance / effectiveWeekly : 52;
+    return { ...f, actualWeekly, contractWeekly, effectiveWeekly, originalRemainingWeeks, agMatch };
+  });
+
+  // Step 2: Total original weekly burden (sum of all funders' effective weekly payments)
+  const totalOriginalWeeklyBurden = funderData.reduce((s, fd) => s + fd.effectiveWeekly, 0);
+
+  // Step 3-5: For each tier, calculate multiplier → proposed term → proposed payment
+  return funderData.map(fd => {
+    const allocation = tad * (fd.balance / totalBalance);
+    const originalTermWeeks = Math.round(fd.originalRemainingWeeks);
 
     const tiers = tierDefs.map(td => {
-      const tierPayment = allocation * td.pct;
-      const proposedTermWeeks = tierPayment > 0 ? Math.ceil(f.balance / tierPayment) : 9999;
+      const tierTAD = tad * td.pct;
+      const multiplier = tierTAD > 0 ? totalOriginalWeeklyBurden / tierTAD : 9999;
+      const proposedTermWeeks = Math.ceil(fd.originalRemainingWeeks * multiplier);
+      const weeklyPayment = proposedTermWeeks > 0 ? fd.balance / proposedTermWeeks : 0;
       const extensionWeeks = proposedTermWeeks - originalTermWeeks;
       const extensionPct = originalTermWeeks > 0 ? ((proposedTermWeeks / originalTermWeeks) - 1) * 100 : 0;
-      const reductionDollars = originalWeekly - tierPayment;
-      const reductionPct = originalWeekly > 0 ? (reductionDollars / originalWeekly) * 100 : 0;
+      const reductionDollars = fd.effectiveWeekly - weeklyPayment;
+      const reductionPct = fd.effectiveWeekly > 0 ? (reductionDollars / fd.effectiveWeekly) * 100 : 0;
       return {
         ...td,
-        weeklyPayment: tierPayment,
+        weeklyPayment,
         proposedTermWeeks,
         extensionWeeks,
         extensionPct,
         reductionDollars,
         reductionPct,
-        totalRepayment: f.balance,
+        totalRepayment: fd.balance,
+        multiplier,
       };
     });
 
     return {
-      ...f,
+      ...fd,
       allocation,
-      originalWeekly,
+      originalWeekly: fd.actualWeekly,
       originalTermWeeks,
       tiers,
     };
@@ -2801,13 +2811,16 @@ function ExportTab({ a, fileName, positions, excludedIds, otherExcludedIds, excl
   // Max term = longest individual funder term at 100% tier (needed for fee amortization)
   const maxTermForFees = useLocalMemo(() => {
     if (includedFunders.length === 0 || merchantWeeklyToFF <= 0) return 52;
-    const totalBal = includedFunders.reduce((s, f) => s + f.balance, 0);
-    // At 100% allocation, each funder's term = balance / (TAD * balance/totalBal) = totalBal / TAD
-    // But we need TAD to calculate this, and TAD needs maxTerm... bootstrap with estimate
-    const estimatedTad = merchantWeeklyToFF * 0.85; // rough initial estimate
+    // Proportional extension: at 100% TAD, multiplier = totalBurden / TAD
+    // Each funder's term = ceil(remaining * multiplier) = ceil((balance/weekly) * (totalBurden/TAD))
+    // But TAD needs maxTerm for fee amortization... bootstrap with estimate
+    const estimatedTad = merchantWeeklyToFF * 0.85;
+    const totalBurden = includedFunders.reduce((s, f) => s + toWeeklyEquiv(f.payment, f.frequency), 0);
+    const multiplier = estimatedTad > 0 ? totalBurden / estimatedTad : 1;
     const longestTerm = Math.max(...includedFunders.map(f => {
-      const alloc = estimatedTad * (f.balance / totalBal);
-      return alloc > 0 ? Math.ceil(f.balance / alloc) : 999;
+      const weekly = toWeeklyEquiv(f.payment, f.frequency);
+      const remaining = weekly > 0 ? f.balance / weekly : 52;
+      return Math.ceil(remaining * multiplier);
     }));
     return Math.max(longestTerm, 4);
   }, [JSON.stringify(includedFunders), merchantWeeklyToFF]);
@@ -2830,8 +2843,8 @@ function ExportTab({ a, fileName, positions, excludedIds, otherExcludedIds, excl
   );
 
   // Reserve calculations
-  const reserveAt50 = merchantWeeklyToFF - (waterfall.tad * 0.50) - waterfall.ffFeePerWeek - waterfall.isoCommPerWeek;
-  const reserveAt75 = merchantWeeklyToFF - (waterfall.tad * 0.75) - waterfall.ffFeePerWeek - waterfall.isoCommPerWeek;
+  const reserveAt80 = merchantWeeklyToFF - (waterfall.tad * 0.80) - waterfall.ffFeePerWeek - waterfall.isoCommPerWeek;
+  const reserveAt90 = merchantWeeklyToFF - (waterfall.tad * 0.90) - waterfall.ffFeePerWeek - waterfall.isoCommPerWeek;
 
   // Bank-verified overview numbers for emails
   const cogs = a.expense_categories?.inventory_cogs || 0;
@@ -3180,7 +3193,7 @@ RBFC Advocate | Revenue Based Finance Coalition`;
     let emailText = '';
 
     if (tierIdx === 0) {
-      // EMAIL 1 — OPENING PROPOSAL (50% allocation)
+      // EMAIL 1 — OPENING PROPOSAL (80% allocation)
       emailText = `Subject: Payment Modification Request – ${biz} – ${ft2.name}
 
 Dear ${ft2.name} Collections/Servicing Team,
@@ -3208,7 +3221,7 @@ ${lnaaNotice}
 
 ${signature}`;
     } else if (tierIdx === 1) {
-      // EMAIL 2 — REVISED PROPOSAL (75% allocation)
+      // EMAIL 2 — REVISED PROPOSAL (90% allocation)
       const email1Tier = ft2.tiers[0];
       emailText = `Subject: Revised Proposal – ${biz} – Improved Terms Available
 
@@ -3232,7 +3245,7 @@ ${lnaaNotice}
 
 ${signature}`;
     } else {
-      // EMAIL 3 — FINAL PROPOSAL (100% allocation)
+      // EMAIL 3 — FINAL PROPOSAL (100% allocation, full TAD)
       const futureDate = new Date();
       futureDate.setDate(futureDate.getDate() + 7);
       const deadlineStr = futureDate.toLocaleDateString('en-US', { month: 'long', day: 'numeric', year: 'numeric' });
@@ -3293,7 +3306,7 @@ ${signature}`;
   const tierColors = ['#00bcd4', '#7c3aed', '#f59e0b', '#22c55e'];
   const tierLabels = ['Opening', '1st Middle', '2nd Middle', 'Final'];
   const negTierColors = ['#00bcd4', '#f59e0b', '#ef5350'];
-  const negTierLabels = ['Opening (50%)', 'Revised (75%)', 'Final (100%)'];
+  const negTierLabels = ['Opening (80%)', 'Revised (90%)', 'Final (100%)'];
 
   const statusColors = { include: '#00e5ff', buyout: '#CFA529', exclude: 'rgba(232,232,240,0.3)', paid_off: '#4caf50' };
   const statusLabels = { include: 'Include', buyout: 'Buyout', exclude: 'Exclude', paid_off: 'Paid Off' };
@@ -3330,8 +3343,8 @@ ${signature}`;
             { label: 'TAD / Week', value: fmtD(waterfall.tad), color: '#00e5ff' },
             { label: 'ISO Comm / Wk', value: fmtD(waterfall.isoCommPerWeek), color: '#CFA529' },
             { label: 'FF Fee / Wk', value: fmtD(waterfall.ffFeePerWeek), color: '#CFA529' },
-            { label: 'Reserve @50%', value: fmtD(reserveAt50 > 0 ? reserveAt50 : 0), color: '#4caf50' },
-            { label: 'Reserve @75%', value: fmtD(reserveAt75 > 0 ? reserveAt75 : 0), color: '#4caf50' },
+            { label: 'Reserve @80%', value: fmtD(reserveAt80 > 0 ? reserveAt80 : 0), color: '#4caf50' },
+            { label: 'Reserve @90%', value: fmtD(reserveAt90 > 0 ? reserveAt90 : 0), color: '#4caf50' },
           ].map((s2, i) => (
             <div key={i} style={{ background: 'rgba(0,0,0,0.2)', borderRadius: 8, padding: '8px 10px', textAlign: 'center' }}>
               <div style={{ fontSize: 9, color: 'rgba(232,232,240,0.4)', textTransform: 'uppercase', letterSpacing: 0.5, marginBottom: 4 }}>{s2.label}</div>
@@ -3404,7 +3417,7 @@ ${signature}`;
             <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 12 }}>
               <thead>
                 <tr style={{ borderBottom: '1px solid rgba(255,255,255,0.1)' }}>
-                  {['Funder', 'Balance', 'Current Pmt', 'Allocation', '50% Term', '75% Term', '100% Term'].map(h => (
+                  {['Funder', 'Balance', 'Current Pmt', 'Orig Remaining', '80% Term', '90% Term', '100% Term'].map(h => (
                     <th key={h} style={{ padding: '6px 8px', textAlign: h === 'Funder' ? 'left' : 'right', fontSize: 10, color: 'rgba(232,232,240,0.4)', fontWeight: 600, textTransform: 'uppercase', letterSpacing: 0.5 }}>{h}</th>
                   ))}
                 </tr>
@@ -3415,7 +3428,7 @@ ${signature}`;
                     <td style={{ padding: '8px 8px', color: '#e8e8f0', fontWeight: 600 }}>{ft3.name}</td>
                     <td style={{ padding: '8px 8px', color: '#ef9a9a', textAlign: 'right' }}>{fmt(ft3.balance)}</td>
                     <td style={{ padding: '8px 8px', color: 'rgba(232,232,240,0.5)', textAlign: 'right' }}>{fmt(ft3.originalWeekly)}/wk</td>
-                    <td style={{ padding: '8px 8px', color: '#00e5ff', textAlign: 'right' }}>{fmtD(ft3.allocation)}/wk</td>
+                    <td style={{ padding: '8px 8px', color: 'rgba(232,232,240,0.4)', textAlign: 'right' }}>{ft3.originalTermWeeks} wks</td>
                     <td style={{ padding: '8px 8px', color: negTierColors[0], textAlign: 'right' }}>{ft3.tiers[0].proposedTermWeeks} wks</td>
                     <td style={{ padding: '8px 8px', color: negTierColors[1], textAlign: 'right' }}>{ft3.tiers[1].proposedTermWeeks} wks</td>
                     <td style={{ padding: '8px 8px', color: negTierColors[2], textAlign: 'right', fontWeight: 700 }}>{ft3.tiers[2].proposedTermWeeks} wks</td>
