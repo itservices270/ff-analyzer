@@ -297,7 +297,7 @@ If you see debits from the same payee at DIFFERENT amounts on the SAME dates or 
 
 2. MULTIPLE POSITIONS: Same funder with different amounts = SEPARATE positions. Merchant Market at $11,693/wk AND $9,764/wk = TWO positions.
 
-3. WIRE TRACKING: List EACH MCA wire as separate revenue_source entry with its own date. Never combine or sum multiple wires from same funder. EVERY excluded transaction (MCA wires, staffing credits, transfers) MUST appear in the revenue_sources array with is_excluded: true. If a wire appears as an advance_deposit on an MCA position, it must ALSO appear in revenue_sources as type "loan", is_excluded: true.
+3. WIRE TRACKING: List EACH MCA wire as separate revenue_source entry with its own date. Never combine or sum multiple wires from same funder. EVERY excluded transaction (MCA wires, staffing credits, transfers) MUST appear in the revenue_sources array with is_excluded: true. If a wire appears as an advance_deposit on an MCA position, it MUST ALSO appear in revenue_sources as type "loan", is_excluded: true. CROSS-CHECK: After building mca_positions, scan ALL advance_deposit entries — for EACH advance_deposit_amount/advance_deposit_date, verify a matching revenue_source entry exists. If missing, ADD it. A funder with 2 wires = 2 revenue_source entries. Example: TMM wire $319K on 12/30 AND TMM wire $121K on 2/19 = TWO separate revenue_source entries both type "loan", is_excluded: true.
 
 4. DSR DENOMINATOR: dsr_percent = total_mca_monthly / (monthly_average_revenue × 0.60). Use gross profit, NOT revenue.
 

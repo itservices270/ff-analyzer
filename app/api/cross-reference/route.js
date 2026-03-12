@@ -1,6 +1,6 @@
 import Anthropic from '@anthropic-ai/sdk';
 
-export const maxDuration = 120;
+export const maxDuration = 150;
 
 const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
 
@@ -330,7 +330,8 @@ export async function POST(request) {
       return Response.json({ error: 'At least one agreement analysis required for cross-reference.' }, { status: 400 });
     }
 
-    const selectedModel = model === 'sonnet' ? 'claude-sonnet-4-20250514' : 'claude-opus-4-20250514';
+    // Cross-reference always uses Sonnet — fast enough for pattern matching, avoids Opus timeouts
+    const selectedModel = 'claude-sonnet-4-20250514';
 
     // Trim payloads — send only the fields Claude needs, not raw text/PDFs
     const trimmedBank = trimBankAnalysis(bankAnalysis);

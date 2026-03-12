@@ -136,7 +136,7 @@ CRITICAL EXTRACTION RULES:
 10. DSR posture: healthy=0-15%, elevated=15-25%, stressed=25-35%, critical=35-50%, unsustainable=50%+
 Do NOT include MCA or loan payments in expense_categories — only true operating costs. For vending businesses, inventory purchases go in inventory_cogs only, never double-counted.
 11. Be precise with dollar amounts. Cross-reference the balance summary totals with your transaction tallies.
-11a. EVERY excluded transaction (MCA wires, staffing credits, transfers) MUST appear in the revenue_sources array with is_excluded: true and the appropriate type (loan/transfer). If a wire appears as an advance_deposit on an MCA position, it MUST ALSO appear in revenue_sources.
+11a. EVERY excluded transaction (MCA wires, staffing credits, transfers) MUST appear in the revenue_sources array with is_excluded: true and the appropriate type (loan/transfer). If a wire appears as an advance_deposit on an MCA position, it MUST ALSO appear in revenue_sources. CROSS-CHECK: After building mca_positions, scan ALL advance_deposit entries — for EACH advance_deposit_amount/advance_deposit_date, verify a matching revenue_source entry exists. If missing, ADD it. A funder with 2 wires = 2 separate revenue_source entries, both type "loan", is_excluded: true.
 12. If this is a vending business (Square, Cantaloupe, USA Technologies credits), card processing settlements are the primary revenue source.
 13. estimated_monthly_total should always be calculated using payment_amount_current (most recent payment), not the original amount.
 

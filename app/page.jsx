@@ -352,7 +352,7 @@ function RevenueTab({ a, excludedDepositIds, setExcludedDepositIds }) {
 }
 
 // ─── MCA Tab ─────────────────────────────────────────────────────────────────
-function MCATab({ a, positions, setPositions, excludedIds, setExcludedIds, otherExcludedIds, setOtherExcludedIds, excludedDepositIds, agreementResults }) {
+function MCATab({ a, positions, setPositions, excludedIds, setExcludedIds, otherExcludedIds, setOtherExcludedIds, excludedDepositIds, agreementResults, enrolledPositions, setEnrolledPositions }) {
   const [addText, setAddText] = useState('');
   const [addLoading, setAddLoading] = useState(false);
   const [addError, setAddError] = useState(null);
@@ -649,6 +649,36 @@ function MCATab({ a, positions, setPositions, excludedIds, setExcludedIds, other
           {(p.first_payment_date || p.last_payment_date) && (
             <div style={{ fontSize: 11, color: 'rgba(232,232,240,0.35)', marginTop: 6 }}>{p.first_payment_date} → {(!p.last_payment_date || p.last_payment_date === p.first_payment_date || p.last_payment_date === 'present') && p.status !== 'paid_off' ? 'present' : p.last_payment_date}</div>
           )}
+          {/* Enrollment checkbox */}
+          {p.status !== 'paid_off' && (
+            <div style={{ marginTop: 10, background: 'rgba(0,229,255,0.04)', border: '1px solid rgba(0,229,255,0.12)', borderRadius: 6, padding: '8px 12px' }}>
+              <label style={{ display: 'flex', alignItems: 'center', gap: 8, cursor: 'pointer', userSelect: 'none' }}>
+                <input
+                  type="checkbox"
+                  checked={enrolledPositions === null || (enrolledPositions instanceof Set ? enrolledPositions.has(p._id) : true)}
+                  onChange={e => {
+                    setEnrolledPositions(prev => {
+                      const current = prev === null ? new Set(activePositions.filter(ap => ap.status !== 'paid_off').map(ap => ap._id)) : new Set(prev);
+                      if (e.target.checked) current.add(p._id);
+                      else current.delete(p._id);
+                      return current;
+                    });
+                  }}
+                  style={{ accentColor: '#00e5ff', width: 15, height: 15, cursor: 'pointer' }}
+                />
+                <div>
+                  <div style={{ fontSize: 11, color: (enrolledPositions === null || (enrolledPositions instanceof Set && enrolledPositions.has(p._id))) ? '#00e5ff' : 'rgba(232,232,240,0.4)', fontWeight: 600, letterSpacing: 0.3 }}>
+                    Enroll in Restructuring Program
+                  </div>
+                  <div style={{ fontSize: 10, color: 'rgba(232,232,240,0.35)', marginTop: 1 }}>
+                    {(enrolledPositions === null || (enrolledPositions instanceof Set && enrolledPositions.has(p._id)))
+                      ? 'Receives TAD allocation · appears in negotiation emails'
+                      : 'DSR-only — not included in negotiation or TAD distribution'}
+                  </div>
+                </div>
+              </label>
+            </div>
+          )}
           <div style={{ marginTop: 10 }}>
             <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 11, color: 'rgba(232,232,240,0.4)', marginBottom: 4 }}>
               <span>% of verified revenue</span>
@@ -923,7 +953,7 @@ function RiskTab({ a, positions, excludedIds, otherExcludedIds, excludedDepositI
 }
 
 // ─── Negotiation Tab ──────────────────────────────────────────────────────────
-function NegotiationTab({ a, positions, excludedIds, otherExcludedIds, excludedDepositIds, agreementResults }) {
+function NegotiationTab({ a, positions, excludedIds, otherExcludedIds, excludedDepositIds, agreementResults, enrolledPositions }) {
   const intel = a.negotiation_intel || {};
   const activePositions = (positions || a.mca_positions || []).filter(p => !(excludedIds || []).includes(p._id));
   const totalMCAMonthly = activePositions.reduce((s, p) => s + (p.estimated_monthly_total || 0), 0);
@@ -1264,21 +1294,85 @@ function NegotiationTab({ a, positions, excludedIds, otherExcludedIds, excludedD
         </>
       )}
 
-      {/* ── Email Generator Section ── */}
-      {activePositions.length > 0 && (
-        <NegotiationEmailGenerator
-          businessName={a.business_name}
-          positions={activePositions}
-          totalPositions={activePositions.length}
+      {/* ── Waterfall-Based Email Generator ── */}
+      {activePositions.length > 0 && (() => {
+        // Build deduped enrolled positions for waterfall
+        const enrolledActive = activePositions.filter(p => {
+          if (p.status === 'paid_off') return false;
+          if (enrolledPositions === null) return true;
+          if (!(enrolledPositions instanceof Set)) return true;
+          return enrolledPositions.has(p._id);
+        });
+        if (enrolledActive.length === 0) return (
+          <div style={{ textAlign: 'center', padding: 20, color: 'rgba(232,232,240,0.4)', fontSize: 13 }}>
+            No positions enrolled in restructuring program. Enroll positions in the MCA Positions tab.
+          </div>
+        );
+
+        // Deduplicate enrolled positions
+        const dedupEnrolled = [];
+        const seenKeys = new Set();
+        enrolledActive.forEach(p => {
+          const key = normalizeFunderKey(p.funder_name);
+          const matchKey = key.length >= 6 ? key : (p.funder_name || '').toLowerCase().split(/\s+/)[0];
+          let found = false;
+          for (const dp of dedupEnrolled) {
+            const dpKey = normalizeFunderKey(dp.funder_name);
+            if (matchKey.length >= 6 && dpKey.length >= 6 && (matchKey.includes(dpKey.slice(0, 6)) || dpKey.includes(matchKey.slice(0, 6)))) {
+              dp._totalWeekly += toWeeklyEquiv(p.payment_amount_current || p.payment_amount || 0, p.frequency);
+              dp._advCount++;
+              found = true;
+              break;
+            }
+          }
+          if (!found) {
+            const agMatch = matchAgreementToPosition(p.funder_name, agreementResults);
+            const agBalance = agMatch?.analysis?.financial_terms?.purchased_amount;
+            const weekly = toWeeklyEquiv(p.payment_amount_current || p.payment_amount || 0, p.frequency);
+            dedupEnrolled.push({
+              ...p,
+              funder_name: p.funder_name.replace(/\s*\(Advance\s*\d+\)/i, '').replace(/\s*\(Position\s*[A-Z]\)/i, '').trim(),
+              _totalWeekly: weekly,
+              _advCount: 1,
+              _balance: agBalance ? Math.round(agBalance) : Math.round(weekly * 52),
+            });
+          }
+        });
+
+        const totalBalance = dedupEnrolled.reduce((s, dp) => s + dp._balance, 0);
+        const totalWeeklyBurden = dedupEnrolled.reduce((s, dp) => s + dp._totalWeekly, 0);
+
+        // Simple waterfall: use 40% of current weekly as base (sustainable level)
+        const sustainableWeekly = Math.round(totalWeeklyBurden * 0.4);
+        const tad = sustainableWeekly;
+
+        // Per-funder tiers using proportional allocation
+        const fTiers = dedupEnrolled.map(dp => {
+          const alloc = totalBalance > 0 ? tad * (dp._balance / totalBalance) : 0;
+          const origWeekly = dp._totalWeekly;
+          const origTerm = origWeekly > 0 ? Math.round(dp._balance / origWeekly) : 52;
+          const tiers = [0.5, 0.75, 1.0].map(pct => {
+            const wkPmt = alloc * pct;
+            const term = wkPmt > 0 ? Math.ceil(dp._balance / wkPmt) : 9999;
+            return {
+              pct, weeklyPayment: wkPmt, proposedTermWeeks: term,
+              reductionPct: origWeekly > 0 ? ((origWeekly - wkPmt) / origWeekly) * 100 : 0,
+              reductionDollars: origWeekly - wkPmt,
+              extensionPct: origTerm > 0 ? ((term / origTerm) - 1) * 100 : 0,
+            };
+          });
+          return { name: dp.funder_name, balance: dp._balance, originalWeekly: origWeekly, allocation: alloc, origTerm, tiers, _advCount: dp._advCount };
+        });
+
+        return <NegotiationEmailEngine
+          fTiers={fTiers}
           revenue={revenue}
-          totalMCAMonthly={totalMCAMonthly}
-          dsr={dsr}
-          weeksToInsolvency={m.weeks_to_insolvency}
-          adbDays={a.balance_summary?.avg_daily_balance && totalMCAMonthly > 0 ? Math.round(a.balance_summary.avg_daily_balance / (totalMCAMonthly / 30)) : null}
-          grossProfit={revenue - (a.expense_categories?.inventory_cogs || 0)}
-          opex={opexForNeg}
-        />
-      )}
+          a={a}
+          totalWeeklyBurden={totalWeeklyBurden}
+          enrolledCount={dedupEnrolled.length}
+          agreementResults={agreementResults}
+        />;
+      })()}
     </div>
   );
 }
@@ -1634,6 +1728,152 @@ ${signature}`;
   );
 }
 
+// ─── Negotiation Email Engine (new waterfall-based) ──────────────────────────
+function NegotiationEmailEngine({ fTiers, revenue, a, totalWeeklyBurden, enrolledCount, agreementResults }) {
+  const [negFunderId, setNegFunderId] = useState(null);
+  const [copiedEmail, setCopiedEmail] = useState(null);
+
+  const negTierColors = ['#00bcd4', '#f59e0b', '#ef5350'];
+  const negTierLabels = ['Opening (50%)', 'Revised (75%)', 'Final (100%)'];
+
+  const biz = a.business_name || 'Business';
+  const withholdPct = revenue > 0 ? ((totalWeeklyBurden * 4.33 / revenue) * 100).toFixed(1) : '0';
+  const adb = a.balance_summary?.avg_daily_balance || a.calculated_metrics?.avg_daily_balance || 0;
+  const monthlyBurden = totalWeeklyBurden * 4.33;
+  const adbDays = monthlyBurden > 0 ? Math.round(adb / (monthlyBurden / 30)) : 0;
+  const opex = a.expense_categories?.total_operating_expenses || 0;
+  const deficit = revenue - (a.expense_categories?.inventory_cogs || 0) - opex - monthlyBurden;
+  const daysToDefault = deficit < 0 ? Math.round(Math.abs(adb / (deficit / 30))) : 999;
+
+  const generateEmail = (funderIdx, tierIdx) => {
+    const ft = fTiers[funderIdx];
+    if (!ft) return '';
+    const tier = ft.tiers[tierIdx];
+    if (!tier) return '';
+    const f$ = (n) => '$' + Math.round(n).toLocaleString('en-US');
+
+    const agMatch = matchAgreementToPosition(ft.name, agreementResults);
+    const originDateStr = agMatch?.analysis?.funding_date || agMatch?.analysis?.effective_date || null;
+    const originNote = originDateStr ? `\nNote: This position was originated on ${originDateStr}.` : '';
+
+    const statsBlock = `BANK-VERIFIED FINANCIAL OVERVIEW:\nBusiness: ${biz}\nTrue Monthly Revenue (bank-verified): ${fmt(revenue)}\nTotal Active Positions: ${enrolledCount}\nCombined Weekly Burden: ${fmt(totalWeeklyBurden)} (${enrolledCount} positions)\nWithhold % of Revenue: ${withholdPct}%\nADB Coverage: ${adbDays} days\nDays Until Likely Default: ${daysToDefault < 999 ? daysToDefault + ' days' : 'N/A'}${originNote}\n\nNOTE: All revenue figures are bank-statement verified.`;
+
+    const contractWeekly = getContractWeekly(agMatch);
+    const currentLabel = contractWeekly > 0 ? `${f$(contractWeekly)} (per agreement)` : f$(ft.originalWeekly);
+    const overpullDelta = contractWeekly > 0 ? ft.originalWeekly - contractWeekly : 0;
+    const overpullNote = overpullDelta > contractWeekly * 0.01 ? `\nNote: Recent debits of ${f$(ft.originalWeekly)} exceed your contractual installment.` : '';
+
+    const proposalBlock = `YOUR POSITION:\nYour Current Weekly Payment:    ${currentLabel}\nProposed Weekly Payment:        ${f$(tier.weeklyPayment)}\nWeekly Reduction:               ${f$(tier.reductionDollars)} less per week\nPayment Reduction:              ${tier.reductionPct.toFixed(1)}%\nProposed Term:                  ${tier.proposedTermWeeks} weeks\nTotal Repayment:                ${f$(ft.balance)} — 100% of your balance\nPayments Begin:                 Within 72 hours of agreement${overpullNote}`;
+
+    const defaultRecovery = Math.round(ft.balance * 0.35);
+    const defaultNet = Math.round(defaultRecovery * 0.7);
+    const comparisonBlock = `════════════════════════════════════════════════════════════════\n                     YOUR OPTIONS COMPARED\n════════════════════════════════════════════════════════════════\n   ACCEPT PROPOSAL                │  PURSUE DEFAULT/COLLECTIONS\n───────────────────────────────────────────────────────────────\n   Total Recovery:                │\n     ${f$(ft.balance)} (100%)          │  ~${f$(defaultRecovery)} (~35%)\n   Your Weekly Payment:           │\n     ${f$(tier.weeklyPayment)}/wk             │  $0 (frozen/litigation)\n   Term: ${tier.proposedTermWeeks} weeks                │  12-18+ months contested\n   Legal Costs: $0                │  $5,000 - $15,000+\n   First Payment: 72 hours        │  6+ months from litigation\n───────────────────────────────────────────────────────────────\n   NET RECOVERY: +${f$(ft.balance - defaultNet)} by accepting\n════════════════════════════════════════════════════════════════`;
+
+    const signature = `Best regards,\nGavin Roberts\nResolutions Manager\n480-631-7691\nresolutions@fundersfirst.com\nPhoenix, AZ\n\nRBFC Advocate | Revenue Based Finance Coalition`;
+    const lnaaNotice = `Per the enclosed LNAA, all communications regarding this account must now be directed to our office. Please do not contact the merchant directly.`;
+
+    if (tierIdx === 0) {
+      return `Subject: Payment Modification Request – ${biz} – ${ft.name}\n\nDear ${ft.name} Collections/Servicing Team,\n\nWe are reaching out on behalf of ${biz} regarding their merchant cash advance position with your organization.\n\nIMPORTANT — WHO WE ARE:\nFunders First is NOT a debt settlement company. We believe in and support revenue-based finance as a legitimate funding tool for small businesses.\n\nThe issue here is over-stacking. This merchant is servicing ${enrolledCount} concurrent funding positions, consuming ${withholdPct}% of weekly revenue.\n\n${statsBlock}\n\n${proposalBlock}\n\n${comparisonBlock}\n\nWe are prepared to begin payments within 72 hours of reaching agreement.\n\nATTACHMENT: LNAA executed by ${biz}.\n\n${lnaaNotice}\n\n${signature}`;
+    } else if (tierIdx === 1) {
+      return `Subject: Revised Proposal – ${biz} – Improved Terms Available\n\nDear ${ft.name} Collections/Servicing Team,\n\nFollowing our previous communication regarding ${biz}, we are presenting improved terms.\n\nDays to default: ${daysToDefault < 999 ? daysToDefault : 'critical'}.\n\n${statsBlock}\n\n${proposalBlock}\n\n${comparisonBlock}\n\nPlease respond so we can finalize terms and begin remittance immediately.\n\n${lnaaNotice}\n\n${signature}`;
+    } else {
+      const futureDate = new Date();
+      futureDate.setDate(futureDate.getDate() + 7);
+      const deadlineStr = futureDate.toLocaleDateString('en-US', { month: 'long', day: 'numeric', year: 'numeric' });
+      return `Subject: Final Proposal – ${biz} – Maximum Allocation\n\nDear ${ft.name} Collections/Servicing Team,\n\nThis represents our final proposal for the ${biz} restructuring.\n\n${statsBlock}\n\n${proposalBlock}\n\n${comparisonBlock}\n\nPositions not accommodated by ${deadlineStr} will be removed from the structured payment pool.\n\n${lnaaNotice}\n\n${signature}`;
+    }
+  };
+
+  return (
+    <>
+      <div style={S.divider} />
+      <div style={S.sectionTitle}>Funder Negotiation Emails</div>
+
+      {/* Term Comparison Table */}
+      {fTiers.length > 0 && (
+        <div style={{ background: 'rgba(0,0,0,0.25)', borderRadius: 10, padding: 16, marginBottom: 20, overflowX: 'auto' }}>
+          <div style={{ fontSize: 11, color: 'rgba(232,232,240,0.45)', marginBottom: 8, textTransform: 'uppercase', letterSpacing: 0.5 }}>Term Comparison — Enrolled Funders</div>
+          <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 12 }}>
+            <thead>
+              <tr style={{ borderBottom: '1px solid rgba(255,255,255,0.1)' }}>
+                {['Funder', 'Balance', 'Current Pmt', 'Allocation', '50% Term', '75% Term', '100% Term'].map(h => (
+                  <th key={h} style={{ padding: '6px 8px', textAlign: h === 'Funder' ? 'left' : 'right', fontSize: 10, color: 'rgba(232,232,240,0.4)', fontWeight: 600, textTransform: 'uppercase', letterSpacing: 0.5 }}>{h}</th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {fTiers.map((ft, i) => (
+                <tr key={i} style={{ borderBottom: '1px solid rgba(255,255,255,0.04)' }}>
+                  <td style={{ padding: '8px 8px', color: '#e8e8f0', fontWeight: 600 }}>{ft.name}{ft._advCount > 1 ? ` (${ft._advCount} advances)` : ''}</td>
+                  <td style={{ padding: '8px 8px', color: '#ef9a9a', textAlign: 'right' }}>{fmt(ft.balance)}</td>
+                  <td style={{ padding: '8px 8px', color: 'rgba(232,232,240,0.5)', textAlign: 'right' }}>{fmt(ft.originalWeekly)}/wk</td>
+                  <td style={{ padding: '8px 8px', color: '#00e5ff', textAlign: 'right' }}>{fmtD(ft.allocation)}/wk</td>
+                  <td style={{ padding: '8px 8px', color: negTierColors[0], textAlign: 'right' }}>{ft.tiers[0].proposedTermWeeks} wks</td>
+                  <td style={{ padding: '8px 8px', color: negTierColors[1], textAlign: 'right' }}>{ft.tiers[1].proposedTermWeeks} wks</td>
+                  <td style={{ padding: '8px 8px', color: negTierColors[2], textAlign: 'right', fontWeight: 700 }}>{ft.tiers[2].proposedTermWeeks} wks</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+
+      {/* Funder Dropdown + Email Cards */}
+      <div style={{ background: 'rgba(0,229,255,0.04)', border: '1px solid rgba(0,229,255,0.15)', borderRadius: 12, padding: 20 }}>
+        <div style={{ marginBottom: 16 }}>
+          <label style={{ fontSize: 11, color: 'rgba(232,232,240,0.5)', display: 'block', marginBottom: 4 }}>Select Funder:</label>
+          <select value={negFunderId ?? ''} onChange={e => setNegFunderId(e.target.value === '' ? null : Number(e.target.value))} style={{ padding: '8px 12px', borderRadius: 6, border: '1px solid rgba(0,229,255,0.3)', background: 'rgba(0,0,0,0.3)', color: '#e8e8f0', fontSize: 13, fontFamily: 'inherit', minWidth: 320 }}>
+            <option value="">Select a funder…</option>
+            {fTiers.map((ft, i) => <option key={i} value={i}>{ft.name} — {fmt(ft.balance)} bal — {fmtD(ft.allocation)}/wk alloc</option>)}
+          </select>
+        </div>
+
+        {negFunderId !== null && fTiers[negFunderId] && (() => {
+          const selFt = fTiers[negFunderId];
+          return (
+            <div>
+              <div style={{ background: 'rgba(0,0,0,0.2)', borderRadius: 8, padding: 14, marginBottom: 16, fontSize: 12, color: 'rgba(232,232,240,0.7)', lineHeight: 1.8 }}>
+                <div style={{ fontSize: 16, color: '#00e5ff', fontWeight: 700, marginBottom: 6 }}>{selFt.name}</div>
+                <div>Balance: <strong style={{ color: '#e8e8f0' }}>{fmt(selFt.balance)}</strong> · Original: <strong style={{ color: '#ef9a9a' }}>{fmt(selFt.originalWeekly)}/wk</strong> · Allocation: <strong style={{ color: '#00e5ff' }}>{fmtD(selFt.allocation)}/wk</strong></div>
+                <div>Total Repayment (all tiers): <strong style={{ color: '#4caf50' }}>{fmt(selFt.balance)}</strong> (100%)</div>
+              </div>
+
+              {/* 3 email preview cards */}
+              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))', gap: 12, marginBottom: 16 }}>
+                {[0, 1, 2].map(ti => {
+                  const t = selFt.tiers[ti];
+                  return (
+                    <div key={ti} style={{ background: `${negTierColors[ti]}08`, border: `1px solid ${negTierColors[ti]}44`, borderRadius: 10, padding: 14 }}>
+                      <div style={{ fontSize: 12, fontWeight: 700, color: negTierColors[ti], marginBottom: 8 }}>{negTierLabels[ti]}</div>
+                      <div style={{ fontSize: 11, color: 'rgba(232,232,240,0.6)', lineHeight: 1.8, marginBottom: 10 }}>
+                        <div>Payment: <strong style={{ color: negTierColors[ti] }}>{fmtD(t.weeklyPayment)}/wk</strong></div>
+                        <div>Reduction: <strong>{t.reductionPct.toFixed(1)}%</strong> ({fmtD(t.reductionDollars)} less)</div>
+                        <div>Term: <strong>{t.proposedTermWeeks} wks</strong> ({Math.round(t.proposedTermWeeks / 4.33)} mo)</div>
+                        <div>Extension: +{t.extensionPct.toFixed(0)}%</div>
+                        <div>Repayment: <strong style={{ color: '#4caf50' }}>{fmt(selFt.balance)}</strong></div>
+                      </div>
+                      <button onClick={() => { const txt = generateEmail(negFunderId, ti); navigator.clipboard.writeText(txt); setCopiedEmail(`${negFunderId}-${ti}`); setTimeout(() => setCopiedEmail(null), 2000); }} style={{ ...S.btn('primary'), padding: '6px 12px', fontSize: 11, width: '100%' }}>
+                        {copiedEmail === `${negFunderId}-${ti}` ? '✓ Copied!' : 'Copy Email'}
+                      </button>
+                    </div>
+                  );
+                })}
+              </div>
+
+              {/* Full email preview */}
+              <div style={{ background: 'rgba(0,0,0,0.3)', borderRadius: 8, padding: 16, maxHeight: 500, overflowY: 'auto' }}>
+                <pre style={{ margin: 0, fontFamily: 'inherit', fontSize: 11, color: 'rgba(232,232,240,0.85)', whiteSpace: 'pre-wrap', lineHeight: 1.6 }}>
+                  {generateEmail(negFunderId, 0)}
+                </pre>
+              </div>
+            </div>
+          );
+        })()}
+      </div>
+    </>
+  );
+}
+
 // ─── Agreements Tab (NEW) ────────────────────────────────────────────────────
 function AgreementsTab({ agreementResults }) {
   if (!agreementResults || agreementResults.length === 0) {
@@ -1874,11 +2114,20 @@ function CrossReferenceTab({ crossRefResult, crossRefError, agreementResults, po
   const cascading = cr.cascading_burden_analysis || {};
   const recommendation = cr.restructuring_recommendation || {};
   const revenueReality = cr.revenue_reality || {};
+  const modelUsed = crossRefResult.model_used || '';
 
   const gradeColor = (g) => g === 'A' ? '#4caf50' : g === 'B' ? '#81c784' : g === 'C' ? '#ffd54f' : g === 'D' ? '#ff9800' : '#ef5350';
 
   return (
     <div>
+      {/* Model indicator */}
+      {modelUsed && (
+        <div style={{ display: 'flex', justifyContent: 'flex-end', marginBottom: 8 }}>
+          <span style={{ fontSize: 10, color: 'rgba(232,232,240,0.4)', background: 'rgba(255,255,255,0.04)', border: '1px solid rgba(255,255,255,0.08)', borderRadius: 4, padding: '2px 8px' }}>
+            Model: {modelUsed.includes('sonnet') ? 'Sonnet' : modelUsed.includes('opus') ? 'Opus' : modelUsed}
+          </span>
+        </div>
+      )}
       {/* Revenue Reality */}
       {revenueReality.actual_monthly_revenue > 0 && (
         <div style={{ ...S.card, background: 'rgba(0,229,255,0.04)', marginBottom: 20 }}>
@@ -2439,7 +2688,7 @@ function confidentialityCheck(text) {
 }
 
 // ─── Export Tab ───────────────────────────────────────────────────────────────
-function ExportTab({ a, fileName, positions, excludedIds, otherExcludedIds, excludedDepositIds, agreementResults }) {
+function ExportTab({ a, fileName, positions, excludedIds, otherExcludedIds, excludedDepositIds, agreementResults, enrolledPositions }) {
   const { useState: useLocalState, useMemo: useLocalMemo } = React;
   const allPositions = (positions || a.mca_positions || []).filter(p => !(excludedIds || []).includes(p._id));
   const totalMCAMonthly = allPositions.reduce((s, p) => s + (p.estimated_monthly_total || 0), 0);
@@ -2496,16 +2745,14 @@ function ExportTab({ a, fileName, positions, excludedIds, otherExcludedIds, excl
     [JSON.stringify(allPositions.map(p => p.funder_name)), JSON.stringify(balances), JSON.stringify(positionStatuses)]
   );
 
-  // ── Enrollment state: separate from classification ──
-  // Enrolled = position participates in FF restructuring program (gets TAD allocation, appears in emails)
-  // Unenrolled = still counts toward DSR/debt burden but does NOT get TAD or appear in negotiation
-  const [enrolled, setEnrolled] = useLocalState(() => {
-    const init = {};
-    dedupedPositions.forEach((dp, i) => {
-      init[i] = dp._consolidatedStatus !== 'paid_off';
-    });
-    return init;
-  });
+  // Enrollment: use parent enrolledPositions (Set of position _ids) if available
+  // A deduped position is enrolled if ANY of its source positions are enrolled
+  const isPositionEnrolled = (dp) => {
+    if (dp._consolidatedStatus === 'paid_off') return false;
+    if (enrolledPositions === null) return true; // null = all enrolled
+    if (!(enrolledPositions instanceof Set)) return true;
+    return dp._sourceIndices.some(idx => enrolledPositions.has(allPositions[idx]?._id));
+  };
 
   const uwFunders = dedupedPositions.map((dp, i) => ({
     id: i,
@@ -2514,7 +2761,7 @@ function ExportTab({ a, fileName, positions, excludedIds, otherExcludedIds, excl
     frequency: 'weekly',
     balance: dp._consolidatedBalance > 0 ? dp._consolidatedBalance : (parseFloat(balances[dp._sourceIndices[0]]) || 0),
     status: dp._consolidatedStatus,
-    enrolled: enrolled[i] !== false,
+    enrolled: isPositionEnrolled(dp),
     _advanceCount: dp._advanceCount,
     _advances: dp._advances || null,
     _sourceIndices: dp._sourceIndices,
@@ -3129,13 +3376,11 @@ ${signature}`;
                   </div>
                 )}
                 <input type="number" value={(() => { const idx = f._sourceIndices[0]; return balances[idx] || ''; })()} onChange={e => { const updates = {}; f._sourceIndices.forEach(idx => { updates[idx] = e.target.value; }); setBalances(b => ({ ...b, ...updates })); }} placeholder="Balance $" style={{ width: '100%', padding: '5px 8px', borderRadius: 6, border: '1px solid rgba(0,229,255,0.2)', background: 'rgba(0,0,0,0.3)', color: '#e8e8f0', fontSize: 12, fontFamily: 'inherit', boxSizing: 'border-box', marginBottom: 6 }} />
-                {/* Enrollment checkbox */}
+                {/* Enrollment status */}
                 {st === 'include' && (
-                  <label style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 6, cursor: 'pointer', userSelect: 'none' }}>
-                    <input type="checkbox" checked={isEnrolled} onChange={e => setEnrolled(prev => ({ ...prev, [i]: e.target.checked }))} style={{ accentColor: '#00e5ff', width: 14, height: 14, cursor: 'pointer' }} />
-                    <span style={{ fontSize: 10, color: isEnrolled ? '#00e5ff' : 'rgba(232,232,240,0.4)', fontWeight: 600, letterSpacing: 0.3 }}>Enroll in Program</span>
-                    {!isEnrolled && <span style={{ fontSize: 9, color: '#ffd54f', fontWeight: 500 }}>(DSR only)</span>}
-                  </label>
+                  <div style={{ fontSize: 10, marginBottom: 4, color: isEnrolled ? '#00e5ff' : '#ffd54f', fontWeight: 600, letterSpacing: 0.3 }}>
+                    {isEnrolled ? '✓ Enrolled' : 'DSR only — enroll in MCA tab'}
+                  </div>
                 )}
                 <div style={{ display: 'flex', gap: 3 }}>
                   {['include', 'buyout', 'exclude', 'paid_off'].map(s2 => (
@@ -3445,17 +3690,19 @@ function TrendTab({ a, agreementResults }) {
               const markers = markerPositions.filter(m => m.barIdx === i);
               return (
                 <div key={i} style={{ flex: 1, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'flex-end', gap: 4, minWidth: 0, position: 'relative' }}>
+                  {/* Dashed origination line — subtle, behind content */}
+                  {markers.length > 0 && (
+                    <div style={{ position: 'absolute', top: 10, bottom: 20, left: '50%', width: 0, borderLeft: '1px dashed rgba(255,152,0,0.35)', zIndex: 1, pointerEvents: 'none' }} />
+                  )}
+                  <div style={{ fontSize: 10, color: 'rgba(232,232,240,0.6)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', maxWidth: '100%', zIndex: 2 }}>{fmt(r.amount)}</div>
+                  <div style={{ width: '80%', background: isHighest ? 'linear-gradient(180deg, #EAD068, #f0a500)' : 'linear-gradient(180deg, #00e5ff, #00acc1)', borderRadius: '4px 4px 0 0', height: barH + 'px', transition: 'height 0.4s ease', minHeight: 4, zIndex: 2 }} />
+                  <div style={{ fontSize: 10, color: 'rgba(232,232,240,0.4)', textAlign: 'center', lineHeight: 1.3, whiteSpace: 'nowrap' }}>{r.month}</div>
+                  {/* Marker labels BELOW x-axis */}
                   {markers.map((mk, mi) => (
-                    <div key={mi} style={{ position: 'absolute', top: 0, left: '50%', transform: 'translateX(-50%)', zIndex: 2, display: 'flex', flexDirection: 'column', alignItems: 'center', pointerEvents: 'none' }}>
-                      <div style={{ fontSize: 8, color: '#ef9a9a', whiteSpace: 'nowrap', background: 'rgba(239,83,80,0.12)', padding: '1px 4px', borderRadius: 3, border: '1px solid rgba(239,83,80,0.25)', marginBottom: 2, lineHeight: 1.3 }}>
-                        {mk.funder}{mk.amtLabel ? ' ' + mk.amtLabel : ''}
-                      </div>
-                      <div style={{ width: 1, height: 150, background: 'rgba(239,83,80,0.25)', borderLeft: '1px dashed rgba(239,83,80,0.4)' }} />
+                    <div key={mi} style={{ fontSize: 9, color: '#ff9800', whiteSpace: 'nowrap', background: 'rgba(255,152,0,0.1)', padding: '1px 4px', borderRadius: 3, border: '1px solid rgba(255,152,0,0.2)', marginTop: mi * 14, lineHeight: 1.3, transform: markers.length > 1 && mi > 0 ? 'translateY(2px)' : undefined, maxWidth: '100%', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                      {mk.funder}{mk.amtLabel ? ' ' + mk.amtLabel : ''}
                     </div>
                   ))}
-                  <div style={{ fontSize: 10, color: 'rgba(232,232,240,0.6)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', maxWidth: '100%' }}>{fmt(r.amount)}</div>
-                  <div style={{ width: '80%', background: isHighest ? 'linear-gradient(180deg, #EAD068, #f0a500)' : 'linear-gradient(180deg, #00e5ff, #00acc1)', borderRadius: '4px 4px 0 0', height: barH + 'px', transition: 'height 0.4s ease', minHeight: 4 }} />
-                  <div style={{ fontSize: 10, color: 'rgba(232,232,240,0.4)', textAlign: 'center', lineHeight: 1.3, whiteSpace: 'nowrap' }}>{r.month}</div>
                 </div>
               );
             })}
@@ -3527,6 +3774,7 @@ export default function FFAnalyzer() {
   const [excludedIds, setExcludedIds] = useState([]);
   const [otherExcludedIds, setOtherExcludedIds] = useState([]);
   const [excludedDepositIds, setExcludedDepositIds] = useState([]);
+  const [enrolledPositions, setEnrolledPositions] = useState(null); // null = all enrolled (default)
   const inputRef = useRef(null);
 
   const TABS = ['📊 Revenue', '📈 Trend', '🏦 MCA Positions', '⚠️ Risk', '📋 Agreements', '🔄 Cross-Ref', '🤝 Negotiation', '🎯 Confidence', '⬇️ Export'];
@@ -4238,13 +4486,13 @@ export default function FFAnalyzer() {
           <div style={S.card}>
             {activeTab === 0 && <RevenueTab a={result.analysis} excludedDepositIds={excludedDepositIds} setExcludedDepositIds={setExcludedDepositIds} />}
             {activeTab === 1 && <TrendTab a={result.analysis} agreementResults={agreementResults} />}
-            {activeTab === 2 && <MCATab a={result.analysis} positions={positions} setPositions={setPositions} excludedIds={excludedIds} setExcludedIds={setExcludedIds} otherExcludedIds={otherExcludedIds} setOtherExcludedIds={setOtherExcludedIds} excludedDepositIds={excludedDepositIds} agreementResults={agreementResults} />}
+            {activeTab === 2 && <MCATab a={result.analysis} positions={positions} setPositions={setPositions} excludedIds={excludedIds} setExcludedIds={setExcludedIds} otherExcludedIds={otherExcludedIds} setOtherExcludedIds={setOtherExcludedIds} excludedDepositIds={excludedDepositIds} agreementResults={agreementResults} enrolledPositions={enrolledPositions} setEnrolledPositions={setEnrolledPositions} />}
             {activeTab === 3 && <RiskTab a={result.analysis} positions={positions} excludedIds={excludedIds} otherExcludedIds={otherExcludedIds} excludedDepositIds={excludedDepositIds} />}
             {activeTab === 4 && <AgreementsTab agreementResults={agreementResults} />}
             {activeTab === 5 && <CrossReferenceTab crossRefResult={crossRefResult} crossRefError={crossRefError} agreementResults={agreementResults} positions={positions} a={result.analysis} />}
-            {activeTab === 6 && <NegotiationTab a={result.analysis} positions={positions} excludedIds={excludedIds} otherExcludedIds={otherExcludedIds} excludedDepositIds={excludedDepositIds} agreementResults={agreementResults} />}
+            {activeTab === 6 && <NegotiationTab a={result.analysis} positions={positions} excludedIds={excludedIds} otherExcludedIds={otherExcludedIds} excludedDepositIds={excludedDepositIds} agreementResults={agreementResults} enrolledPositions={enrolledPositions} />}
             {activeTab === 7 && <ConfidenceTab a={result.analysis} positions={positions} excludedIds={excludedIds} excludedDepositIds={excludedDepositIds} agreementResults={agreementResults} />}
-            {activeTab === 8 && <ExportTab a={result.analysis} fileName={result.file_name || 'analysis'} positions={positions} excludedIds={excludedIds} otherExcludedIds={otherExcludedIds} excludedDepositIds={excludedDepositIds} agreementResults={agreementResults} />}
+            {activeTab === 8 && <ExportTab a={result.analysis} fileName={result.file_name || 'analysis'} positions={positions} excludedIds={excludedIds} otherExcludedIds={otherExcludedIds} excludedDepositIds={excludedDepositIds} agreementResults={agreementResults} enrolledPositions={enrolledPositions} />}
           </div>
         </div>
       )}
