@@ -44,6 +44,13 @@ PROTECTED REVENUE ACH PATTERNS — ALWAYS COUNT AS REVENUE (never exclude):
 • Any ACH credit that does NOT match a known MCA funder name → DEFAULT to ach_credit, is_excluded: false
 • The funder keyword list ("WIRE", "ADVANCE", "GRP", "FUNDING", "CAPITAL") should ONLY be used to classify credits that match a known funder — NEVER to demote an unrecognized customer ACH payment to LOAN type
 
+CONFIDENCE SCORING — EVERY revenue_source MUST have a "confidence" field (0-100):
+• 95-100: Known processor exact match (Cantaloupe, Square, LE-USA TECHNOL, Three Square MAR) or obvious MCA wire with funder name match
+• 80-94: Strong match with slightly ambiguous descriptor (e.g., cash deposit with clear business pattern, known staffing transfer)
+• 60-79: Uncertain — could be revenue or non-revenue. Unrecognized ACH with ambiguous descriptor, vendor returns that might be revenue or refunds. FLAG THESE.
+• 0-59: Very uncertain — completely unrecognized descriptor, unusual one-time amount, could be anything. FLAG THESE.
+When in doubt, score LOWER. It is better to flag a deposit for manual review (confidence < 80) than to silently misclassify it. A wrong revenue number cascades errors into DSR, free cash flow, and negotiation intel.
+
 CRITICAL REVENUE CALCULATION METHOD:
 1. Start with the gross deposits total printed on page 1 of the statement
 2. Identify ALL exclusions (MCA wires, NSF returns, returned ACH, transfers)
@@ -170,7 +177,7 @@ If you see debits from the same payee at DIFFERENT amounts on the SAME dates or 
     "vendor_credits": 0.00,
     "cross_account_transfers_detected": 0.00,
     "revenue_sources": [
-      { "name": "string", "type": "card_processing|cash_deposit|ach_credit|vendor_payment|loan|transfer|other", "total": 0.00, "monthly_avg": 0.00, "is_excluded": false, "date": "YYYY-MM-DD or null", "note": "string" }
+      { "name": "string", "type": "card_processing|cash_deposit|ach_credit|vendor_payment|loan|transfer|other", "total": 0.00, "monthly_avg": 0.00, "is_excluded": false, "confidence": 95, "date": "YYYY-MM-DD or null", "note": "string" }
     ]
   },
 

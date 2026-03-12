@@ -33,7 +33,7 @@ Analyze this bank statement text thoroughly and return ONLY a valid JSON object 
     "excluded_other": 0.00,
     "net_verified_revenue": 0.00,
     "revenue_sources": [
-      { "name": "string", "type": "card_processing|cash_deposit|ach_credit|vendor_payment|loan|transfer|other", "total": 0.00, "is_excluded": false, "note": "string" }
+      { "name": "string", "type": "card_processing|cash_deposit|ach_credit|vendor_payment|loan|transfer|other", "total": 0.00, "is_excluded": false, "confidence": 95, "note": "string" }
     ]
   },
 
@@ -129,6 +129,7 @@ CRITICAL EXTRACTION RULES:
 5. Card processing credits (Square, Three Square MAR, LE-USA TECHNOL, Cantaloupe Payouts) are TRUE REVENUE.
 5a. ACH CREDITS CLASSIFICATION: Do NOT lump all ACH credits together. ACH from known processors → type "card_processing" or "ach_credit", is_excluded: false. ACH from MCA funders or containing "wire/advance/grp/funding/capital" → type "loan", is_excluded: true. Never combine MCA advance wires into the ach_credits revenue bucket.
 5b. PROTECTED REVENUE ACH — ALWAYS COUNT: "ROUTE"/"ROUTE COLLECTION"/"ROUTE PMT" → customer route collections = TRUE REVENUE. "CUSTOMER"/"CUST PMT" → customer payments = TRUE REVENUE. "VEND"/"VENDING" → vending income = TRUE REVENUE. Any ACH credit NOT matching a known MCA funder name → DEFAULT to ach_credit, is_excluded: false. The funder keywords should ONLY promote matching credits to LOAN type, never demote unrecognized customer ACH.
+5c. CONFIDENCE SCORING — EVERY revenue_source MUST have a "confidence" field (0-100): 95-100 = known processor exact match or obvious MCA wire; 80-94 = strong match, slightly ambiguous; 60-79 = uncertain, could be revenue or non-revenue (FLAG); 0-59 = very uncertain, unrecognized descriptor (FLAG). When in doubt, score LOWER — better to flag for manual review than silently misclassify.
 6. NSF risk score formula: +15 per NSF event, +10 per overdraft, +20 if NSF in final 10 days, +15 if increasing trend. Max 100.
 7. DSR = total_mca_monthly / net_verified_revenue * 100
 8. Free cash = net_verified_revenue - total_mca_monthly - total_operating_expenses

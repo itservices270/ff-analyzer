@@ -254,37 +254,56 @@ function buildCSV(a, activePositions, totalMCAMonthly, dsr, totalOtherDebt, tota
 
 
 // ─── Revenue Adjustment Helper ────────────────────────────────────────────────
-function calcAdjustedRevenue(a, excludedDepositIds) {
-  const base = a.revenue?.monthly_average_revenue || a.revenue?.net_verified_revenue || 0;
-  if (!excludedDepositIds || excludedDepositIds.length === 0) return base;
+function calcAdjustedRevenue(a, depositOverrides) {
   const sources = a.revenue?.revenue_sources || [];
-  let adj = base;
+  const months = Math.max((a.monthly_breakdown || []).length, 1);
+
+  // If no overrides, return the AI's base revenue
+  if (!depositOverrides || Object.keys(depositOverrides).length === 0) {
+    return a.revenue?.monthly_average_revenue || a.revenue?.net_verified_revenue || 1;
+  }
+
+  let total = 0;
   sources.forEach((src, i) => {
-    const amt = src.monthly_avg || (src.total / Math.max((a.monthly_breakdown||[]).length, 1)) || 0;
-    if (excludedDepositIds.includes(i)) {
-      if (!src.is_excluded) {
-        // User is excluding a counted item — subtract it
-        adj -= amt;
-      }
-      // If already excluded by Claude and user toggles it — they want to INCLUDE it back
+    const amt = src.monthly_avg || (src.total / months) || 0;
+    const aiIncluded = !src.is_excluded;
+
+    if (depositOverrides.hasOwnProperty(i)) {
+      // User override: true = include, false = exclude
+      if (depositOverrides[i]) total += amt;
     } else {
-      if (src.is_excluded && (src.monthly_avg > 15000 || src.total > 15000)) {
-        // Not in excluded list means user wants it included — but only if they've interacted
-        // We only add back if user explicitly toggled it off (i.e. was in excludedDepositIds before)
-        // For now, don't add back auto-excluded items unless toggled — keeps base clean
-      }
+      // No override — use AI classification
+      if (aiIncluded) total += amt;
     }
   });
-  return Math.max(adj, 1);
+
+  return Math.max(total, 1);
 }
 
 // ─── Revenue Tab ─────────────────────────────────────────────────────────────
-function RevenueTab({ a, excludedDepositIds, setExcludedDepositIds }) {
+function RevenueTab({ a, depositOverrides, setDepositOverrides }) {
   const r = a.revenue;
   const m = a.calculated_metrics;
   const b = a.balance_summary;
-  const adjustedRevenue = calcAdjustedRevenue(a, excludedDepositIds);
-  const revenueAdjusted = excludedDepositIds && excludedDepositIds.length > 0;
+  const adjustedRevenue = calcAdjustedRevenue(a, depositOverrides);
+  const overrideCount = Object.keys(depositOverrides || {}).length;
+  const revenueAdjusted = overrideCount > 0;
+
+  // Determine effective inclusion state for each source
+  const isIncluded = (src, i) => {
+    if (depositOverrides && depositOverrides.hasOwnProperty(i)) return depositOverrides[i];
+    return !src.is_excluded;
+  };
+
+  const toggleSource = (i) => {
+    const src = (r.revenue_sources || [])[i];
+    if (!src) return;
+    const current = isIncluded(src, i);
+    setDepositOverrides(prev => ({ ...prev, [i]: !current }));
+  };
+
+  const confColor = (c) => c >= 80 ? '#4caf50' : c >= 60 ? '#ffd54f' : '#ef5350';
+
   return (
     <div>
       <div style={S.row}>
@@ -296,7 +315,7 @@ function RevenueTab({ a, excludedDepositIds, setExcludedDepositIds }) {
         <div style={{ ...S.stat, flex: 1 }}>
           <div style={S.statLabel}>{(a.monthly_breakdown||[]).length > 1 ? 'Monthly Avg Revenue' : 'Net Verified Revenue'}{revenueAdjusted ? ' ✎' : ''}</div>
           <div style={S.statValue('#00e5ff')}>{fmt(adjustedRevenue)}</div>
-          <div style={S.statSub}>{revenueAdjusted ? <span style={{color:'#ffd54f'}}>Adjusted · {excludedDepositIds.length} deposit{excludedDepositIds.length>1?'s':''} excluded</span> : (a.monthly_breakdown||[]).length > 1 ? 'Bank-verified avg across months' : 'After exclusions'}</div>
+          <div style={S.statSub}>{revenueAdjusted ? <span style={{color:'#ffd54f'}}>Adjusted · {overrideCount} override{overrideCount>1?'s':''}</span> : (a.monthly_breakdown||[]).length > 1 ? 'Bank-verified avg across months' : 'After exclusions'}</div>
         </div>
         <div style={{ ...S.stat, flex: 1 }}>
           <div style={S.statLabel}>Avg Daily Balance</div>
@@ -317,15 +336,38 @@ function RevenueTab({ a, excludedDepositIds, setExcludedDepositIds }) {
 
       <div style={S.divider} />
       <div style={S.sectionTitle}>Revenue Sources</div>
-      <div style={S.tableHeader}><span>Source</span><span>Total</span><span>Type</span><span>Status</span></div>
-      {(r.revenue_sources || []).map((s, i) => (
-        <div key={i} style={S.tableRow(i)}>
-          <span style={{ fontSize: 13 }}>{s.name}</span>
-          <span style={{ fontSize: 13, color: s.is_excluded ? 'rgba(232,232,240,0.4)' : '#e8e8f0', textDecoration: s.is_excluded ? 'line-through' : 'none' }}>{fmt(s.total)}</span>
-          <span><span style={S.tag('grey')}>{(s.type || '').replace(/_/g, ' ')}</span></span>
-          <span>{s.is_excluded ? <span style={S.tag('red')}>excluded</span> : <span style={S.tag('green')}>counted</span>}</span>
+      <div style={{ background: 'rgba(0,0,0,0.15)', borderRadius: 10, overflow: 'hidden' }}>
+        {/* Header */}
+        <div style={{ display: 'grid', gridTemplateColumns: '2fr 1fr 0.8fr 0.6fr 0.6fr', gap: 8, padding: '8px 12px', borderBottom: '1px solid rgba(255,255,255,0.08)' }}>
+          {['Source', 'Total', 'Type', 'Confidence', 'Include'].map(h => (
+            <span key={h} style={{ fontSize: 10, color: 'rgba(232,232,240,0.4)', fontWeight: 600, textTransform: 'uppercase', letterSpacing: 0.5, textAlign: h === 'Source' ? 'left' : 'center' }}>{h}</span>
+          ))}
         </div>
-      ))}
+        {/* Rows */}
+        {(r.revenue_sources || []).map((s, i) => {
+          const included = isIncluded(s, i);
+          const conf = s.confidence ?? (s.is_excluded ? 90 : 90);
+          const hasOverride = depositOverrides && depositOverrides.hasOwnProperty(i);
+          return (
+            <div key={i} style={{ display: 'grid', gridTemplateColumns: '2fr 1fr 0.8fr 0.6fr 0.6fr', gap: 8, padding: '10px 12px', borderBottom: '1px solid rgba(255,255,255,0.04)', alignItems: 'center', background: hasOverride ? 'rgba(255,213,77,0.04)' : 'transparent' }}>
+              <span style={{ fontSize: 12, color: included ? '#e8e8f0' : 'rgba(232,232,240,0.4)' }}>
+                {s.name}
+                {s.note && <span title={s.note} style={{ marginLeft: 6, fontSize: 10, color: 'rgba(232,232,240,0.3)', cursor: 'help' }}>ⓘ</span>}
+              </span>
+              <span style={{ fontSize: 12, textAlign: 'center', color: included ? '#e8e8f0' : 'rgba(232,232,240,0.4)', textDecoration: included ? 'none' : 'line-through' }}>{fmt(s.total)}</span>
+              <span style={{ textAlign: 'center' }}><span style={S.tag('grey')}>{(s.type || '').replace(/_/g, ' ')}</span></span>
+              <span style={{ textAlign: 'center' }}>
+                <span style={{ display: 'inline-block', padding: '2px 6px', borderRadius: 4, fontSize: 10, fontWeight: 700, background: `${confColor(conf)}22`, color: confColor(conf) }}>{conf}</span>
+              </span>
+              <span style={{ textAlign: 'center' }}>
+                <button onClick={() => toggleSource(i)} style={{ width: 40, height: 22, borderRadius: 11, border: 'none', cursor: 'pointer', position: 'relative', background: included ? '#00e5ff' : '#ef5350', transition: 'background 0.2s' }}>
+                  <span style={{ position: 'absolute', top: 2, left: included ? 20 : 2, width: 18, height: 18, borderRadius: 9, background: '#fff', transition: 'left 0.2s', boxShadow: '0 1px 3px rgba(0,0,0,0.3)' }} />
+                </button>
+              </span>
+            </div>
+          );
+        })}
+      </div>
 
       {(r.excluded_mca_proceeds > 0 || r.excluded_transfers > 0 || r.excluded_loan_proceeds > 0 || r.excluded_other > 0) && (
         <>
@@ -352,7 +394,7 @@ function RevenueTab({ a, excludedDepositIds, setExcludedDepositIds }) {
 }
 
 // ─── MCA Tab ─────────────────────────────────────────────────────────────────
-function MCATab({ a, positions, setPositions, excludedIds, setExcludedIds, otherExcludedIds, setOtherExcludedIds, excludedDepositIds, agreementResults, enrolledPositions, setEnrolledPositions }) {
+function MCATab({ a, positions, setPositions, excludedIds, setExcludedIds, otherExcludedIds, setOtherExcludedIds, depositOverrides, agreementResults, enrolledPositions, setEnrolledPositions }) {
   const [addText, setAddText] = useState('');
   const [addLoading, setAddLoading] = useState(false);
   const [addError, setAddError] = useState(null);
@@ -411,7 +453,7 @@ function MCATab({ a, positions, setPositions, excludedIds, setExcludedIds, other
   const activePositions = positions.filter(p => !excludedIds.includes(p._id));
   const excludedPositions = positions.filter(p => excludedIds.includes(p._id));
   const other = a.other_debt_service || [];
-  const revenue = calcAdjustedRevenue(a, excludedDepositIds);
+  const revenue = calcAdjustedRevenue(a, depositOverrides);
 
   const totalMCAMonthly = activePositions.reduce((s, p) => s + (p.estimated_monthly_total || 0), 0);
   const activeOtherDebt = other.filter((_, i) => !(otherExcludedIds || []).includes(i));
@@ -852,12 +894,12 @@ function MCATab({ a, positions, setPositions, excludedIds, setExcludedIds, other
 
 
 // ─── Risk Tab ─────────────────────────────────────────────────────────────────
-function RiskTab({ a, positions, excludedIds, otherExcludedIds, excludedDepositIds }) {
+function RiskTab({ a, positions, excludedIds, otherExcludedIds, depositOverrides }) {
   const activePositions = (positions || []).filter(p => !(excludedIds || []).includes(p._id));
   const totalMCAMonthly = activePositions.reduce((s, p) => s + (p.estimated_monthly_total || 0), 0);
   const activeOther = (a.other_debt_service || []).filter((_, i) => !(otherExcludedIds || []).includes(i));
   const totalOtherDebt = activeOther.reduce((s, o) => s + (o.monthly_total || 0), 0);
-  const revenue = calcAdjustedRevenue(a, excludedDepositIds);
+  const revenue = calcAdjustedRevenue(a, depositOverrides);
   const nsf = a.nsf_analysis;
   const flags = a.flags_and_alerts || [];
   const dsr = positions && positions.length > 0 ? (totalMCAMonthly / revenue) * 100 : (a.calculated_metrics?.dsr_percent || 0);
@@ -953,13 +995,13 @@ function RiskTab({ a, positions, excludedIds, otherExcludedIds, excludedDepositI
 }
 
 // ─── Negotiation Tab ──────────────────────────────────────────────────────────
-function NegotiationTab({ a, positions, excludedIds, otherExcludedIds, excludedDepositIds, agreementResults, enrolledPositions }) {
+function NegotiationTab({ a, positions, excludedIds, otherExcludedIds, depositOverrides, agreementResults, enrolledPositions }) {
   const intel = a.negotiation_intel || {};
   const activePositions = (positions || a.mca_positions || []).filter(p => !(excludedIds || []).includes(p._id));
   const totalMCAMonthly = activePositions.reduce((s, p) => s + (p.estimated_monthly_total || 0), 0);
   const activeOther = (a.other_debt_service || []).filter((_, i) => !(otherExcludedIds || []).includes(i));
   const totalOtherDebt = activeOther.reduce((s, o) => s + (o.monthly_total || 0), 0);
-  const revenue = calcAdjustedRevenue(a, excludedDepositIds);
+  const revenue = calcAdjustedRevenue(a, depositOverrides);
   const cogs = a.expense_categories?.inventory_cogs || 0;
   const grossProfit = revenue - cogs;
   const freeCashAfterMCA = revenue - totalMCAMonthly;
@@ -2339,12 +2381,12 @@ function CrossReferenceTab({ crossRefResult, crossRefError, agreementResults, po
 }
 
 // ─── Confidence Tab (NEW) ────────────────────────────────────────────────────
-function ConfidenceTab({ a, positions, excludedIds, excludedDepositIds, agreementResults }) {
+function ConfidenceTab({ a, positions, excludedIds, depositOverrides, agreementResults }) {
   const allPositions = positions || a.mca_positions || [];
   const activePositions = allPositions.filter(p => !(excludedIds || []).includes(p._id));
   const flags = a.flags_and_alerts || [];
 
-  const revenue = calcAdjustedRevenue(a, excludedDepositIds);
+  const revenue = calcAdjustedRevenue(a, depositOverrides);
   const totalMCAMonthly = activePositions.reduce((s, p) => s + (p.estimated_monthly_total || 0), 0);
   const cogs = a.expense_categories?.inventory_cogs || 0;
   const grossProfit = revenue - cogs;
@@ -2698,13 +2740,13 @@ function confidentialityCheck(text) {
 }
 
 // ─── Export Tab ───────────────────────────────────────────────────────────────
-function ExportTab({ a, fileName, positions, excludedIds, otherExcludedIds, excludedDepositIds, agreementResults, enrolledPositions }) {
+function ExportTab({ a, fileName, positions, excludedIds, otherExcludedIds, depositOverrides, agreementResults, enrolledPositions }) {
   const { useState: useLocalState, useMemo: useLocalMemo } = React;
   const allPositions = (positions || a.mca_positions || []).filter(p => !(excludedIds || []).includes(p._id));
   const totalMCAMonthly = allPositions.reduce((s, p) => s + (p.estimated_monthly_total || 0), 0);
   const activeOther = (a.other_debt_service || []).filter((_, i) => !(otherExcludedIds || []).includes(i));
   const totalOtherDebt = activeOther.reduce((s, o) => s + (o.monthly_total || 0), 0);
-  const revenue = calcAdjustedRevenue(a, excludedDepositIds);
+  const revenue = calcAdjustedRevenue(a, depositOverrides);
   const dsr = (totalMCAMonthly / revenue) * 100;
   const totalDSR = ((totalMCAMonthly + totalOtherDebt) / revenue) * 100;
   const trueFree = revenue - totalMCAMonthly - totalOtherDebt - (a.expense_categories?.total_operating_expenses || 0);
@@ -3786,7 +3828,9 @@ export default function FFAnalyzer() {
   const [positions, setPositions] = useState([]);
   const [excludedIds, setExcludedIds] = useState([]);
   const [otherExcludedIds, setOtherExcludedIds] = useState([]);
-  const [excludedDepositIds, setExcludedDepositIds] = useState([]);
+  const [depositOverrides, setDepositOverrides] = useState({});
+  const [showRevenueReview, setShowRevenueReview] = useState(false);
+  const [reviewDismissed, setReviewDismissed] = useState(false);
   const [enrolledPositions, setEnrolledPositions] = useState(null); // null = all enrolled (default)
   const inputRef = useRef(null);
 
@@ -4129,6 +4173,12 @@ export default function FFAnalyzer() {
       }));
       setExcludedIds([]);
       setOtherExcludedIds([]);
+      setDepositOverrides({});
+      setReviewDismissed(false);
+      // Check for low-confidence deposits → trigger review modal
+      const sources = data.analysis?.revenue?.revenue_sources || [];
+      const flagged = sources.filter(s => (s.confidence ?? 90) < 80);
+      if (flagged.length > 0) setShowRevenueReview(true);
       setActiveTab(0);
     } catch (e) {
       clearInterval(interval);
@@ -4145,7 +4195,7 @@ export default function FFAnalyzer() {
     const manualPositions = positions.filter(p => p.isManual || p.isEdited);
     const prevExcludedIds = [...excludedIds];
     const prevOtherExcludedIds = [...otherExcludedIds];
-    const prevExcludedDepositIds = [...excludedDepositIds];
+    const prevDepositOverrides = { ...depositOverrides };
 
     setLoading(true);
     setError(null);
@@ -4195,7 +4245,12 @@ export default function FFAnalyzer() {
       // Restore exclusion lists (best effort — IDs may have shifted)
       setExcludedIds(prevExcludedIds.filter(id => newPositions.some(p => p._id === id)));
       setOtherExcludedIds(prevOtherExcludedIds);
-      setExcludedDepositIds(prevExcludedDepositIds);
+      setDepositOverrides(prevDepositOverrides);
+      // Check for low-confidence deposits → trigger review modal
+      setReviewDismissed(false);
+      const sources = data.analysis?.revenue?.revenue_sources || [];
+      const flagged = sources.filter(s => (s.confidence ?? 90) < 80);
+      if (flagged.length > 0) setShowRevenueReview(true);
     } catch (e) {
       setError(e.message);
     }
@@ -4204,7 +4259,8 @@ export default function FFAnalyzer() {
 
   const reset = () => {
     setUploadedFiles([]); setResult(null); setError(null);
-    setPositions([]); setExcludedIds([]); setOtherExcludedIds([]); setExcludedDepositIds([]);
+    setPositions([]); setExcludedIds([]); setOtherExcludedIds([]); setDepositOverrides({});
+    setShowRevenueReview(false); setReviewDismissed(false);
     setUploadedAgreements([]); setAgreementResults([]); setCrossRefResult(null);
     if (inputRef.current) inputRef.current.value = '';
   };
@@ -4491,21 +4547,74 @@ export default function FFAnalyzer() {
             </div>
           </div>
 
+          {/* Revenue Review Modal */}
+          {showRevenueReview && !reviewDismissed && result?.analysis?.revenue?.revenue_sources && (() => {
+            const sources = result.analysis.revenue.revenue_sources;
+            const flagged = sources.map((s, i) => ({ ...s, _idx: i })).filter(s => (s.confidence ?? 90) < 80);
+            if (flagged.length === 0) return null;
+            const confColor = (c) => c >= 80 ? '#4caf50' : c >= 60 ? '#ffd54f' : '#ef5350';
+            const isIncluded = (src, i) => {
+              if (depositOverrides.hasOwnProperty(i)) return depositOverrides[i];
+              return !src.is_excluded;
+            };
+            return (
+              <div style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.7)', backdropFilter: 'blur(6px)', zIndex: 9999, display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 20 }}>
+                <div style={{ background: '#1a1a2e', border: '1px solid rgba(0,229,255,0.2)', borderRadius: 16, padding: 28, maxWidth: 800, width: '100%', maxHeight: '80vh', overflowY: 'auto', boxShadow: '0 20px 60px rgba(0,0,0,0.5)' }}>
+                  <div style={{ fontSize: 20, fontWeight: 700, color: '#ffd54f', marginBottom: 6 }}>Revenue Review — Flagged Deposits</div>
+                  <div style={{ fontSize: 13, color: 'rgba(232,232,240,0.5)', marginBottom: 20, lineHeight: 1.6 }}>These deposits scored below 80% confidence. Review each one before analysis runs downstream.</div>
+                  <div style={{ background: 'rgba(0,0,0,0.2)', borderRadius: 10, overflow: 'hidden', marginBottom: 20 }}>
+                    <div style={{ display: 'grid', gridTemplateColumns: '2fr 1fr 0.7fr 0.6fr 0.6fr', gap: 8, padding: '8px 12px', borderBottom: '1px solid rgba(255,255,255,0.1)' }}>
+                      {['Source', 'Total', 'Type', 'Confidence', 'Include?'].map(h => (
+                        <span key={h} style={{ fontSize: 10, color: 'rgba(232,232,240,0.4)', fontWeight: 600, textTransform: 'uppercase', letterSpacing: 0.5, textAlign: h === 'Source' ? 'left' : 'center' }}>{h}</span>
+                      ))}
+                    </div>
+                    {flagged.map(s => {
+                      const idx = s._idx;
+                      const included = isIncluded(s, idx);
+                      return (
+                        <div key={idx} style={{ display: 'grid', gridTemplateColumns: '2fr 1fr 0.7fr 0.6fr 0.6fr', gap: 8, padding: '10px 12px', borderBottom: '1px solid rgba(255,255,255,0.04)', alignItems: 'center' }}>
+                          <span style={{ fontSize: 12, color: '#e8e8f0' }}>
+                            {s.name}
+                            {s.note && <div style={{ fontSize: 10, color: 'rgba(232,232,240,0.35)', marginTop: 2 }}>{s.note}</div>}
+                          </span>
+                          <span style={{ fontSize: 12, textAlign: 'center', color: '#e8e8f0' }}>{fmt(s.total)}</span>
+                          <span style={{ textAlign: 'center' }}><span style={S.tag('grey')}>{(s.type || '').replace(/_/g, ' ')}</span></span>
+                          <span style={{ textAlign: 'center' }}><span style={{ display: 'inline-block', padding: '2px 6px', borderRadius: 4, fontSize: 10, fontWeight: 700, background: `${confColor(s.confidence ?? 50)}22`, color: confColor(s.confidence ?? 50) }}>{s.confidence ?? '?'}</span></span>
+                          <span style={{ textAlign: 'center' }}>
+                            <button onClick={() => setDepositOverrides(prev => ({ ...prev, [idx]: !included }))} style={{ width: 40, height: 22, borderRadius: 11, border: 'none', cursor: 'pointer', position: 'relative', background: included ? '#00e5ff' : '#ef5350', transition: 'background 0.2s' }}>
+                              <span style={{ position: 'absolute', top: 2, left: included ? 20 : 2, width: 18, height: 18, borderRadius: 9, background: '#fff', transition: 'left 0.2s', boxShadow: '0 1px 3px rgba(0,0,0,0.3)' }} />
+                            </button>
+                          </span>
+                        </div>
+                      );
+                    })}
+                  </div>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                    <span style={{ fontSize: 12, color: 'rgba(232,232,240,0.4)' }}>{flagged.length} flagged deposit{flagged.length > 1 ? 's' : ''}</span>
+                    <button onClick={() => { setShowRevenueReview(false); setReviewDismissed(true); }} style={{ ...S.btn('primary'), padding: '10px 28px', fontSize: 14, fontWeight: 700 }}>
+                      Confirm & Calculate
+                    </button>
+                  </div>
+                </div>
+              </div>
+            );
+          })()}
+
           {/* Tabs */}
           <div style={S.tabs}>
             {TABS.map((t, i) => <button key={i} style={S.tab(activeTab === i)} onClick={() => setActiveTab(i)}>{t}</button>)}
           </div>
 
           <div style={S.card}>
-            {activeTab === 0 && <RevenueTab a={result.analysis} excludedDepositIds={excludedDepositIds} setExcludedDepositIds={setExcludedDepositIds} />}
+            {activeTab === 0 && <RevenueTab a={result.analysis} depositOverrides={depositOverrides} setDepositOverrides={setDepositOverrides} />}
             {activeTab === 1 && <TrendTab a={result.analysis} agreementResults={agreementResults} />}
-            {activeTab === 2 && <MCATab a={result.analysis} positions={positions} setPositions={setPositions} excludedIds={excludedIds} setExcludedIds={setExcludedIds} otherExcludedIds={otherExcludedIds} setOtherExcludedIds={setOtherExcludedIds} excludedDepositIds={excludedDepositIds} agreementResults={agreementResults} enrolledPositions={enrolledPositions} setEnrolledPositions={setEnrolledPositions} />}
-            {activeTab === 3 && <RiskTab a={result.analysis} positions={positions} excludedIds={excludedIds} otherExcludedIds={otherExcludedIds} excludedDepositIds={excludedDepositIds} />}
+            {activeTab === 2 && <MCATab a={result.analysis} positions={positions} setPositions={setPositions} excludedIds={excludedIds} setExcludedIds={setExcludedIds} otherExcludedIds={otherExcludedIds} setOtherExcludedIds={setOtherExcludedIds} depositOverrides={depositOverrides} agreementResults={agreementResults} enrolledPositions={enrolledPositions} setEnrolledPositions={setEnrolledPositions} />}
+            {activeTab === 3 && <RiskTab a={result.analysis} positions={positions} excludedIds={excludedIds} otherExcludedIds={otherExcludedIds} depositOverrides={depositOverrides} />}
             {activeTab === 4 && <AgreementsTab agreementResults={agreementResults} />}
             {activeTab === 5 && <CrossReferenceTab crossRefResult={crossRefResult} crossRefError={crossRefError} agreementResults={agreementResults} positions={positions} a={result.analysis} />}
-            {activeTab === 6 && <NegotiationTab a={result.analysis} positions={positions} excludedIds={excludedIds} otherExcludedIds={otherExcludedIds} excludedDepositIds={excludedDepositIds} agreementResults={agreementResults} enrolledPositions={enrolledPositions} />}
-            {activeTab === 7 && <ConfidenceTab a={result.analysis} positions={positions} excludedIds={excludedIds} excludedDepositIds={excludedDepositIds} agreementResults={agreementResults} />}
-            {activeTab === 8 && <ExportTab a={result.analysis} fileName={result.file_name || 'analysis'} positions={positions} excludedIds={excludedIds} otherExcludedIds={otherExcludedIds} excludedDepositIds={excludedDepositIds} agreementResults={agreementResults} enrolledPositions={enrolledPositions} />}
+            {activeTab === 6 && <NegotiationTab a={result.analysis} positions={positions} excludedIds={excludedIds} otherExcludedIds={otherExcludedIds} depositOverrides={depositOverrides} agreementResults={agreementResults} enrolledPositions={enrolledPositions} />}
+            {activeTab === 7 && <ConfidenceTab a={result.analysis} positions={positions} excludedIds={excludedIds} depositOverrides={depositOverrides} agreementResults={agreementResults} />}
+            {activeTab === 8 && <ExportTab a={result.analysis} fileName={result.file_name || 'analysis'} positions={positions} excludedIds={excludedIds} otherExcludedIds={otherExcludedIds} depositOverrides={depositOverrides} agreementResults={agreementResults} enrolledPositions={enrolledPositions} />}
           </div>
         </div>
       )}
