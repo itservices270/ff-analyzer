@@ -1510,16 +1510,46 @@ function CrossReferenceTab({ crossRefResult }) {
 }
 
 // ─── Confidence Tab (NEW) ────────────────────────────────────────────────────
-function ConfidenceTab({ a }) {
-  const positions = a.mca_positions || [];
+function ConfidenceTab({ a, positions, excludedIds, excludedDepositIds }) {
+  const allPositions = positions || a.mca_positions || [];
+  const activePositions = allPositions.filter(p => !(excludedIds || []).includes(p._id));
   const flags = a.flags_and_alerts || [];
-  const highConf = positions.filter(p => p.confidence === 'high').length;
-  const medConf = positions.filter(p => p.confidence === 'medium').length;
-  const lowConf = positions.filter(p => p.confidence === 'low').length;
-  const total = positions.length || 1;
+  const highConf = allPositions.filter(p => p.confidence === 'high').length;
+  const medConf = allPositions.filter(p => p.confidence === 'medium').length;
+  const lowConf = allPositions.filter(p => p.confidence === 'low' || p.confidence === 'manual').length;
+  const total = allPositions.length || 1;
+
+  const revenue = calcAdjustedRevenue(a, excludedDepositIds);
+  const totalMCAMonthly = activePositions.reduce((s, p) => s + (p.estimated_monthly_total || 0), 0);
+  const dsr = revenue > 0 ? (totalMCAMonthly / revenue) * 100 : 0;
+  const grossProfit = revenue - (a.expense_categories?.inventory_cogs || 0);
+  const mcaBurden = revenue > 0 ? (totalMCAMonthly / revenue) * 100 : 0;
+
+  // Per-field confidence scoring
+  const revenueConfidence = (a.monthly_breakdown?.length || 0) >= 3 ? 'high' : (a.monthly_breakdown?.length || 0) >= 2 ? 'medium' : 'low';
+  const dsrConfidence = activePositions.length > 0 && activePositions.every(p => p.confidence === 'high') ? 'high' : activePositions.some(p => p.confidence === 'low') ? 'low' : 'medium';
+  const grossProfitConfidence = a.expense_categories?.inventory_cogs > 0 ? 'medium' : 'low';
+
+  const confColor = (c) => c === 'high' ? '#4caf50' : c === 'low' ? '#ef5350' : '#ff9800';
+  const confBg = (c) => c === 'high' ? 'rgba(76,175,80,0.1)' : c === 'low' ? 'rgba(239,83,80,0.1)' : 'rgba(255,152,0,0.1)';
+
+  const FieldRow = ({ label, value, confidence, note }) => (
+    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '12px 14px', background: confBg(confidence), borderRadius: 8, marginBottom: 8, border: `1px solid ${confColor(confidence)}22` }}>
+      <div style={{ flex: 1 }}>
+        <div style={{ fontSize: 12, color: 'rgba(232,232,240,0.5)', marginBottom: 2 }}>{label}</div>
+        <div style={{ fontSize: 16, color: '#e8e8f0' }}>{value}</div>
+        {note && <div style={{ fontSize: 10, color: 'rgba(232,232,240,0.4)', marginTop: 2 }}>{note}</div>}
+      </div>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+        <span style={{ ...S.tag(confidence === 'high' ? 'green' : confidence === 'low' ? 'red' : 'amber'), fontSize: 10 }}>{confidence}</span>
+        {confidence === 'low' && <span style={{ cursor: 'pointer', opacity: 0.6 }} title="Low confidence - verify manually">✏️</span>}
+      </div>
+    </div>
+  );
 
   return (
     <div>
+      {/* Summary Stats */}
       <div style={S.row}>
         <div style={S.stat}>
           <div style={S.statLabel}>High Confidence</div>
@@ -1537,17 +1567,36 @@ function ConfidenceTab({ a }) {
           <div style={{ height: 4, background: 'rgba(255,255,255,0.06)', borderRadius: 2, marginTop: 8 }}><div style={S.progressBar((lowConf/total)*100, '#ef5350')} /></div>
         </div>
       </div>
+
+      {/* Per-Field Confidence */}
+      <div style={S.divider} />
+      <div style={S.sectionTitle}>Field-Level Confidence</div>
+      <div style={{ fontSize: 11, color: 'rgba(232,232,240,0.4)', marginBottom: 12 }}>Fields with low confidence should be manually verified before sending to funders</div>
+
+      <FieldRow label="Total Monthly Revenue (Bank-Verified)" value={fmt(revenue)} confidence={revenueConfidence} note={`Based on ${a.monthly_breakdown?.length || 0} months of statements`} />
+      <FieldRow label="Debt Service Ratio (DSR)" value={fmtP(dsr)} confidence={dsrConfidence} note={`${activePositions.length} active positions`} />
+      <FieldRow label="MCA Burden %" value={fmtP(mcaBurden)} confidence={dsrConfidence} note={`${fmt(totalMCAMonthly)}/mo in MCA payments`} />
+      <FieldRow label="Gross Profit Margin" value={fmt(grossProfit)} confidence={grossProfitConfidence} note={a.expense_categories?.inventory_cogs > 0 ? `After ${fmt(a.expense_categories.inventory_cogs)} COGS` : 'COGS not detected - using gross revenue'} />
+
+      {/* Position Confidence Detail */}
       <div style={S.divider} />
       <div style={S.sectionTitle}>Position Confidence Detail</div>
-      {positions.map((p, i) => (
-        <div key={i} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '10px 12px', background: i%2===0 ? 'rgba(255,255,255,0.03)' : 'transparent', borderRadius: 6 }}>
-          <div>
-            <div style={{ fontSize: 13, color: '#e8e8f0' }}>{p.funder_name}</div>
-            <div style={{ fontSize: 11, color: 'rgba(232,232,240,0.4)' }}>{p.payments_detected || 0} payments detected · {p.status || 'active'}</div>
+      {allPositions.map((p, i) => (
+        <div key={i} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '10px 12px', background: i%2===0 ? 'rgba(255,255,255,0.03)' : 'transparent', borderRadius: 6, opacity: (excludedIds || []).includes(p._id) ? 0.4 : 1 }}>
+          <div style={{ flex: 1 }}>
+            <div style={{ fontSize: 13, color: '#e8e8f0' }}>{p.funder_name} {p.isManual && <span style={{ fontSize: 10, color: '#00e5ff' }}>(manual)</span>}</div>
+            <div style={{ fontSize: 11, color: 'rgba(232,232,240,0.4)' }}>
+              {fmt(p.payment_amount_current || p.payment_amount)}/{p.frequency} · {p.payments_detected || 0} payments · {p.status || 'active'}
+            </div>
           </div>
-          <span style={S.tag(p.confidence === 'high' ? 'green' : p.confidence === 'low' ? 'red' : 'amber')}>{p.confidence || 'unknown'}</span>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+            <span style={S.tag(p.confidence === 'high' ? 'green' : p.confidence === 'low' ? 'red' : p.confidence === 'manual' ? 'cyan' : 'amber')}>{p.confidence || 'unknown'}</span>
+            {(p.confidence === 'low' || p.confidence === 'manual') && <span style={{ cursor: 'pointer', opacity: 0.6 }} title="Edit this position">✏️</span>}
+          </div>
         </div>
       ))}
+
+      {/* Analysis Alerts */}
       {flags.length > 0 && (
         <>
           <div style={S.divider} />
@@ -2224,7 +2273,7 @@ export default function FFAnalyzer() {
 
   const retryAgreementAsImages = async (ag) => {
     if (!ag.file) return;
-    setUploadedAgreements(prev => prev.map(a => a.id === ag.id ? { ...a, status: 'analyzing', error: null } : a));
+    setUploadedAgreements(prev => prev.map(a => a.id === ag.id ? { ...a, status: 'retrying', error: null } : a));
     try {
       const images = await renderPDFToImages(ag.file);
       const formData = new FormData();
@@ -2706,12 +2755,14 @@ export default function FFAnalyzer() {
                   </button>
                 )}
                 {uploadedAgreements.map(ag => (
-                  <span key={ag.id} style={{ display: 'inline-flex', alignItems: 'center', gap: 5, fontSize: 10, color: 'rgba(232,232,240,0.5)', background: ag.status === 'error' ? 'rgba(239,83,80,0.08)' : 'rgba(255,255,255,0.04)', border: `1px solid ${ag.status === 'error' ? 'rgba(239,83,80,0.3)' : 'rgba(255,255,255,0.08)'}`, borderRadius: 6, padding: '3px 7px' }}>
+                  <span key={ag.id} style={{ display: 'inline-flex', alignItems: 'center', gap: 5, fontSize: 10, color: 'rgba(232,232,240,0.5)', background: ag.status === 'error' ? 'rgba(239,83,80,0.08)' : ag.status === 'retrying' ? 'rgba(0,229,255,0.08)' : 'rgba(255,255,255,0.04)', border: `1px solid ${ag.status === 'error' ? 'rgba(239,83,80,0.3)' : ag.status === 'retrying' ? 'rgba(0,229,255,0.3)' : 'rgba(255,255,255,0.08)'}`, borderRadius: 6, padding: '3px 7px' }}>
                     {ag.status === 'done' && <span style={{ color: '#81c784' }}>✓</span>}
                     {ag.status === 'error' && <span style={{ color: '#ef9a9a' }}>✕</span>}
                     {ag.status === 'analyzing' && <span style={{ color: '#00e5ff' }}>⏳</span>}
+                    {ag.status === 'retrying' && <span style={{ color: '#00e5ff', animation: 'spin 1s linear infinite', display: 'inline-block' }}>↻</span>}
                     {ag.status === 'pending' && <span style={{ color: '#EAD068' }}>📋</span>}
                     {ag.name.slice(0,18)}{ag.name.length>18?'…':''}
+                    {ag.status === 'retrying' && <span style={{ color: '#00e5ff', fontSize: 9, marginLeft: 2 }}>retrying...</span>}
                     {ag.status === 'error' && (
                       <>
                         <button onClick={() => { setUploadedAgreements(prev => prev.map(a => a.id === ag.id ? {...a, status: 'pending', error: null} : a)); }} style={{ marginLeft: 4, padding: '1px 6px', borderRadius: 4, border: '1px solid rgba(0,229,255,0.3)', background: 'rgba(0,229,255,0.1)', color: '#00e5ff', cursor: 'pointer', fontSize: 9, fontFamily: 'inherit' }}>↺ Retry</button>
@@ -2737,7 +2788,7 @@ export default function FFAnalyzer() {
             {activeTab === 4 && <AgreementsTab agreementResults={agreementResults} />}
             {activeTab === 5 && <CrossReferenceTab crossRefResult={crossRefResult} />}
             {activeTab === 6 && <NegotiationTab a={result.analysis} positions={positions} excludedIds={excludedIds} otherExcludedIds={otherExcludedIds} excludedDepositIds={excludedDepositIds} />}
-            {activeTab === 7 && <ConfidenceTab a={result.analysis} />}
+            {activeTab === 7 && <ConfidenceTab a={result.analysis} positions={positions} excludedIds={excludedIds} excludedDepositIds={excludedDepositIds} />}
             {activeTab === 8 && <ExportTab a={result.analysis} fileName={result.file_name || 'analysis'} positions={positions} excludedIds={excludedIds} otherExcludedIds={otherExcludedIds} excludedDepositIds={excludedDepositIds} agreementResults={agreementResults} />}
           </div>
         </div>
