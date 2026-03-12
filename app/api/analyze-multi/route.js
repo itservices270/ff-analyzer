@@ -35,6 +35,13 @@ ACH CREDITS CLASSIFICATION (CRITICAL — DO NOT LUMP ALL ACH TOGETHER):
 • ACH credits you cannot identify → type: "ach_credit", is_excluded: false (benefit of the doubt), but add note: "unidentified ACH — manual review recommended"
 • NEVER combine MCA advance wires into the ach_credits revenue bucket. They are LOANS, not revenue.
 
+PROTECTED REVENUE ACH PATTERNS — ALWAYS COUNT AS REVENUE (never exclude):
+• "ROUTE" / "ROUTE COLLECTION" / "ROUTE PMT" → customer route collections, TRUE REVENUE
+• "CUSTOMER" / "CUST PMT" / "CUST PAYMENT" → customer payments, TRUE REVENUE
+• "VEND" / "VENDING" / "VEND PMT" → vending income, TRUE REVENUE
+• Any ACH credit that does NOT match a known MCA funder name → DEFAULT to ach_credit, is_excluded: false
+• The funder keyword list ("WIRE", "ADVANCE", "GRP", "FUNDING", "CAPITAL") should ONLY be used to classify credits that match a known funder — NEVER to demote an unrecognized customer ACH payment to LOAN type
+
 CRITICAL REVENUE CALCULATION METHOD:
 1. Start with the gross deposits total printed on page 1 of the statement
 2. Identify ALL exclusions (MCA wires, NSF returns, returned ACH, transfers)
@@ -321,6 +328,8 @@ When matching funder names across transactions and months, apply these technique
    - "FORWARD FIN", "FORWARD FINANCING" → "Forward Financing"
 
 If a funder match was made via fuzzy/alias matching rather than an exact descriptor match, set fuzzy_match: true and fuzzy_match_source to the original bank descriptor text.
+
+IMPORTANT: Fuzzy matching applies ONLY to DEBITS for MCA position detection. Do NOT use fuzzy matching to reclassify ACH CREDITS as loans. Customer ACH credits ("ROUTE", "CUSTOMER", "CUST PMT", "VEND", etc.) must remain as revenue even if they partially match a funder keyword. Only reclassify a credit as LOAN if it is a clear, specific match to a known MCA funder name.
 
 ## PAYMENT CHANGE DETECTION ACROSS MONTHS
 

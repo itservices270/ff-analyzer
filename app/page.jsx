@@ -425,6 +425,30 @@ function MCATab({ a, positions, setPositions, excludedIds, setExcludedIds, other
   const complianceMap = {};
   compliance.forEach(c => { complianceMap[c._id] = c; });
 
+  // Origination dates from agreements
+  const originationMap = {};
+  const originationDates = [];
+  activePositions.forEach(p => {
+    const agMatch = matchAgreementToPosition(p.funder_name, agreementResults);
+    if (agMatch?.analysis) {
+      const d = agMatch.analysis;
+      const dateStr = d.funding_date || d.effective_date || d.contract_date;
+      if (dateStr) {
+        originationMap[p._id] = dateStr;
+        originationDates.push({ id: p._id, date: new Date(dateStr), funder: p.funder_name });
+      }
+    }
+  });
+  // Detect rapid stacking: positions originated within 30 days of each other
+  const rapidStackIds = new Set();
+  originationDates.sort((a, b) => a.date - b.date);
+  for (let i = 0; i < originationDates.length; i++) {
+    for (let j = i + 1; j < originationDates.length; j++) {
+      const diff = Math.abs(originationDates[j].date - originationDates[i].date) / (1000 * 60 * 60 * 24);
+      if (diff <= 30) { rapidStackIds.add(originationDates[i].id); rapidStackIds.add(originationDates[j].id); }
+    }
+  }
+
   const exclude = (id) => setExcludedIds(prev => [...prev, id]);
   const restore = (id) => setExcludedIds(prev => prev.filter(x => x !== id));
 
@@ -483,7 +507,10 @@ function MCATab({ a, positions, setPositions, excludedIds, setExcludedIds, other
         <div key={p._id} style={{ ...S.funderCard, ...(p.status === 'paid_off' ? { opacity: 0.6, borderColor: 'rgba(150,150,150,0.3)', background: 'rgba(80,80,80,0.15)' } : {}) }}>
           <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', flexWrap: 'wrap', gap: 8, marginBottom: 10 }}>
             <div>
-              <div style={{ fontSize: 16, color: '#e8e8f0', marginBottom: 4 }}>{p.funder_name}</div>
+              <div style={{ fontSize: 16, color: '#e8e8f0', marginBottom: 2 }}>{p.funder_name}</div>
+              {originationMap[p._id] && (
+                <div style={{ fontSize: 11, color: 'rgba(232,232,240,0.45)', marginBottom: 4 }}>Originated: {originationMap[p._id]}</div>
+              )}
               <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
                 <span style={S.tag(p.flag === 'undisclosed' ? 'red' : p.flag === 'default_modified' ? 'red' : p.flag === 'modified' ? 'amber' : p.flag === 'manual' ? 'cyan' : 'teal')}>{p.flag === 'default_modified' ? '⚠ default modified' : p.flag === 'manual' ? '＋ manual' : p.flag || 'standard'}</span>
                 {(p.isEdited || p.isManual) && <span style={S.tag('cyan')}>(edited)</span>}
@@ -491,6 +518,7 @@ function MCATab({ a, positions, setPositions, excludedIds, setExcludedIds, other
                 <span style={S.tag('grey')}>{p.frequency}</span>
                 {p.fuzzy_match && <span style={S.tag('amber')}>fuzzy match</span>}
                 {p.double_pull && <span style={S.tag('red')}>DOUBLE PULL</span>}
+                {rapidStackIds.has(p._id) && <span style={S.tag('amber')}>RAPID STACK</span>}
                 {p.status === 'paid_off' && <span style={S.tag('grey')}>PAID OFF - Verify</span>}
               </div>
             </div>
@@ -1809,7 +1837,7 @@ function AgreementsTab({ agreementResults }) {
 }
 
 // ─── Cross-Reference Tab (NEW) ───────────────────────────────────────────────
-function CrossReferenceTab({ crossRefResult, agreementResults, positions, a }) {
+function CrossReferenceTab({ crossRefResult, crossRefError, agreementResults, positions, a }) {
   if (!agreementResults || agreementResults.length === 0) {
     return (
       <div style={{ textAlign: 'center', padding: 40, color: 'rgba(232,232,240,0.4)' }}>
@@ -1822,9 +1850,20 @@ function CrossReferenceTab({ crossRefResult, agreementResults, positions, a }) {
   if (!crossRefResult) {
     return (
       <div style={{ textAlign: 'center', padding: 40, color: 'rgba(232,232,240,0.4)' }}>
-        <div style={{ fontSize: 40, marginBottom: 12 }}>🔄</div>
-        <div style={{ fontSize: 15, marginBottom: 8 }}>Cross-reference not yet run</div>
-        <div style={{ fontSize: 13 }}>{agreementResults.length} agreement{agreementResults.length > 1 ? 's' : ''} analyzed. Click "Run Cross-Reference" in the header to compare against bank data.</div>
+        {crossRefError ? (
+          <>
+            <div style={{ fontSize: 40, marginBottom: 12 }}>⚠️</div>
+            <div style={{ fontSize: 15, marginBottom: 8, color: '#ef9a9a' }}>Cross-reference failed</div>
+            <div style={{ fontSize: 13, color: 'rgba(232,232,240,0.5)', lineHeight: 1.6, maxWidth: 500, margin: '0 auto', padding: '12px 16px', background: 'rgba(239,83,80,0.08)', border: '1px solid rgba(239,83,80,0.2)', borderRadius: 8 }}>{crossRefError}</div>
+            <div style={{ fontSize: 12, color: 'rgba(232,232,240,0.35)', marginTop: 12 }}>Try again or switch to a different model.</div>
+          </>
+        ) : (
+          <>
+            <div style={{ fontSize: 40, marginBottom: 12 }}>🔄</div>
+            <div style={{ fontSize: 15, marginBottom: 8 }}>Cross-reference not yet run</div>
+            <div style={{ fontSize: 13 }}>{agreementResults.length} agreement{agreementResults.length > 1 ? 's' : ''} analyzed. Click "Run Cross-Reference" in the header to compare against bank data.</div>
+          </>
+        )}
       </div>
     );
   }
@@ -2051,28 +2090,47 @@ function CrossReferenceTab({ crossRefResult, agreementResults, positions, a }) {
 }
 
 // ─── Confidence Tab (NEW) ────────────────────────────────────────────────────
-function ConfidenceTab({ a, positions, excludedIds, excludedDepositIds }) {
+function ConfidenceTab({ a, positions, excludedIds, excludedDepositIds, agreementResults }) {
   const allPositions = positions || a.mca_positions || [];
   const activePositions = allPositions.filter(p => !(excludedIds || []).includes(p._id));
   const flags = a.flags_and_alerts || [];
-  const highConf = allPositions.filter(p => p.confidence === 'high').length;
-  const medConf = allPositions.filter(p => p.confidence === 'medium').length;
-  const lowConf = allPositions.filter(p => p.confidence === 'low' || p.confidence === 'manual').length;
-  const total = allPositions.length || 1;
 
   const revenue = calcAdjustedRevenue(a, excludedDepositIds);
   const totalMCAMonthly = activePositions.reduce((s, p) => s + (p.estimated_monthly_total || 0), 0);
   const cogs = a.expense_categories?.inventory_cogs || 0;
   const grossProfit = revenue - cogs;
-  // DSR using gross profit (FF method) vs revenue (traditional)
   const dsr = grossProfit > 0 ? (totalMCAMonthly / grossProfit) * 100 : 0;
   const dsrRevenue = revenue > 0 ? (totalMCAMonthly / revenue) * 100 : 0;
-  const mcaBurden = dsrRevenue; // Traditional measure for comparison
 
-  // Per-field confidence scoring
-  const revenueConfidence = (a.monthly_breakdown?.length || 0) >= 3 ? 'high' : (a.monthly_breakdown?.length || 0) >= 2 ? 'medium' : 'low';
+  const monthsCount = a.monthly_breakdown?.length || 0;
+  const hasAgreements = (agreementResults || []).length > 0;
+
+  // Per-field confidence scoring — calibrated realistically
+  const revenueConfidence = monthsCount >= 3 ? 'high' : monthsCount >= 2 ? 'medium' : 'low';
   const dsrConfidence = activePositions.length > 0 && activePositions.every(p => p.confidence === 'high') ? 'high' : activePositions.some(p => p.confidence === 'low') ? 'low' : 'medium';
-  const grossProfitConfidence = a.expense_categories?.inventory_cogs > 0 ? 'medium' : 'low';
+  const grossProfitConfidence = 'medium'; // COGS is always estimated without a P&L
+  const opexConfidence = 'low'; // No P&L provided — OpEx is inferred from bank debits
+  const adbConfidence = (a.balance_summary?.avg_daily_balance || a.adb_by_month?.length > 0) ? 'high' : 'medium';
+  const daysToDefaultConfidence = 'medium'; // Projection, not a fact
+  const balanceEstConfidence = hasAgreements ? 'medium' : 'low'; // Better with agreements but still estimated
+  const nsfConfidence = monthsCount >= 2 ? 'high' : 'medium'; // Direct count from statements
+
+  // Build the field confidence list for accurate counting
+  const fieldConfidences = [
+    { label: 'Total Monthly Revenue (Bank-Verified)', value: fmt(revenue), confidence: revenueConfidence, note: `Based on ${monthsCount} months of statements` },
+    { label: 'DSR (FF Method - vs Gross Profit)', value: fmtP(dsr), confidence: dsrConfidence, note: cogs > 0 ? `${fmt(totalMCAMonthly)} ÷ ${fmt(grossProfit)} gross profit` : 'No COGS detected - using revenue' },
+    { label: 'DSR (Traditional - vs Revenue)', value: fmtP(dsrRevenue), confidence: dsrConfidence, note: `${fmt(totalMCAMonthly)}/mo ÷ ${fmt(revenue)} revenue` },
+    { label: 'Gross Profit', value: fmt(grossProfit), confidence: grossProfitConfidence, note: 'COGS estimated (no P&L) — always medium confidence' },
+    { label: 'Operating Expenses', value: fmt(a.expense_categories?.total_operating_expenses || 0), confidence: opexConfidence, note: 'Inferred from bank debits — no P&L provided' },
+    { label: 'ADB Coverage', value: fmt(a.balance_summary?.avg_daily_balance || 0), confidence: adbConfidence, note: 'Direct calculation from daily balances' },
+    { label: 'Days to Default', value: a.calculated_metrics?.weeks_to_insolvency != null ? `${a.calculated_metrics.weeks_to_insolvency} weeks` : 'N/A', confidence: daysToDefaultConfidence, note: 'Projection based on current burn rate' },
+    { label: 'NSF / Overdraft Events', value: `${a.nsf_analysis?.nsf_count || 0} events`, confidence: nsfConfidence, note: `Direct count from ${monthsCount} month(s)` },
+  ];
+
+  const highConf = fieldConfidences.filter(f => f.confidence === 'high').length;
+  const medConf = fieldConfidences.filter(f => f.confidence === 'medium').length;
+  const lowConf = fieldConfidences.filter(f => f.confidence === 'low').length;
+  const total = fieldConfidences.length;
 
   const confColor = (c) => c === 'high' ? '#4caf50' : c === 'low' ? '#ef5350' : '#ff9800';
   const confBg = (c) => c === 'high' ? 'rgba(76,175,80,0.1)' : c === 'low' ? 'rgba(239,83,80,0.1)' : 'rgba(255,152,0,0.1)';
@@ -2117,10 +2175,9 @@ function ConfidenceTab({ a, positions, excludedIds, excludedDepositIds }) {
       <div style={S.sectionTitle}>Field-Level Confidence</div>
       <div style={{ fontSize: 11, color: 'rgba(232,232,240,0.4)', marginBottom: 12 }}>Fields with low confidence should be manually verified before sending to funders</div>
 
-      <FieldRow label="Total Monthly Revenue (Bank-Verified)" value={fmt(revenue)} confidence={revenueConfidence} note={`Based on ${a.monthly_breakdown?.length || 0} months of statements`} />
-      <FieldRow label="DSR (FF Method - vs Gross Profit)" value={fmtP(dsr)} confidence={dsrConfidence} note={cogs > 0 ? `${fmt(totalMCAMonthly)} ÷ ${fmt(grossProfit)} gross profit` : 'No COGS detected - using revenue'} />
-      <FieldRow label="DSR (Traditional - vs Revenue)" value={fmtP(dsrRevenue)} confidence={dsrConfidence} note={`${fmt(totalMCAMonthly)}/mo ÷ ${fmt(revenue)} revenue`} />
-      <FieldRow label="Gross Profit" value={fmt(grossProfit)} confidence={grossProfitConfidence} note={cogs > 0 ? `Revenue ${fmt(revenue)} − COGS ${fmt(cogs)}` : 'COGS not detected - equals gross revenue'} />
+      {fieldConfidences.map((fc, i) => (
+        <FieldRow key={i} label={fc.label} value={fc.value} confidence={fc.confidence} note={fc.note} />
+      ))}
 
       {/* Position Confidence Detail */}
       <div style={S.divider} />
@@ -2668,6 +2725,12 @@ body{font-family:'Outfit',sans-serif;background:#e8e8e8;color:var(--ff-text);lin
     if (!tier) return '';
     const f$ = (n) => '$' + Math.round(n).toLocaleString('en-US');
 
+    // Contract vs actual cross-reference for this funder
+    const agMatch = matchAgreementToPosition(ft2.name, agreementResults);
+    const originDateStr = agMatch?.analysis?.funding_date || agMatch?.analysis?.effective_date || agMatch?.analysis?.contract_date || null;
+    const monthsSinceOrig = originDateStr ? Math.max(1, Math.round((Date.now() - new Date(originDateStr).getTime()) / (1000 * 60 * 60 * 24 * 30.44))) : null;
+    const originNote = originDateStr ? `\nNote: This merchant's position was originated on ${originDateStr}. Current cash flow trajectory reflects ${monthsSinceOrig} month${monthsSinceOrig !== 1 ? 's' : ''} of compounding debt service.` : '';
+
     const statsBlock = `BANK-VERIFIED FINANCIAL OVERVIEW:
 Business: ${biz}
 True Monthly Revenue (bank-verified): ${fmt(revenue)}
@@ -2675,12 +2738,9 @@ Total Active Positions: ${includedFunders.length}
 Combined Weekly Burden: ${fmt(includedCurrentWeekly)} (${includedFunders.length} positions)
 Withhold % of Revenue: ${withholdPct}%
 ADB Coverage: ${adbDays} days
-Days Until Likely Default: ${daysToDefault < 999 ? daysToDefault + ' days' : 'N/A'}
+Days Until Likely Default: ${daysToDefault < 999 ? daysToDefault + ' days' : 'N/A'}${originNote}
 
 NOTE: All revenue figures are bank-statement verified — not merchant-reported estimates.`;
-
-    // Contract vs actual cross-reference for this funder
-    const agMatch = matchAgreementToPosition(ft2.name, agreementResults);
     const contractWeekly = getContractWeekly(agMatch);
     const currentWeeklyLabel = contractWeekly && contractWeekly > 0
       ? `${f$(contractWeekly)} (per agreement)`
@@ -3140,7 +3200,7 @@ ${signature}`;
 // ─── Main Component ───────────────────────────────────────────────────────────
 
 // ─── Trend Tab ────────────────────────────────────────────────────────────────
-function TrendTab({ a }) {
+function TrendTab({ a, agreementResults }) {
   const trend = a.revenue_trend;
   const monthly = a.monthly_breakdown || [];
 
@@ -3156,6 +3216,38 @@ function TrendTab({ a }) {
   // Normalize: trend data uses 'revenue' key, monthly fallback uses 'amount' — unify to 'amount'
   const revenues = rawRevenues.map(r => ({ month: r.month, amount: r.amount ?? r.revenue ?? 0 }));
   const maxRev = Math.max(...revenues.map(r => r.amount), 1);
+
+  // Build origination markers from agreement data
+  const originationMarkers = (agreementResults || []).map(ar => {
+    const d = ar.analysis || ar;
+    const dateStr = d.funding_date || d.effective_date || d.contract_date;
+    if (!dateStr || !d.funder_name) return null;
+    const date = new Date(dateStr);
+    if (isNaN(date.getTime())) return null;
+    const shortName = (d.funder_name || '').split(/\s+/).slice(0, 2).join(' ');
+    const amount = d.purchase_price || d.financial_terms?.purchase_price || 0;
+    const amtLabel = amount >= 1000 ? '$' + Math.round(amount / 1000) + 'K' : amount > 0 ? '$' + amount : '';
+    return { date, dateStr, funder: shortName, amtLabel, fullName: d.funder_name, amount };
+  }).filter(Boolean).sort((a, b) => a.date - b.date);
+
+  // Map origination dates to bar indices (find which month bar they fall closest to)
+  const monthToIdx = {};
+  revenues.forEach((r, i) => {
+    // Parse "Month YYYY" format
+    const parts = (r.month || '').split(' ');
+    if (parts.length >= 2) {
+      const monthNames = ['january','february','march','april','may','june','july','august','september','october','november','december'];
+      const mIdx = monthNames.indexOf(parts[0].toLowerCase());
+      const year = parseInt(parts[parts.length - 1]);
+      if (mIdx >= 0 && year) monthToIdx[`${year}-${String(mIdx + 1).padStart(2, '0')}`] = i;
+    }
+  });
+
+  const markerPositions = originationMarkers.map(m => {
+    const key = `${m.date.getFullYear()}-${String(m.date.getMonth() + 1).padStart(2, '0')}`;
+    const barIdx = monthToIdx[key];
+    return barIdx !== undefined ? { ...m, barIdx } : null;
+  }).filter(Boolean);
 
   return (
     <div>
@@ -3193,8 +3285,17 @@ function TrendTab({ a }) {
             {revenues.map((r, i) => {
               const barH = Math.max(Math.round((r.amount / maxRev) * 130), 4);
               const isHighest = r.amount === maxRev;
+              const markers = markerPositions.filter(m => m.barIdx === i);
               return (
-                <div key={i} style={{ flex: 1, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'flex-end', gap: 4, minWidth: 0 }}>
+                <div key={i} style={{ flex: 1, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'flex-end', gap: 4, minWidth: 0, position: 'relative' }}>
+                  {markers.map((mk, mi) => (
+                    <div key={mi} style={{ position: 'absolute', top: 0, left: '50%', transform: 'translateX(-50%)', zIndex: 2, display: 'flex', flexDirection: 'column', alignItems: 'center', pointerEvents: 'none' }}>
+                      <div style={{ fontSize: 8, color: '#ef9a9a', whiteSpace: 'nowrap', background: 'rgba(239,83,80,0.12)', padding: '1px 4px', borderRadius: 3, border: '1px solid rgba(239,83,80,0.25)', marginBottom: 2, lineHeight: 1.3 }}>
+                        {mk.funder}{mk.amtLabel ? ' ' + mk.amtLabel : ''}
+                      </div>
+                      <div style={{ width: 1, height: 150, background: 'rgba(239,83,80,0.25)', borderLeft: '1px dashed rgba(239,83,80,0.4)' }} />
+                    </div>
+                  ))}
                   <div style={{ fontSize: 10, color: 'rgba(232,232,240,0.6)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', maxWidth: '100%' }}>{fmt(r.amount)}</div>
                   <div style={{ width: '80%', background: isHighest ? 'linear-gradient(180deg, #EAD068, #f0a500)' : 'linear-gradient(180deg, #00e5ff, #00acc1)', borderRadius: '4px 4px 0 0', height: barH + 'px', transition: 'height 0.4s ease', minHeight: 4 }} />
                   <div style={{ fontSize: 10, color: 'rgba(232,232,240,0.4)', textAlign: 'center', lineHeight: 1.3, whiteSpace: 'nowrap' }}>{r.month}</div>
@@ -3279,6 +3380,7 @@ export default function FFAnalyzer() {
   const [agreementLoading, setAgreementLoading] = useState(false);
   const [crossRefResult, setCrossRefResult] = useState(null);
   const [crossRefLoading, setCrossRefLoading] = useState(false);
+  const [crossRefError, setCrossRefError] = useState(null);
   const agreementInputRef = useRef(null);
 
   // ─── PDF helpers ────────────────────────────────────────────────────────────
@@ -3461,21 +3563,33 @@ export default function FFAnalyzer() {
     if (agreementResults.length === 0) { alert('Analyze at least one MCA agreement first.'); return; }
     setCrossRefLoading(true);
     setCrossRefResult(null);
+    setCrossRefError(null);
     try {
       const res = await fetch('/api/cross-reference', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ bankAnalysis: result.analysis, agreementAnalyses: agreementResults.filter(a => a.analysis).map(a => a.analysis), model })
       });
-      const data = await res.json();
-      if (data.analysis) {
-        setCrossRefResult(data);
-        setActiveTab(6);
+      let data;
+      try {
+        data = await res.json();
+      } catch {
+        const text = await res.text().catch(() => 'Unknown server error');
+        setCrossRefError('Server returned invalid response: ' + text.slice(0, 200));
+        setActiveTab(5);
+        setCrossRefLoading(false);
+        return;
+      }
+      if (!res.ok || !data.analysis) {
+        setCrossRefError(data.error || 'Cross-reference failed — no analysis returned.');
+        setActiveTab(5);
       } else {
-        alert('Cross-reference failed: ' + (data.error || 'Unknown error'));
+        setCrossRefResult(data);
+        setActiveTab(5);
       }
     } catch (err) {
-      alert('Cross-reference request failed: ' + err.message);
+      setCrossRefError('Cross-reference request failed: ' + err.message);
+      setActiveTab(5);
     }
     setCrossRefLoading(false);
   };
@@ -3966,13 +4080,13 @@ export default function FFAnalyzer() {
 
           <div style={S.card}>
             {activeTab === 0 && <RevenueTab a={result.analysis} excludedDepositIds={excludedDepositIds} setExcludedDepositIds={setExcludedDepositIds} />}
-            {activeTab === 1 && <TrendTab a={result.analysis} />}
+            {activeTab === 1 && <TrendTab a={result.analysis} agreementResults={agreementResults} />}
             {activeTab === 2 && <MCATab a={result.analysis} positions={positions} setPositions={setPositions} excludedIds={excludedIds} setExcludedIds={setExcludedIds} otherExcludedIds={otherExcludedIds} setOtherExcludedIds={setOtherExcludedIds} excludedDepositIds={excludedDepositIds} agreementResults={agreementResults} />}
             {activeTab === 3 && <RiskTab a={result.analysis} positions={positions} excludedIds={excludedIds} otherExcludedIds={otherExcludedIds} excludedDepositIds={excludedDepositIds} />}
             {activeTab === 4 && <AgreementsTab agreementResults={agreementResults} />}
-            {activeTab === 5 && <CrossReferenceTab crossRefResult={crossRefResult} agreementResults={agreementResults} positions={positions} a={result.analysis} />}
+            {activeTab === 5 && <CrossReferenceTab crossRefResult={crossRefResult} crossRefError={crossRefError} agreementResults={agreementResults} positions={positions} a={result.analysis} />}
             {activeTab === 6 && <NegotiationTab a={result.analysis} positions={positions} excludedIds={excludedIds} otherExcludedIds={otherExcludedIds} excludedDepositIds={excludedDepositIds} agreementResults={agreementResults} />}
-            {activeTab === 7 && <ConfidenceTab a={result.analysis} positions={positions} excludedIds={excludedIds} excludedDepositIds={excludedDepositIds} />}
+            {activeTab === 7 && <ConfidenceTab a={result.analysis} positions={positions} excludedIds={excludedIds} excludedDepositIds={excludedDepositIds} agreementResults={agreementResults} />}
             {activeTab === 8 && <ExportTab a={result.analysis} fileName={result.file_name || 'analysis'} positions={positions} excludedIds={excludedIds} otherExcludedIds={otherExcludedIds} excludedDepositIds={excludedDepositIds} agreementResults={agreementResults} />}
           </div>
         </div>
