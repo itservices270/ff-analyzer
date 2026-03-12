@@ -1976,44 +1976,125 @@ function calcSmartAlloc(uwFunders) {
   });
 }
 
+// ─── Negotiation Engine Waterfall ─────────────────────────────────────────────
+// IMMUTABLE ORDER: Merchant Weekly → minus FF Fee → minus ISO Commission → TAD
+function calcWaterfall({ merchantWeeklyToFF, totalDebtStack, ffFeePct, isoPointsPct, maxTermWeeks }) {
+  const ffFeePerWeek = maxTermWeeks > 0 ? (totalDebtStack * ffFeePct) / maxTermWeeks : 0;
+  const isoCommPerWeek = maxTermWeeks > 0 ? (totalDebtStack * (isoPointsPct / 100)) / maxTermWeeks : 0;
+  const tad = merchantWeeklyToFF - ffFeePerWeek - isoCommPerWeek;
+  return { merchantWeeklyToFF, ffFeePerWeek, isoCommPerWeek, tad: Math.max(tad, 0), totalDebtStack, maxTermWeeks };
+}
+
+// Per-funder allocation and 3-tier term calculation
+function calcFunderTiers(funders, tad, agreementResults) {
+  const totalBalance = funders.reduce((s, f) => s + f.balance, 0);
+  if (totalBalance <= 0 || tad <= 0) return [];
+
+  const tierDefs = [
+    { key: 'email1', label: 'Opening Proposal', pct: 0.50 },
+    { key: 'email2', label: 'Revised Proposal', pct: 0.75 },
+    { key: 'email3', label: 'Final Proposal', pct: 1.00 },
+  ];
+
+  return funders.map(f => {
+    const allocation = tad * (f.balance / totalBalance);
+    const originalWeekly = toWeeklyEquiv(f.payment, f.frequency);
+    // Try to get original term from agreement data
+    const agMatch = (agreementResults || []).find(ag => {
+      const agName = (ag?.analysis?.funder_name || '').toLowerCase();
+      const fName = (f.name || '').toLowerCase();
+      return agName && fName && (agName.includes(fName.split(' ')[0]) || fName.includes(agName.split(' ')[0]));
+    });
+    const originalTermWeeks = agMatch?.analysis?.financial_terms?.estimated_term_weeks
+      || (originalWeekly > 0 ? Math.round(f.balance / originalWeekly) : 52);
+
+    const tiers = tierDefs.map(td => {
+      const tierPayment = allocation * td.pct;
+      const proposedTermWeeks = tierPayment > 0 ? Math.ceil(f.balance / tierPayment) : 9999;
+      const extensionWeeks = proposedTermWeeks - originalTermWeeks;
+      const extensionPct = originalTermWeeks > 0 ? ((proposedTermWeeks / originalTermWeeks) - 1) * 100 : 0;
+      const reductionDollars = originalWeekly - tierPayment;
+      const reductionPct = originalWeekly > 0 ? (reductionDollars / originalWeekly) * 100 : 0;
+      return {
+        ...td,
+        weeklyPayment: tierPayment,
+        proposedTermWeeks,
+        extensionWeeks,
+        extensionPct,
+        reductionDollars,
+        reductionPct,
+        totalRepayment: f.balance,
+      };
+    });
+
+    return {
+      ...f,
+      allocation,
+      originalWeekly,
+      originalTermWeeks,
+      tiers,
+    };
+  });
+}
+
+// CONFIDENTIALITY CHECK — blocks funder output if ISO/FF data leaks
+function confidentialityCheck(text) {
+  const lower = (text || '').toLowerCase();
+  const forbidden = ['iso commission', 'iso points', 'iso fee', 'ff fee', 'ff revenue', 'funders first fee', 'iso_points', 'ff_fee', 'iso_comm'];
+  for (const term of forbidden) {
+    if (lower.includes(term)) {
+      console.error('CONFIDENTIALITY BLOCK: ISO/FF data detected in funder output');
+      return false;
+    }
+  }
+  return true;
+}
+
 // ─── Export Tab ───────────────────────────────────────────────────────────────
 function ExportTab({ a, fileName, positions, excludedIds, otherExcludedIds, excludedDepositIds, agreementResults }) {
   const { useState: useLocalState, useMemo: useLocalMemo } = React;
-  const activePositions = (positions || a.mca_positions || []).filter(p => !(excludedIds || []).includes(p._id));
-  const totalMCAMonthly = activePositions.reduce((s, p) => s + (p.estimated_monthly_total || 0), 0);
+  const allPositions = (positions || a.mca_positions || []).filter(p => !(excludedIds || []).includes(p._id));
+  const totalMCAMonthly = allPositions.reduce((s, p) => s + (p.estimated_monthly_total || 0), 0);
   const activeOther = (a.other_debt_service || []).filter((_, i) => !(otherExcludedIds || []).includes(i));
   const totalOtherDebt = activeOther.reduce((s, o) => s + (o.monthly_total || 0), 0);
   const revenue = calcAdjustedRevenue(a, excludedDepositIds);
   const dsr = (totalMCAMonthly / revenue) * 100;
   const totalDSR = ((totalMCAMonthly + totalOtherDebt) / revenue) * 100;
   const trueFree = revenue - totalMCAMonthly - totalOtherDebt - (a.expense_categories?.total_operating_expenses || 0);
-  const csv = buildCSV(a, activePositions, totalMCAMonthly, dsr, totalOtherDebt, totalDSR, trueFree, revenue);
+  const csv = buildCSV(a, allPositions, totalMCAMonthly, dsr, totalOtherDebt, totalDSR, trueFree, revenue);
 
   // ── Deal Economics state ──
   const [dealIsoPoints, setDealIsoPoints] = useLocalState(11);
   const [dealFfFeePct, setDealFfFeePct] = useLocalState(0.119);
 
-  // ── Funder Brief state ──
-  const [briefFunderId, setBriefFunderId] = useLocalState(null);
+  // ── Position status: 'include' | 'buyout' | 'exclude' ──
+  const [positionStatuses, setPositionStatuses] = useLocalState(() => {
+    const init = {};
+    allPositions.forEach((_, i) => { init[i] = 'include'; });
+    return init;
+  });
+
+  // ── Negotiation engine state ──
+  const [negFunderId, setNegFunderId] = useLocalState(null);
+  const [copiedEmail, setCopiedEmail] = useLocalState(null);
+  const [merchantWeeklyOverride, setMerchantWeeklyOverride] = useLocalState('');
 
   // ── UW Offer state ──
   const [isoPoints, setIsoPoints] = useLocalState(8);
   const [selectedTier, setSelectedTier] = useLocalState(1);
-  const [showOfferEngine, setShowOfferEngine] = useLocalState(true);
+  const [showOfferEngine, setShowOfferEngine] = useLocalState(false);
   const [copiedOffer, setCopiedOffer] = useLocalState(false);
 
   // Build uwFunders: match positions to agreements for balance data
   const [balances, setBalances] = useLocalState(() => {
     const init = {};
-    activePositions.forEach((p, i) => {
-      // Try to match to agreement by funder name
+    allPositions.forEach((p, i) => {
       const agMatch = (agreementResults || []).find(ag => {
         if (!ag?.analysis?.funder_name) return false;
         const agName = ag.analysis.funder_name.toLowerCase();
         const pName = (p.funder_name || '').toLowerCase();
         return agName.includes(pName.split(' ')[0]) || pName.includes(agName.split(' ')[0]);
       });
-      // Use agreement purchased_amount (total payback) as balance estimate, or weekly × 52 as fallback
       const weekly = toWeeklyEquiv(p.payment_amount_current || p.payment_amount || 0, p.frequency);
       const agBalance = agMatch?.analysis?.financial_terms?.purchased_amount;
       init[i] = agBalance ? Math.round(agBalance) : Math.round(weekly * 52);
@@ -2021,16 +2102,21 @@ function ExportTab({ a, fileName, positions, excludedIds, otherExcludedIds, excl
     return init;
   });
 
-  const uwFunders = activePositions.map((p, i) => ({
+  const uwFunders = allPositions.map((p, i) => ({
     id: i,
     name: p.funder_name || `Funder ${i + 1}`,
     payment: p.payment_amount_current || p.payment_amount || 0,
     frequency: p.frequency || 'weekly',
     balance: parseFloat(balances[i]) || 0,
+    status: positionStatuses[i] || 'include',
   }));
 
+  // Filtered sets
+  const includedFunders = uwFunders.filter(f => f.status === 'include' && f.balance > 0);
   const totalDebt = uwFunders.reduce((s, f) => s + f.balance, 0);
+  const includedDebt = includedFunders.reduce((s, f) => s + f.balance, 0);
   const totalCurrentWeekly = uwFunders.reduce((s, f) => s + toWeeklyEquiv(f.payment, f.frequency), 0);
+  const includedCurrentWeekly = includedFunders.reduce((s, f) => s + toWeeklyEquiv(f.payment, f.frequency), 0);
 
   // ISO Pricing math
   const reductionPct = UW_SETTINGS.baseReduction - (isoPoints * UW_SETTINGS.reductionPerPoint);
@@ -2039,13 +2125,65 @@ function ExportTab({ a, fileName, positions, excludedIds, otherExcludedIds, excl
   const isoFeeTotal = (isoPoints / UW_SETTINGS.maxPoints) * totalDebt * 0.15;
   const ffRevenue = totalPayback - totalDebt;
 
-  // Smart allocation tiers
+  // Smart allocation tiers (for ISO Offer Calculator)
   const smartAlloc = useLocalMemo(() => calcSmartAlloc(uwFunders.filter(f => f.balance > 0)), [JSON.stringify(uwFunders)]);
   const activeTier = smartAlloc[selectedTier] || smartAlloc[0];
-
-  // ISO term range (Final+1mo to Opening+1mo)
   const isoTermLow = smartAlloc[3] ? Math.round(smartAlloc[3].maxTerm / UW_SETTINGS.weeksPerMonth) + 1 : 0;
   const isoTermHigh = smartAlloc[0] ? Math.round(smartAlloc[0].maxTerm / UW_SETTINGS.weeksPerMonth) + 1 : 0;
+
+  // ═══════════════════════════════════════════════════════════════════
+  // NEGOTIATION ENGINE — Financial Waterfall
+  // ═══════════════════════════════════════════════════════════════════
+  // Merchant weekly payment to FF: from UW Calculator selected tier, or manual override
+  const uwMerchantWeekly = activeTier ? activeTier.totalNewWeekly : includedCurrentWeekly * 0.5;
+  const merchantWeeklyToFF = merchantWeeklyOverride ? parseFloat(merchantWeeklyOverride) : uwMerchantWeekly;
+
+  // Max term = longest individual funder term at 100% tier (needed for fee amortization)
+  const maxTermForFees = useLocalMemo(() => {
+    if (includedFunders.length === 0 || merchantWeeklyToFF <= 0) return 52;
+    const totalBal = includedFunders.reduce((s, f) => s + f.balance, 0);
+    // At 100% allocation, each funder's term = balance / (TAD * balance/totalBal) = totalBal / TAD
+    // But we need TAD to calculate this, and TAD needs maxTerm... bootstrap with estimate
+    const estimatedTad = merchantWeeklyToFF * 0.85; // rough initial estimate
+    const longestTerm = Math.max(...includedFunders.map(f => {
+      const alloc = estimatedTad * (f.balance / totalBal);
+      return alloc > 0 ? Math.ceil(f.balance / alloc) : 999;
+    }));
+    return Math.max(longestTerm, 4);
+  }, [JSON.stringify(includedFunders), merchantWeeklyToFF]);
+
+  const waterfall = useLocalMemo(() =>
+    calcWaterfall({
+      merchantWeeklyToFF,
+      totalDebtStack: includedDebt,
+      ffFeePct: dealFfFeePct,
+      isoPointsPct: dealIsoPoints,
+      maxTermWeeks: maxTermForFees,
+    }),
+    [merchantWeeklyToFF, includedDebt, dealFfFeePct, dealIsoPoints, maxTermForFees]
+  );
+
+  // Per-funder tier calculations
+  const funderTiers = useLocalMemo(() =>
+    calcFunderTiers(includedFunders, waterfall.tad, agreementResults),
+    [JSON.stringify(includedFunders), waterfall.tad, JSON.stringify(agreementResults)]
+  );
+
+  // Reserve calculations
+  const reserveAt50 = merchantWeeklyToFF - (waterfall.tad * 0.50) - waterfall.ffFeePerWeek - waterfall.isoCommPerWeek;
+  const reserveAt75 = merchantWeeklyToFF - (waterfall.tad * 0.75) - waterfall.ffFeePerWeek - waterfall.isoCommPerWeek;
+
+  // Bank-verified overview numbers for emails
+  const cogs = a.expense_categories?.inventory_cogs || 0;
+  const grossProfit = revenue - cogs;
+  const opex = a.expense_categories?.total_operating_expenses || 0;
+  const includedMonthly = includedCurrentWeekly * 4.33;
+  const monthlyDeficit = revenue - cogs - opex - includedMonthly;
+  const adb = a.balance_summary?.avg_daily_balance || a.calculated_metrics?.avg_daily_balance || 0;
+  const adbDays = includedMonthly > 0 ? Math.round(adb / (includedMonthly / 30)) : 0;
+  const daysToDefault = monthlyDeficit < 0 ? Math.round(Math.abs(adb / (monthlyDeficit / 30))) : 999;
+  const withholdPct = revenue > 0 ? ((includedMonthly / revenue) * 100).toFixed(1) : '0';
+  const biz = a.business_name || 'Business';
 
   const downloadCSV = () => {
     const blob = new Blob([csv], { type: 'text/csv' });
@@ -2057,43 +2195,35 @@ function ExportTab({ a, fileName, positions, excludedIds, otherExcludedIds, excl
     URL.revokeObjectURL(url);
   };
 
-  // ── Brief HTML Generator ──
-  const generateBriefHTML = (selectedIdx) => {
-    const target = uwFunders[selectedIdx];
-    if (!target) return '';
-    const biz = a.business_name || 'Business';
+  // ── Brief HTML Generator (uses negotiation engine numbers) ──
+  const generateBriefHTML = (selectedIdx, tierIdx = 0) => {
+    const ft = funderTiers[selectedIdx];
+    if (!ft) return '';
+    const tier = ft.tiers[tierIdx] || ft.tiers[0];
     const bank = a.bank_name || 'Bank';
     const periods = (a.statement_periods || a.monthly_breakdown || []);
     const monthRange = periods.length > 1
       ? `${periods[0]?.month || ''} – ${periods[periods.length-1]?.month || ''}`
       : (a.statement_month || '');
-    const rev = revenue;
-    const cogs = a.expense_categories?.inventory_cogs || 0;
-    const grossProfit = rev - cogs;
-    const opex = a.expense_categories?.total_operating_expenses || 0;
-    const totalMCAMo = totalCurrentWeekly * 4.33;
-    const monthlyDeficit = rev - cogs - opex - totalMCAMo;
-    const adb = a.balance_summary?.avg_daily_balance || a.calculated_metrics?.avg_daily_balance || 0;
-    const adbDays = totalMCAMo > 0 ? Math.round(adb / (totalMCAMo / 30)) : 0;
-    const daysToDefault = monthlyDeficit < 0 ? Math.round(Math.abs(adb / (monthlyDeficit / 30))) : 999;
-    const withholdPct = rev > 0 ? Math.round((totalMCAMo / rev) * 100) : 0;
 
-    // Proposal: 60% reduction
-    const targetWeekly = toWeeklyEquiv(target.payment, target.frequency);
-    const proposedWeekly = Math.round(targetWeekly * 0.4);
-    const termWeeks = proposedWeekly > 0 ? Math.ceil(target.balance / proposedWeekly) : 52;
+    const proposedWeekly = tier.weeklyPayment;
+    const termWeeks = tier.proposedTermWeeks;
     const termMonths = Math.round(termWeeks / 4.33);
     const proposedBiWeekly = proposedWeekly * 2;
 
-    const defaultRecovery = Math.round(target.balance * 0.35);
-    const defaultNet = Math.round(defaultRecovery * 0.7); // after 30% collection fees
+    const defaultRecovery = Math.round(ft.balance * 0.35);
+    const defaultNet = Math.round(defaultRecovery * 0.7);
+    const rev = revenue;
+    const totalMCAMo = includedMonthly;
 
     const f$ = (n) => '$' + Math.round(n).toLocaleString('en-US');
     const fK = (n) => Math.abs(n) >= 1000 ? '$' + Math.round(Math.abs(n) / 1000) + 'K' : f$(Math.abs(n));
 
-    // Build stack rows
-    const stackRows = uwFunders.map((f, i) => {
-      const isTarget = i === selectedIdx;
+    // Build stack rows — only included positions visible to funders
+    const totalIncWeekly = includedFunders.reduce((s, f) => s + toWeeklyEquiv(f.payment, f.frequency), 0);
+    const totalIncBalance = includedFunders.reduce((s, f) => s + f.balance, 0);
+    const stackRows = includedFunders.map((f, i) => {
+      const isTarget = f.name === ft.name;
       const weeklyPmt = toWeeklyEquiv(f.payment, f.frequency);
       return `<tr${isTarget ? ' class="highlight-row"' : ''}>
         <td><span class="funder-name">${f.name}</span>${isTarget ? ' <span class="position-tag tag-you">You</span>' : ''}</td>
@@ -2107,7 +2237,7 @@ function ExportTab({ a, fileName, positions, excludedIds, otherExcludedIds, excl
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Funders First | Position Analysis Brief — ${target.name}</title>
+<title>Funders First | Position Analysis Brief — ${ft.name}</title>
 <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
 <link href="https://fonts.googleapis.com/css2?family=Questrial&family=Outfit:wght@300;400;500;600;700;800;900&display=swap" rel="stylesheet">
 <style>
@@ -2191,18 +2321,18 @@ body{font-family:'Outfit',sans-serif;background:#e8e8e8;color:var(--ff-text);lin
     </table>
   </div>
   <div class="glass-card">
-    <div class="card-eyebrow"><i class="fas fa-layer-group"></i> Full MCA Stack &mdash; All ${uwFunders.length} Positions</div>
+    <div class="card-eyebrow"><i class="fas fa-layer-group"></i> Full MCA Stack &mdash; All ${includedFunders.length} Positions</div>
     <table class="stack-table">
       <thead><tr><th>Funder</th><th>Weekly Pmt</th><th>Est. Balance</th></tr></thead>
       <tbody>
         ${stackRows}
-        <tr class="total-row"><td>Total Stack</td><td>${f$(totalCurrentWeekly)}/wk</td><td>${f$(totalDebt)}</td></tr>
+        <tr class="total-row"><td>Total Stack</td><td>${f$(totalIncWeekly)}/wk</td><td>${f$(totalIncBalance)}</td></tr>
       </tbody>
     </table>
   </div>
 </div>
 <div class="notice-box">
-  <p><strong>Mathematical Impossibility Notice:</strong> Bank statement analysis confirms ${f$(totalMCAMo)} in monthly MCA debt service against ${f$(grossProfit)} in monthly gross profit after ${f$(opex)} in verified operating expenses. ${daysToDefault < 999 ? `At current trajectory, account balances become critically depleted within ${daysToDefault} days &mdash; at which point all ${uwFunders.length} funders lose recovery priority simultaneously.` : ''} This analysis is based on bank-verified transaction data, not merchant-reported estimates.</p>
+  <p><strong>Mathematical Impossibility Notice:</strong> Bank statement analysis confirms ${f$(totalMCAMo)} in monthly MCA debt service against ${f$(grossProfit)} in monthly gross profit after ${f$(opex)} in verified operating expenses. ${daysToDefault < 999 ? `At current trajectory, account balances become critically depleted within ${daysToDefault} days &mdash; at which point all ${includedFunders.length} funders lose recovery priority simultaneously.` : ''} This analysis is based on bank-verified transaction data, not merchant-reported estimates.</p>
 </div>
 <div class="section-divider"><div class="section-divider-label"><i class="fas fa-file-contract"></i> &nbsp;Agreement Provisions of Note</div><div class="section-divider-line"></div></div>
 <div class="flags-grid">
@@ -2219,7 +2349,7 @@ body{font-family:'Outfit',sans-serif;background:#e8e8e8;color:var(--ff-text);lin
   </div>
   <div class="footer-right">
     <div class="rbfc-badge"><i class="fas fa-certificate"></i> RBFC Advocate &mdash; Revenue Based Finance Coalition</div><br>
-    <span>Page 1 of 2 &middot; Confidential &mdash; Prepared for ${target.name} Collections/Servicing</span>
+    <span>Page 1 of 2 &middot; Confidential &mdash; Prepared for ${ft.name} Collections/Servicing</span>
   </div>
 </div>
 </div></div>
@@ -2233,14 +2363,14 @@ body{font-family:'Outfit',sans-serif;background:#e8e8e8;color:var(--ff-text);lin
   </div>
   <div class="doc-header-right">
     <div class="doc-title">Restructuring Proposal</div>
-    <div class="doc-subtitle">${target.name} &middot; ${biz}</div>
+    <div class="doc-subtitle">${ft.name} &middot; ${biz}</div>
   </div>
 </div>
 <div class="section-divider"><div class="section-divider-label"><i class="fas fa-file-signature"></i> &nbsp;Our Opening Proposal &mdash; Your Position</div><div class="section-divider-line"></div></div>
 <div class="proposal-box" style="margin-bottom:0.14in;">
-  <div class="proposal-box-header"><i class="fas fa-check-circle"></i> Proposed Restructuring Terms &mdash; ${target.name}</div>
+  <div class="proposal-box-header"><i class="fas fa-check-circle"></i> Proposed Restructuring Terms &mdash; ${ft.name}</div>
   <div class="proposal-terms">
-    <div class="proposal-term"><div class="proposal-term-value">${f$(target.balance)}</div><div class="proposal-term-label">Total Repayment<br>(100% of Balance)</div></div>
+    <div class="proposal-term"><div class="proposal-term-value">${f$(ft.balance)}</div><div class="proposal-term-label">Total Repayment<br>(100% of Balance)</div></div>
     <div class="proposal-term"><div class="proposal-term-value">${f$(proposedBiWeekly)}</div><div class="proposal-term-label">Bi-Weekly Payment<br>(Proposed)</div></div>
     <div class="proposal-term"><div class="proposal-term-value">${termWeeks} weeks</div><div class="proposal-term-label">Proposed Term<br>(~${termMonths} months)</div></div>
     <div class="proposal-term"><div class="proposal-term-value">72 hrs</div><div class="proposal-term-label">Payments Begin<br>Upon Agreement</div></div>
@@ -2255,14 +2385,14 @@ body{font-family:'Outfit',sans-serif;background:#e8e8e8;color:var(--ff-text);lin
       <th class="decline-col" style="width:35%;">Pursue Default / Collections</th>
     </tr></thead>
     <tbody>
-      <tr><td class="row-label">Total Recovery</td><td class="accept-val">${f$(target.balance)} &nbsp;(100%)</td><td class="decline-val">~${f$(defaultRecovery)} &nbsp;(~35%)</td></tr>
+      <tr><td class="row-label">Total Recovery</td><td class="accept-val">${f$(ft.balance)} &nbsp;(100%)</td><td class="decline-val">~${f$(defaultRecovery)} &nbsp;(~35%)</td></tr>
       <tr><td class="row-label">Recovery Timeline</td><td class="accept-val">${termMonths} months, structured</td><td class="decline-val">12&ndash;18+ months, contested</td></tr>
       <tr><td class="row-label">Legal / Collection Costs</td><td class="accept-val">$0</td><td class="decline-val">$5,000 &ndash; $15,000+</td></tr>
       <tr><td class="row-label">Collection Fees</td><td class="accept-val">$0</td><td class="decline-val">25% &ndash; 35% of recovery</td></tr>
       <tr><td class="row-label">First Payment</td><td class="accept-val">Within 72 hours</td><td class="decline-val">6+ months from litigation start</td></tr>
       <tr><td class="row-label">Regulatory Exposure</td><td class="accept-val">None &mdash; negotiated resolution</td><td class="decline-val">Heightened &mdash; enforcement climate</td></tr>
-      <tr><td class="row-label">Priority vs. Other ${uwFunders.length - 1} Funders</td><td class="accept-val">Secured &mdash; structured first</td><td class="decline-val">Race to courthouse &mdash; uncertain</td></tr>
-      <tr class="net-row"><td class="row-label" style="font-size:0.65rem;">Net Recovery Difference</td><td class="accept-val">+${f$(target.balance)}</td><td class="decline-val">~${f$(defaultNet)} net of fees &amp; costs</td></tr>
+      <tr><td class="row-label">Priority vs. Other ${includedFunders.length - 1} Funders</td><td class="accept-val">Secured &mdash; structured first</td><td class="decline-val">Race to courthouse &mdash; uncertain</td></tr>
+      <tr class="net-row"><td class="row-label" style="font-size:0.65rem;">Net Recovery Difference</td><td class="accept-val">+${f$(ft.balance)}</td><td class="decline-val">~${f$(defaultNet)} net of fees &amp; costs</td></tr>
     </tbody>
   </table>
 </div>
@@ -2279,10 +2409,10 @@ body{font-family:'Outfit',sans-serif;background:#e8e8e8;color:var(--ff-text);lin
     <table class="math-table">
       <tr><td class="label-col">Current monthly deficit</td><td style="color:var(--ff-red)">${monthlyDeficit < 0 ? '(' + f$(Math.abs(monthlyDeficit)) + ')' : f$(monthlyDeficit)}</td></tr>
       <tr><td class="label-col">Est. days to critical depletion</td><td style="color:var(--ff-red)">${daysToDefault < 999 ? daysToDefault + ' days' : 'N/A'}</td></tr>
-      <tr><td class="label-col">Competing creditors (funders)</td><td>${uwFunders.length} positions</td></tr>
+      <tr><td class="label-col">Competing creditors (funders)</td><td>${includedFunders.length} positions</td></tr>
       <tr><td class="label-col">Typical MCA default recovery</td><td style="color:var(--ff-orange)">25&ndash;40%</td></tr>
       <tr><td class="label-col">After collection fees (30%)</td><td style="color:var(--ff-red)">17&ndash;28%</td></tr>
-      <tr class="total-row"><td>Your net recovery (default path)</td><td style="color:var(--ff-red)">~${f$(Math.round(target.balance * 0.17))}&ndash;${f$(Math.round(target.balance * 0.28))}</td></tr>
+      <tr class="total-row"><td>Your net recovery (default path)</td><td style="color:var(--ff-red)">~${f$(Math.round(ft.balance * 0.17))}&ndash;${f$(Math.round(ft.balance * 0.28))}</td></tr>
     </table>
   </div>
 </div>
@@ -2301,11 +2431,162 @@ body{font-family:'Outfit',sans-serif;background:#e8e8e8;color:var(--ff-text);lin
   </div>
   <div class="footer-right">
     <div class="rbfc-badge"><i class="fas fa-certificate"></i> RBFC Advocate &mdash; Revenue Based Finance Coalition</div><br>
-    <span>Page 2 of 2 &middot; Confidential &mdash; Prepared for ${target.name} Collections/Servicing</span>
+    <span>Page 2 of 2 &middot; Confidential &mdash; Prepared for ${ft.name} Collections/Servicing</span>
   </div>
 </div>
 </div></div>
 </body></html>`;
+  };
+
+  // ── Negotiation Email Generator ──
+  const generateNegotiationEmail = (funderIdx, tierIdx) => {
+    const ft2 = funderTiers[funderIdx];
+    if (!ft2) return '';
+    const tier = ft2.tiers[tierIdx];
+    if (!tier) return '';
+    const f$ = (n) => '$' + Math.round(n).toLocaleString('en-US');
+
+    const statsBlock = `BANK-VERIFIED FINANCIAL OVERVIEW:
+Business: ${biz}
+True Monthly Revenue (bank-verified): ${fmt(revenue)}
+Total Active Positions: ${includedFunders.length}
+Combined Weekly Burden: ${fmt(includedCurrentWeekly)} (${includedFunders.length} positions)
+Withhold % of Revenue: ${withholdPct}%
+ADB Coverage: ${adbDays} days
+Days Until Likely Default: ${daysToDefault < 999 ? daysToDefault + ' days' : 'N/A'}
+
+NOTE: All revenue figures are bank-statement verified — not merchant-reported estimates.`;
+
+    const proposalBlock = `YOUR POSITION:
+Your Current Weekly Payment:    ${f$(ft2.originalWeekly)}
+Proposed Weekly Payment:        ${f$(tier.weeklyPayment)}
+Weekly Reduction:               ${f$(tier.reductionDollars)} less per week
+Payment Reduction:              ${tier.reductionPct.toFixed(1)}%
+Your Original Term:             ${ft2.originalTermWeeks} weeks
+Proposed Term:                  ${tier.proposedTermWeeks} weeks
+Term Extension:                 +${tier.extensionPct.toFixed(1)}% longer
+Total Repayment:                ${f$(ft2.balance)} — 100% of your balance
+Payments Begin:                 Within 72 hours of agreement`;
+
+    const defaultRecovery = Math.round(ft2.balance * 0.35);
+    const defaultNet = Math.round(defaultRecovery * 0.7);
+    const comparisonBlock = `════════════════════════════════════════════════════════════════
+                     YOUR OPTIONS COMPARED
+════════════════════════════════════════════════════════════════
+   ACCEPT PROPOSAL                │  PURSUE DEFAULT/COLLECTIONS
+───────────────────────────────────────────────────────────────
+   Total Recovery:                │
+     ${f$(ft2.balance)} (100%)          │  ~${f$(defaultRecovery)} (~35%)
+   Your Weekly Payment:           │
+     ${f$(tier.weeklyPayment)}/wk             │  $0 (frozen/litigation)
+   Your Term:                     │
+     ${tier.proposedTermWeeks} weeks                │  12-18+ months contested
+   Legal Costs: $0                │  $5,000 - $15,000+
+   Collection Fees: $0            │  25-35% of recovery
+   First Payment: 72 hours        │  6+ months from litigation
+   Regulatory Exposure: None      │  Heightened
+───────────────────────────────────────────────────────────────
+   NET RECOVERY: +${f$(ft2.balance - defaultNet)} by accepting
+════════════════════════════════════════════════════════════════`;
+
+    const signature = `Best regards,
+Gavin Roberts
+Resolutions Manager
+480-631-7691
+resolutions@fundersfirst.com
+Phoenix, AZ
+
+RBFC Advocate | Revenue Based Finance Coalition`;
+
+    const lnaaNotice = `Per the enclosed LNAA, all communications regarding this account must now be directed to our office. Please do not contact the merchant directly.`;
+
+    // Validate confidentiality before returning
+    let emailText = '';
+
+    if (tierIdx === 0) {
+      // EMAIL 1 — OPENING PROPOSAL (50% allocation)
+      emailText = `Subject: Payment Modification Request – ${biz} – ${ft2.name}
+
+Dear ${ft2.name} Collections/Servicing Team,
+
+We are reaching out on behalf of ${biz} regarding their merchant cash advance position with your organization.
+
+IMPORTANT — WHO WE ARE:
+Funders First is NOT a debt settlement company. We do not advise merchants that MCAs are predatory, unfair, or that they don't owe what they contracted for. We believe in and support revenue-based finance as a legitimate funding tool for small businesses.
+
+The issue here is over-stacking. This merchant is servicing ${includedFunders.length} concurrent funding positions, consuming ${withholdPct}% of weekly revenue. This level of debt service is mathematically unsustainable and, without intervention, leads to default — which benefits no one.
+
+Our solution protects your investment by ensuring 100% repayment while giving the merchant breathing room to operate their business.
+
+${statsBlock}
+
+${proposalBlock}
+
+${comparisonBlock}
+
+We are prepared to begin payments within 72 hours of reaching agreement.
+
+ATTACHMENT: Please find enclosed our Limited Negotiation Authorization Agreement (LNAA), executed by ${biz}, authorizing Funders First to negotiate on their behalf.
+
+${lnaaNotice}
+
+${signature}`;
+    } else if (tierIdx === 1) {
+      // EMAIL 2 — REVISED PROPOSAL (75% allocation)
+      const email1Tier = ft2.tiers[0];
+      emailText = `Subject: Revised Proposal – ${biz} – Improved Terms Available
+
+Dear ${ft2.name} Collections/Servicing Team,
+
+Following our previous communication regarding ${biz}, we are presenting significantly improved terms for your consideration.
+
+Note: Cash position has continued to decline since our initial outreach. Estimated days to default: ${daysToDefault < 999 ? daysToDefault : 'critical'}.
+
+${statsBlock}
+
+${proposalBlock}
+
+This offer represents a ${((tier.weeklyPayment - email1Tier.weeklyPayment) / email1Tier.weeklyPayment * 100).toFixed(0)}% increase in weekly payment over our opening proposal and reduces your term from ${email1Tier.proposedTermWeeks} to ${tier.proposedTermWeeks} weeks.
+
+${comparisonBlock}
+
+We remain committed to ensuring you receive 100% of what is owed. Please respond so we can finalize terms and begin remittance immediately.
+
+${lnaaNotice}
+
+${signature}`;
+    } else {
+      // EMAIL 3 — FINAL PROPOSAL (100% allocation)
+      const futureDate = new Date();
+      futureDate.setDate(futureDate.getDate() + 7);
+      const deadlineStr = futureDate.toLocaleDateString('en-US', { month: 'long', day: 'numeric', year: 'numeric' });
+
+      emailText = `Subject: Final Proposal – ${biz} – Maximum Allocation
+
+Dear ${ft2.name} Collections/Servicing Team,
+
+This represents our final proposal for the ${biz} restructuring. This is our maximum weekly allocation for your position.
+
+${statsBlock}
+
+${proposalBlock}
+
+This is our maximum weekly allocation for your position. Your term at full allocation is ${tier.proposedTermWeeks} weeks — the shortest possible timeline under this program.
+
+${comparisonBlock}
+
+Based on current cash flow trajectory, this is the final opportunity to participate in a structured repayment. Positions not accommodated by ${deadlineStr} will be removed from the structured payment pool.
+
+${lnaaNotice}
+
+${signature}`;
+    }
+
+    // CONFIDENTIALITY CHECK
+    if (!confidentialityCheck(emailText)) {
+      return 'ERROR: CONFIDENTIALITY BLOCK — ISO/FF data detected in funder output. This email cannot be generated.';
+    }
+    return emailText;
   };
 
   const copyOffer = () => {
@@ -2335,59 +2616,204 @@ body{font-family:'Outfit',sans-serif;background:#e8e8e8;color:var(--ff-text);lin
 
   const tierColors = ['#00bcd4', '#7c3aed', '#f59e0b', '#22c55e'];
   const tierLabels = ['Opening', '1st Middle', '2nd Middle', 'Final'];
+  const negTierColors = ['#00bcd4', '#f59e0b', '#ef5350'];
+  const negTierLabels = ['Opening (50%)', 'Revised (75%)', 'Final (100%)'];
+
+  const statusColors = { include: '#00e5ff', buyout: '#CFA529', exclude: 'rgba(232,232,240,0.3)' };
+  const statusLabels = { include: 'Include', buyout: 'Buyout', exclude: 'Exclude' };
 
   return (
     <div>
-      {/* ── UW Offer Engine ── */}
+      {/* ═══════════════════════════════════════════════════════════════ */}
+      {/* NEGOTIATION ENGINE                                             */}
+      {/* ═══════════════════════════════════════════════════════════════ */}
+
+      {/* 1. DEAL ECONOMICS CARD (internal only) */}
+      <div style={S.sectionTitle}>Deal Economics (Internal — Never Exported)</div>
+      <div style={{ background: 'rgba(207,165,41,0.06)', border: '1px solid rgba(207,165,41,0.2)', borderRadius: 12, padding: 20, marginBottom: 20 }}>
+        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr 1fr', gap: 16, marginBottom: 16 }}>
+          <div>
+            <label style={{ fontSize: 11, color: 'rgba(232,232,240,0.5)', display: 'block', marginBottom: 4 }}>ISO Points</label>
+            <input type="number" value={dealIsoPoints} onChange={e => setDealIsoPoints(Number(e.target.value) || 0)} min={0} max={20} step={1} style={{ width: '100%', padding: '8px 12px', borderRadius: 6, border: '1px solid rgba(207,165,41,0.3)', background: 'rgba(0,0,0,0.3)', color: '#EAD068', fontSize: 16, fontFamily: 'inherit', fontWeight: 700, boxSizing: 'border-box' }} />
+          </div>
+          <div>
+            <label style={{ fontSize: 11, color: 'rgba(232,232,240,0.5)', display: 'block', marginBottom: 4 }}>FF Fee %</label>
+            <input type="number" value={dealFfFeePct} onChange={e => setDealFfFeePct(Number(e.target.value) || 0)} min={0} max={1} step={0.001} style={{ width: '100%', padding: '8px 12px', borderRadius: 6, border: '1px solid rgba(207,165,41,0.3)', background: 'rgba(0,0,0,0.3)', color: '#EAD068', fontSize: 16, fontFamily: 'inherit', fontWeight: 700, boxSizing: 'border-box' }} />
+          </div>
+          <div>
+            <label style={{ fontSize: 11, color: 'rgba(232,232,240,0.5)', display: 'block', marginBottom: 4 }}>Merchant Wkly to FF</label>
+            <input type="number" value={merchantWeeklyOverride} onChange={e => setMerchantWeeklyOverride(e.target.value)} placeholder={fmt(uwMerchantWeekly)} style={{ width: '100%', padding: '8px 12px', borderRadius: 6, border: '1px solid rgba(207,165,41,0.3)', background: 'rgba(0,0,0,0.3)', color: '#EAD068', fontSize: 16, fontFamily: 'inherit', fontWeight: 700, boxSizing: 'border-box' }} />
+          </div>
+          <div>
+            <label style={{ fontSize: 11, color: 'rgba(232,232,240,0.5)', display: 'block', marginBottom: 4 }}>Total Included Debt</label>
+            <div style={{ fontSize: 16, color: '#ef5350', fontWeight: 700, padding: '8px 0' }}>{fmt(includedDebt)}</div>
+          </div>
+        </div>
+        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(5, 1fr)', gap: 10, marginBottom: 12 }}>
+          {[
+            { label: 'TAD / Week', value: fmtD(waterfall.tad), color: '#00e5ff' },
+            { label: 'ISO Comm / Wk', value: fmtD(waterfall.isoCommPerWeek), color: '#CFA529' },
+            { label: 'FF Fee / Wk', value: fmtD(waterfall.ffFeePerWeek), color: '#CFA529' },
+            { label: 'Reserve @50%', value: fmtD(reserveAt50 > 0 ? reserveAt50 : 0), color: '#4caf50' },
+            { label: 'Reserve @75%', value: fmtD(reserveAt75 > 0 ? reserveAt75 : 0), color: '#4caf50' },
+          ].map((s2, i) => (
+            <div key={i} style={{ background: 'rgba(0,0,0,0.2)', borderRadius: 8, padding: '8px 10px', textAlign: 'center' }}>
+              <div style={{ fontSize: 9, color: 'rgba(232,232,240,0.4)', textTransform: 'uppercase', letterSpacing: 0.5, marginBottom: 4 }}>{s2.label}</div>
+              <div style={{ fontSize: 15, fontWeight: 700, color: s2.color }}>{s2.value}</div>
+            </div>
+          ))}
+        </div>
+        <div style={{ fontSize: 11, color: 'rgba(232,232,240,0.35)' }}>Waterfall: {fmt(merchantWeeklyToFF)} merchant weekly → −{fmtD(waterfall.ffFeePerWeek)} FF fee → −{fmtD(waterfall.isoCommPerWeek)} ISO comm = {fmtD(waterfall.tad)} TAD</div>
+      </div>
+
+      {/* 2. POSITION MANAGEMENT */}
+      <div style={{ ...S.divider }} />
+      <div style={S.sectionTitle}>Position Management</div>
+      <div style={{ marginBottom: 20 }}>
+        <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap' }}>
+          {uwFunders.map((f, i) => {
+            const st = f.status;
+            const isExcluded = st !== 'include';
+            return (
+              <div key={i} style={{ flex: '1 1 200px', background: isExcluded ? 'rgba(255,255,255,0.02)' : 'rgba(255,255,255,0.04)', border: `1px solid ${isExcluded ? 'rgba(255,255,255,0.06)' : 'rgba(0,229,255,0.2)'}`, borderRadius: 10, padding: '12px 14px', opacity: isExcluded ? 0.5 : 1 }}>
+                <div style={{ fontSize: 13, color: isExcluded ? 'rgba(232,232,240,0.4)' : '#e8e8f0', fontWeight: 600, marginBottom: 4, textDecoration: isExcluded ? 'line-through' : 'none' }}>{f.name}</div>
+                <div style={{ fontSize: 11, color: 'rgba(232,232,240,0.4)', marginBottom: 6 }}>{fmt(toWeeklyEquiv(f.payment, f.frequency))}/wk · {fmt(f.balance)} bal</div>
+                <input type="number" value={balances[i] || ''} onChange={e => setBalances(b => ({ ...b, [i]: e.target.value }))} placeholder="Balance $" style={{ width: '100%', padding: '5px 8px', borderRadius: 6, border: '1px solid rgba(0,229,255,0.2)', background: 'rgba(0,0,0,0.3)', color: '#e8e8f0', fontSize: 12, fontFamily: 'inherit', boxSizing: 'border-box', marginBottom: 8 }} />
+                <div style={{ display: 'flex', gap: 4 }}>
+                  {['include', 'buyout', 'exclude'].map(s2 => (
+                    <button key={s2} onClick={() => setPositionStatuses(prev => ({ ...prev, [i]: s2 }))} style={{ flex: 1, padding: '4px 2px', borderRadius: 5, fontSize: 10, fontWeight: 600, cursor: 'pointer', border: `1px solid ${st === s2 ? statusColors[s2] : 'rgba(255,255,255,0.08)'}`, background: st === s2 ? `${statusColors[s2]}22` : 'transparent', color: st === s2 ? statusColors[s2] : 'rgba(232,232,240,0.4)', textTransform: 'uppercase', letterSpacing: 0.3, fontFamily: 'inherit' }}>
+                      {statusLabels[s2]}
+                    </button>
+                  ))}
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      </div>
+
+      {/* 3. TERM COMPARISON TABLE */}
+      {funderTiers.length > 0 && (
+        <>
+          <div style={{ ...S.divider }} />
+          <div style={S.sectionTitle}>Term Comparison — All Included Funders</div>
+          <div style={{ background: 'rgba(0,0,0,0.25)', borderRadius: 10, padding: 16, marginBottom: 20, overflowX: 'auto' }}>
+            <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 12 }}>
+              <thead>
+                <tr style={{ borderBottom: '1px solid rgba(255,255,255,0.1)' }}>
+                  {['Funder', 'Balance', 'Current Pmt', 'Allocation', '50% Term', '75% Term', '100% Term'].map(h => (
+                    <th key={h} style={{ padding: '6px 8px', textAlign: h === 'Funder' ? 'left' : 'right', fontSize: 10, color: 'rgba(232,232,240,0.4)', fontWeight: 600, textTransform: 'uppercase', letterSpacing: 0.5 }}>{h}</th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody>
+                {funderTiers.map((ft3, i) => (
+                  <tr key={i} style={{ borderBottom: '1px solid rgba(255,255,255,0.04)' }}>
+                    <td style={{ padding: '8px 8px', color: '#e8e8f0', fontWeight: 600 }}>{ft3.name}</td>
+                    <td style={{ padding: '8px 8px', color: '#ef9a9a', textAlign: 'right' }}>{fmt(ft3.balance)}</td>
+                    <td style={{ padding: '8px 8px', color: 'rgba(232,232,240,0.5)', textAlign: 'right' }}>{fmt(ft3.originalWeekly)}/wk</td>
+                    <td style={{ padding: '8px 8px', color: '#00e5ff', textAlign: 'right' }}>{fmtD(ft3.allocation)}/wk</td>
+                    <td style={{ padding: '8px 8px', color: negTierColors[0], textAlign: 'right' }}>{ft3.tiers[0].proposedTermWeeks} wks</td>
+                    <td style={{ padding: '8px 8px', color: negTierColors[1], textAlign: 'right' }}>{ft3.tiers[1].proposedTermWeeks} wks</td>
+                    <td style={{ padding: '8px 8px', color: negTierColors[2], textAlign: 'right', fontWeight: 700 }}>{ft3.tiers[2].proposedTermWeeks} wks</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </>
+      )}
+
+      {/* 4. FUNDER EMAIL GENERATOR */}
+      <div style={{ ...S.divider }} />
+      <div style={S.sectionTitle}>Funder Negotiation Emails</div>
+      <div style={{ background: 'rgba(0,229,255,0.04)', border: '1px solid rgba(0,229,255,0.15)', borderRadius: 12, padding: 20, marginBottom: 20 }}>
+        <div style={{ display: 'flex', gap: 12, alignItems: 'center', flexWrap: 'wrap', marginBottom: 16 }}>
+          <div>
+            <label style={{ fontSize: 11, color: 'rgba(232,232,240,0.5)', display: 'block', marginBottom: 4 }}>Select Funder:</label>
+            <select value={negFunderId ?? ''} onChange={e => setNegFunderId(e.target.value === '' ? null : Number(e.target.value))} style={{ padding: '8px 12px', borderRadius: 6, border: '1px solid rgba(0,229,255,0.3)', background: 'rgba(0,0,0,0.3)', color: '#e8e8f0', fontSize: 13, fontFamily: 'inherit', minWidth: 280 }}>
+              <option value="">Select a funder…</option>
+              {funderTiers.map((ft3, i) => <option key={i} value={i}>{ft3.name} — {fmt(ft3.balance)} bal — {fmtD(ft3.allocation)}/wk alloc</option>)}
+            </select>
+          </div>
+        </div>
+
+        {negFunderId !== null && funderTiers[negFunderId] && (() => {
+          const selFt = funderTiers[negFunderId];
+          return (
+            <div>
+              {/* Funder summary */}
+              <div style={{ background: 'rgba(0,0,0,0.2)', borderRadius: 8, padding: 14, marginBottom: 16, fontSize: 12, color: 'rgba(232,232,240,0.7)', lineHeight: 1.8 }}>
+                <div style={{ fontSize: 16, color: '#00e5ff', fontWeight: 700, marginBottom: 6 }}>{selFt.name}</div>
+                <div>Balance: <strong style={{ color: '#e8e8f0' }}>{fmt(selFt.balance)}</strong> · Original: <strong style={{ color: '#ef9a9a' }}>{fmt(selFt.originalWeekly)}/wk</strong> · Allocation: <strong style={{ color: '#00e5ff' }}>{fmtD(selFt.allocation)}/wk</strong></div>
+                <div>Total Repayment (all tiers): <strong style={{ color: '#4caf50' }}>{fmt(selFt.balance)}</strong> (100%)</div>
+              </div>
+
+              {/* 3 email previews */}
+              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: 12, marginBottom: 16 }}>
+                {[0, 1, 2].map(ti => {
+                  const t = selFt.tiers[ti];
+                  return (
+                    <div key={ti} style={{ background: `${negTierColors[ti]}08`, border: `1px solid ${negTierColors[ti]}44`, borderRadius: 10, padding: 14 }}>
+                      <div style={{ fontSize: 12, fontWeight: 700, color: negTierColors[ti], marginBottom: 8 }}>{negTierLabels[ti]}</div>
+                      <div style={{ fontSize: 11, color: 'rgba(232,232,240,0.6)', lineHeight: 1.8, marginBottom: 10 }}>
+                        <div>Payment: <strong style={{ color: negTierColors[ti] }}>{fmtD(t.weeklyPayment)}/wk</strong></div>
+                        <div>Reduction: <strong>{t.reductionPct.toFixed(1)}%</strong> ({fmtD(t.reductionDollars)} less)</div>
+                        <div>Term: <strong>{t.proposedTermWeeks} wks</strong> ({Math.round(t.proposedTermWeeks / 4.33)} mo)</div>
+                        <div>Extension: +{t.extensionPct.toFixed(0)}%</div>
+                        <div>Repayment: <strong style={{ color: '#4caf50' }}>{fmt(t.totalRepayment)}</strong></div>
+                      </div>
+                      <div style={{ display: 'flex', gap: 6 }}>
+                        <button onClick={() => { const txt = generateNegotiationEmail(negFunderId, ti); navigator.clipboard.writeText(txt); setCopiedEmail(`${negFunderId}-${ti}`); setTimeout(() => setCopiedEmail(null), 2000); }} style={{ ...S.btn('primary'), padding: '6px 12px', fontSize: 11, flex: 1 }}>
+                          {copiedEmail === `${negFunderId}-${ti}` ? '✓ Copied!' : 'Copy Email'}
+                        </button>
+                        <button onClick={() => { const html = generateBriefHTML(negFunderId, ti); const w = window.open('', '_blank'); w.document.write(html); w.document.close(); }} style={{ ...S.btn('secondary'), padding: '6px 10px', fontSize: 10 }}>
+                          PDF
+                        </button>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+
+              {/* Full email preview */}
+              <div style={{ background: 'rgba(0,0,0,0.3)', borderRadius: 8, padding: 16, maxHeight: 500, overflowY: 'auto' }}>
+                <div style={{ display: 'flex', gap: 8, marginBottom: 10 }}>
+                  {[0, 1, 2].map(ti => (
+                    <button key={ti} onClick={() => setNegFunderId(prev => prev)} style={{ padding: '4px 10px', borderRadius: 6, fontSize: 10, fontWeight: 600, cursor: 'default', border: `1px solid ${negTierColors[ti]}`, background: `${negTierColors[ti]}22`, color: negTierColors[ti], fontFamily: 'inherit' }}>
+                      {negTierLabels[ti]} — {selFt.tiers[ti].proposedTermWeeks} wks
+                    </button>
+                  ))}
+                </div>
+                <pre style={{ margin: 0, fontFamily: 'inherit', fontSize: 11, color: 'rgba(232,232,240,0.85)', whiteSpace: 'pre-wrap', lineHeight: 1.6 }}>
+                  {generateNegotiationEmail(negFunderId, 0)}
+                </pre>
+              </div>
+            </div>
+          );
+        })()}
+      </div>
+
+      {/* ═══════════════════════════════════════════════════════════════ */}
+      {/* ISO OFFER CALCULATOR (collapsible)                            */}
+      {/* ═══════════════════════════════════════════════════════════════ */}
+      <div style={{ ...S.divider, marginTop: 24 }} />
       <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginBottom: 16 }}>
-        <div style={S.sectionTitle}>💼 ISO Offer Calculator</div>
-        <button
-          style={{ ...S.btn('ghost'), fontSize: 11, padding: '3px 10px', marginLeft: 'auto' }}
-          onClick={() => setShowOfferEngine(v => !v)}
-        >{showOfferEngine ? '▲ Collapse' : '▼ Expand'}</button>
+        <div style={S.sectionTitle}>ISO Offer Calculator</div>
+        <button style={{ ...S.btn('ghost'), fontSize: 11, padding: '3px 10px', marginLeft: 'auto' }} onClick={() => setShowOfferEngine(v => !v)}>
+          {showOfferEngine ? '▲ Collapse' : '▼ Expand'}
+        </button>
       </div>
 
       {showOfferEngine && (
         <div style={{ background: 'rgba(0,0,0,0.25)', border: '1px solid rgba(255,255,255,0.08)', borderRadius: 12, padding: 20, marginBottom: 24 }}>
-
-          {/* Balances row */}
-          <div style={{ marginBottom: 20 }}>
-            <div style={{ fontSize: 11, color: 'rgba(232,232,240,0.4)', textTransform: 'uppercase', letterSpacing: 1, marginBottom: 10 }}>
-              Estimated Remaining Balances — edit if you have exact figures
-            </div>
-            <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap' }}>
-              {uwFunders.map((f, i) => (
-                <div key={i} style={{ flex: '1 1 160px', background: 'rgba(255,255,255,0.04)', border: '1px solid rgba(255,255,255,0.08)', borderRadius: 8, padding: '10px 12px' }}>
-                  <div style={{ fontSize: 11, color: 'rgba(232,232,240,0.45)', marginBottom: 4, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{f.name}</div>
-                  <div style={{ fontSize: 10, color: 'rgba(232,232,240,0.3)', marginBottom: 6 }}>{fmt(f.payment)}/{f.frequency}</div>
-                  <input
-                    type="number"
-                    value={balances[i] || ''}
-                    onChange={e => setBalances(b => ({ ...b, [i]: e.target.value }))}
-                    placeholder="Balance $"
-                    style={{ width: '100%', padding: '5px 8px', borderRadius: 6, border: '1px solid rgba(0,229,255,0.25)', background: 'rgba(0,0,0,0.3)', color: '#e8e8f0', fontSize: 13, fontFamily: 'inherit', boxSizing: 'border-box' }}
-                  />
-                </div>
-              ))}
-            </div>
-          </div>
-
           {/* ISO Points slider */}
           <div style={{ background: 'rgba(0,0,0,0.2)', borderRadius: 10, padding: '14px 16px', marginBottom: 18 }}>
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 10 }}>
               <div style={{ fontSize: 12, color: 'rgba(232,232,240,0.6)' }}>ISO Commission Points</div>
               <div style={{ fontSize: 20, fontWeight: 800, color: '#00bcd4' }}>{isoPoints} pts</div>
             </div>
-            <input
-              type="range" min={0} max={15} step={1} value={isoPoints}
-              onChange={e => setIsoPoints(Number(e.target.value))}
-              style={{ width: '100%', accentColor: '#00bcd4' }}
-            />
-            <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 10, color: 'rgba(232,232,240,0.3)', marginTop: 4 }}>
-              <span>0 pts — 72.9% reduction (max)</span>
-              <span>8 pts — 50% reduction</span>
-              <span>15 pts — 30% reduction (min)</span>
-            </div>
+            <input type="range" min={0} max={15} step={1} value={isoPoints} onChange={e => setIsoPoints(Number(e.target.value))} style={{ width: '100%', accentColor: '#00bcd4' }} />
           </div>
 
           {/* Summary stats */}
@@ -2408,42 +2834,24 @@ body{font-family:'Outfit',sans-serif;background:#e8e8e8;color:var(--ff-text);lin
           {/* Tier selector */}
           <div style={{ display: 'flex', gap: 8, marginBottom: 16 }}>
             {tierLabels.map((label, i) => (
-              <button
-                key={i}
-                style={{
-                  flex: 1, padding: '8px 4px', borderRadius: 8, fontSize: 12, fontWeight: 600, cursor: 'pointer',
-                  border: `1px solid ${selectedTier === i ? tierColors[i] : 'rgba(255,255,255,0.1)'}`,
-                  background: selectedTier === i ? `${tierColors[i]}22` : 'rgba(255,255,255,0.03)',
-                  color: selectedTier === i ? tierColors[i] : 'rgba(232,232,240,0.5)',
-                  transition: 'all 0.15s',
-                }}
-                onClick={() => setSelectedTier(i)}
-              >{label}</button>
+              <button key={i} style={{ flex: 1, padding: '8px 4px', borderRadius: 8, fontSize: 12, fontWeight: 600, cursor: 'pointer', border: `1px solid ${selectedTier === i ? tierColors[i] : 'rgba(255,255,255,0.1)'}`, background: selectedTier === i ? `${tierColors[i]}22` : 'rgba(255,255,255,0.03)', color: selectedTier === i ? tierColors[i] : 'rgba(232,232,240,0.5)', transition: 'all 0.15s', fontFamily: 'inherit' }} onClick={() => setSelectedTier(i)}>
+                {label}
+              </button>
             ))}
           </div>
 
           {/* Active tier breakdown */}
           {activeTier && (
             <div style={{ background: `${tierColors[selectedTier]}11`, border: `1px solid ${tierColors[selectedTier]}44`, borderRadius: 10, padding: 16, marginBottom: 16 }}>
-              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 14 }}>
-                <div>
-                  <div style={{ fontSize: 14, fontWeight: 700, color: tierColors[selectedTier] }}>{activeTier.name}</div>
-                  <div style={{ fontSize: 11, color: 'rgba(232,232,240,0.4)' }}>
-                    Total: <strong style={{ color: '#22c55e' }}>{fmt(activeTier.totalNewWeekly)}/wk</strong>
-                    {' '}(down from <span style={{ color: '#ef5350' }}>{fmt(activeTier.originalWeekly)}</span>)
-                    {' '}— <strong style={{ color: '#00bcd4' }}>{fmtP(activeTier.totalReduction * 100)} reduction</strong>
-                    {' '}· max term <strong style={{ color: 'rgba(232,232,240,0.8)' }}>{activeTier.maxTerm} wks</strong>
-                  </div>
-                </div>
+              <div style={{ fontSize: 14, fontWeight: 700, color: tierColors[selectedTier], marginBottom: 4 }}>{activeTier.name}</div>
+              <div style={{ fontSize: 11, color: 'rgba(232,232,240,0.4)', marginBottom: 14 }}>
+                Total: <strong style={{ color: '#22c55e' }}>{fmt(activeTier.totalNewWeekly)}/wk</strong>
+                {' '}(down from <span style={{ color: '#ef5350' }}>{fmt(activeTier.originalWeekly)}</span>)
+                {' '}— <strong style={{ color: '#00bcd4' }}>{fmtP(activeTier.totalReduction * 100)} reduction</strong>
+                {' '}· max term <strong style={{ color: 'rgba(232,232,240,0.8)' }}>{activeTier.maxTerm} wks</strong>
               </div>
               <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 12 }}>
-                <thead>
-                  <tr style={{ borderBottom: '1px solid rgba(255,255,255,0.08)' }}>
-                    {['Funder', 'Balance', 'Current', 'New Payment', 'Term', 'Reduction'].map(h => (
-                      <th key={h} style={{ padding: '4px 8px', textAlign: 'left', fontSize: 10, color: 'rgba(232,232,240,0.35)', fontWeight: 600, textTransform: 'uppercase' }}>{h}</th>
-                    ))}
-                  </tr>
-                </thead>
+                <thead><tr style={{ borderBottom: '1px solid rgba(255,255,255,0.08)' }}>{['Funder', 'Balance', 'Current', 'New Payment', 'Term', 'Reduction'].map(h => <th key={h} style={{ padding: '4px 8px', textAlign: 'left', fontSize: 10, color: 'rgba(232,232,240,0.35)', fontWeight: 600, textTransform: 'uppercase' }}>{h}</th>)}</tr></thead>
                 <tbody>
                   {activeTier.offers.map((o, i) => (
                     <tr key={i} style={{ borderBottom: '1px solid rgba(255,255,255,0.04)' }}>
@@ -2460,112 +2868,15 @@ body{font-family:'Outfit',sans-serif;background:#e8e8e8;color:var(--ff-text);lin
             </div>
           )}
 
-          {/* ISO Pitch Card */}
-          <div style={{ background: 'rgba(207,165,41,0.08)', border: '1px solid rgba(207,165,41,0.3)', borderRadius: 10, padding: 16 }}>
-            <div style={{ fontSize: 12, fontWeight: 700, color: '#CFA529', marginBottom: 10 }}>📋 ISO Pitch Summary</div>
-            <div style={{ fontSize: 12, color: 'rgba(232,232,240,0.8)', lineHeight: 1.8, fontFamily: 'monospace' }}>
-              <div>Merchant: <strong style={{ color: '#e8e8f0' }}>{a.business_name || 'Business'}</strong></div>
-              <div>Revenue (bank-verified): <strong style={{ color: '#22c55e' }}>{fmt(revenue)}/mo</strong></div>
-              <div>Total Debt Stack: <strong style={{ color: '#ef5350' }}>{fmt(totalDebt)}</strong> · {uwFunders.length} active positions</div>
-              <div>Current weekly burden: <strong style={{ color: '#ef9a9a' }}>{fmt(totalCurrentWeekly)}/wk</strong></div>
-              <div style={{ marginTop: 8, color: 'rgba(232,232,240,0.4)' }}>─────────────────────────</div>
-              <div>Restructured to: <strong style={{ color: '#22c55e' }}>{activeTier ? fmt(activeTier.totalNewWeekly) : '—'}/wk</strong></div>
-              <div>Payment reduction: <strong style={{ color: '#00bcd4' }}>{activeTier ? fmtP(activeTier.totalReduction * 100) : '—'}</strong></div>
-              <div>Deal term range: <strong style={{ color: '#e8e8f0' }}>{isoTermLow}–{isoTermHigh} months</strong></div>
-              <div style={{ marginTop: 8, color: 'rgba(232,232,240,0.4)' }}>─────────────────────────</div>
-              <div>Your commission ({isoPoints} pts): <strong style={{ color: '#CFA529' }}>{fmt(isoFeeTotal)}</strong></div>
-              <div>Factor rate: <strong style={{ color: '#CFA529' }}>{factorRate.toFixed(3)}</strong> · Total payback: <strong style={{ color: '#CFA529' }}>{fmt(totalPayback)}</strong></div>
-            </div>
-            <div style={{ marginTop: 12, display: 'flex', gap: 10 }}>
-              <button style={S.btn('primary')} onClick={copyOffer}>
-                {copiedOffer ? '✓ Copied!' : '📋 Copy Pitch'}
-              </button>
-              <button style={S.btn('secondary')} onClick={downloadCSV}>⬇ Download CSV</button>
-            </div>
+          <div style={{ display: 'flex', gap: 10 }}>
+            <button style={S.btn('primary')} onClick={copyOffer}>{copiedOffer ? '✓ Copied!' : 'Copy ISO Pitch'}</button>
+            <button style={S.btn('secondary')} onClick={downloadCSV}>Download CSV</button>
           </div>
         </div>
       )}
 
-      {/* ── Deal Economics ── */}
-      <div style={{ ...S.divider, marginTop: 24 }} />
-      <div style={S.sectionTitle}>Deal Economics (Internal — Not in Brief)</div>
-      <div style={{ background: 'rgba(207,165,41,0.06)', border: '1px solid rgba(207,165,41,0.2)', borderRadius: 12, padding: 20, marginBottom: 20 }}>
-        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr 1fr', gap: 16, marginBottom: 16 }}>
-          <div>
-            <label style={{ fontSize: 11, color: 'rgba(232,232,240,0.5)', display: 'block', marginBottom: 4 }}>ISO Points</label>
-            <input type="number" value={dealIsoPoints} onChange={e => setDealIsoPoints(Number(e.target.value) || 0)} min={0} max={20} step={1} style={{ width: '100%', padding: '8px 12px', borderRadius: 6, border: '1px solid rgba(207,165,41,0.3)', background: 'rgba(0,0,0,0.3)', color: '#EAD068', fontSize: 16, fontFamily: 'inherit', fontWeight: 700, boxSizing: 'border-box' }} />
-          </div>
-          <div>
-            <label style={{ fontSize: 11, color: 'rgba(232,232,240,0.5)', display: 'block', marginBottom: 4 }}>FF Fee %</label>
-            <input type="number" value={dealFfFeePct} onChange={e => setDealFfFeePct(Number(e.target.value) || 0)} min={0} max={1} step={0.001} style={{ width: '100%', padding: '8px 12px', borderRadius: 6, border: '1px solid rgba(207,165,41,0.3)', background: 'rgba(0,0,0,0.3)', color: '#EAD068', fontSize: 16, fontFamily: 'inherit', fontWeight: 700, boxSizing: 'border-box' }} />
-          </div>
-          <div>
-            <label style={{ fontSize: 11, color: 'rgba(232,232,240,0.5)', display: 'block', marginBottom: 4 }}>ISO Commission</label>
-            <div style={{ fontSize: 16, color: '#CFA529', fontWeight: 700, padding: '8px 0' }}>{fmt(totalDebt * (dealIsoPoints / 100))}</div>
-          </div>
-          <div>
-            <label style={{ fontSize: 11, color: 'rgba(232,232,240,0.5)', display: 'block', marginBottom: 4 }}>FF Revenue</label>
-            <div style={{ fontSize: 16, color: '#CFA529', fontWeight: 700, padding: '8px 0' }}>{fmt(totalDebt * dealFfFeePct)}</div>
-          </div>
-        </div>
-        <div style={{ fontSize: 11, color: 'rgba(232,232,240,0.4)' }}>These fields are for internal deal tracking / HubSpot copy-paste. They do not appear in the funder brief.</div>
-      </div>
-
-      {/* ── Funder Position Brief ── */}
-      <div style={{ ...S.divider, marginTop: 8 }} />
-      <div style={S.sectionTitle}>Funder Position Brief</div>
-      <div style={{ background: 'rgba(0,229,255,0.04)', border: '1px solid rgba(0,229,255,0.15)', borderRadius: 12, padding: 20, marginBottom: 20 }}>
-        <div style={{ display: 'flex', gap: 12, alignItems: 'center', flexWrap: 'wrap', marginBottom: 16 }}>
-          <div>
-            <label style={{ fontSize: 11, color: 'rgba(232,232,240,0.5)', display: 'block', marginBottom: 4 }}>Generate Brief For:</label>
-            <select value={briefFunderId ?? ''} onChange={e => setBriefFunderId(e.target.value === '' ? null : Number(e.target.value))} style={{ padding: '8px 12px', borderRadius: 6, border: '1px solid rgba(0,229,255,0.3)', background: 'rgba(0,0,0,0.3)', color: '#e8e8f0', fontSize: 13, fontFamily: 'inherit', minWidth: 240 }}>
-              <option value="">Select a funder…</option>
-              {uwFunders.map((f, i) => <option key={i} value={i}>{f.name} — {fmt(f.balance)} bal</option>)}
-            </select>
-          </div>
-          <button
-            disabled={briefFunderId === null}
-            onClick={() => {
-              const briefHtml = generateBriefHTML(briefFunderId);
-              const win = window.open('', '_blank');
-              win.document.write(briefHtml);
-              win.document.close();
-              setTimeout(() => win.print(), 600);
-            }}
-            style={{ ...S.btn('gold'), padding: '10px 20px', opacity: briefFunderId === null ? 0.4 : 1 }}>
-            Generate Brief & Print
-          </button>
-          <button
-            disabled={briefFunderId === null}
-            onClick={() => {
-              const briefHtml = generateBriefHTML(briefFunderId);
-              const win = window.open('', '_blank');
-              win.document.write(briefHtml);
-              win.document.close();
-            }}
-            style={{ ...S.btn('secondary'), padding: '10px 16px', opacity: briefFunderId === null ? 0.4 : 1, fontSize: 12 }}>
-            Preview in New Tab
-          </button>
-        </div>
-        {briefFunderId !== null && (() => {
-          const bf = uwFunders[briefFunderId];
-          if (!bf) return null;
-          const weeklyPmt = toWeeklyEquiv(bf.payment, bf.frequency);
-          const proposedWeekly = Math.round(weeklyPmt * 0.4);
-          const termWeeks = proposedWeekly > 0 ? Math.ceil(bf.balance / proposedWeekly) : 0;
-          return (
-            <div style={{ background: 'rgba(0,0,0,0.2)', borderRadius: 8, padding: 14, fontSize: 12, color: 'rgba(232,232,240,0.6)', lineHeight: 1.8 }}>
-              <div style={{ fontSize: 14, color: '#00e5ff', marginBottom: 8 }}>Brief Preview: {bf.name}</div>
-              <div>Balance: <strong style={{ color: '#e8e8f0' }}>{fmt(bf.balance)}</strong> · Current: <strong style={{ color: '#ef9a9a' }}>{fmt(weeklyPmt)}/wk</strong></div>
-              <div>Proposed: <strong style={{ color: '#4caf50' }}>{fmt(proposedWeekly)}/wk</strong> (60% reduction) · Term: <strong style={{ color: '#e8e8f0' }}>{termWeeks} weeks</strong> ({Math.round(termWeeks / 4.33)} months)</div>
-              <div>Total Repayment: <strong style={{ color: '#4caf50' }}>{fmt(bf.balance)}</strong> (100%)</div>
-              <div style={{ marginTop: 8 }}>Stack: {uwFunders.length} positions · {fmt(totalCurrentWeekly)}/wk combined · {fmt(totalCurrentWeekly * 4.33)}/mo outgo</div>
-            </div>
-          );
-        })()}
-      </div>
-
       {/* ── CSV Export ── */}
+      <div style={{ ...S.divider, marginTop: 24 }} />
       <div style={S.sectionTitle}>CSV Export</div>
       <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap', marginBottom: 16 }}>
         <button style={S.btn('secondary')} onClick={downloadCSV}>⬇ Download CSV</button>
