@@ -884,7 +884,374 @@ function NegotiationTab({ a, positions, excludedIds, otherExcludedIds, excludedD
           </div>
         </>
       )}
+
+      {/* ── Email Generator Section ── */}
+      {activePositions.length > 0 && (
+        <NegotiationEmailGenerator
+          businessName={a.business_name}
+          positions={activePositions}
+          totalPositions={activePositions.length}
+          revenue={revenue}
+          totalMCAMonthly={totalMCAMonthly}
+          dsr={dsr}
+          weeksToInsolvency={m.weeks_to_insolvency}
+          adbDays={a.balance_summary?.avg_daily_balance ? Math.round(a.balance_summary.avg_daily_balance / (totalMCAMonthly / 30)) : null}
+          grossProfit={revenue - (a.expense_categories?.inventory_cogs || 0)}
+          opex={opexForNeg}
+        />
+      )}
     </div>
+  );
+}
+
+// ─── Negotiation Email Generator Component ────────────────────────────────────
+function NegotiationEmailGenerator({ businessName, positions, totalPositions, revenue, totalMCAMonthly, dsr, weeksToInsolvency, adbDays, grossProfit, opex }) {
+  const [selectedFunder, setSelectedFunder] = useState(null);
+  const [selectedTemplate, setSelectedTemplate] = useState('opening');
+  const [copied, setCopied] = useState(false);
+  const [funderTracking, setFunderTracking] = useState({});
+
+  const FF_CONTACT = {
+    name: 'Lauren Michelle',
+    title: 'Funders First Inc.',
+    phone: '480-631-7691',
+    email: 'info@fundersfirst.com',
+    address: 'Phoenix, AZ',
+    tagline: 'RBFC Advocate | Revenue Based Finance Coalition'
+  };
+
+  const templates = [
+    { id: 'opening', label: '1️⃣ Opening Offer', desc: 'Initial outreach with full positioning' },
+    { id: 'middle1', label: '2️⃣ 1st Middle Ground', desc: 'Follow-up with weekly payments' },
+    { id: 'middle2', label: '3️⃣ 2nd Middle Ground', desc: 'Improved terms / 1.5x allocation' },
+    { id: 'final', label: '4️⃣ Final Offer', desc: 'Maximum allocation, last chance' },
+  ];
+
+  const generateComparisonBox = (balance, termWeeks) => {
+    const defaultRecovery = balance * 0.35;
+    const legalCosts = 7500;
+    const netDefault = defaultRecovery - legalCosts;
+    const advantage = balance - netDefault;
+    return `════════════════════════════════════════════════════════════════
+                     YOUR OPTIONS COMPARED
+════════════════════════════════════════════════════════════════
+   ACCEPT OUR PROPOSAL          │  PURSUE DEFAULT/COLLECTIONS
+───────────────────────────────────────────────────────────────
+   Receive: ${fmt(balance)} (100%)   │  Expected: ${fmt(defaultRecovery)} (~35%)
+   Timeline: ${termWeeks} weeks          │  Timeline: 12-18+ months
+   Your Legal Costs: $0         │  Legal Costs: $5,000-$15,000
+   Collection Fees: $0          │  Collection Fees: ~25-35%
+   Payments Start: 72 hours     │  Recovery Start: 6+ months
+───────────────────────────────────────────────────────────────
+   NET DIFFERENCE: +${fmt(advantage)} by accepting our proposal
+════════════════════════════════════════════════════════════════`;
+  };
+
+  const generateEmail = (funder, templateId) => {
+    const p = funder;
+    const balance = p.estimated_balance || p.estimated_monthly_total * 12; // estimate if not known
+    const currentWeekly = (p.payment_amount_current || p.payment_amount || 0);
+    const proposedWeekly = Math.round(currentWeekly * 0.4); // 60% reduction proposal
+    const termWeeks = Math.ceil(balance / proposedWeekly);
+    const termMonths = Math.round(termWeeks / 4.33);
+    const reductionPct = Math.round((1 - proposedWeekly / currentWeekly) * 100);
+    const withholdPct = Math.round((totalMCAMonthly / revenue) * 100);
+    const funderPosition = positions.findIndex(pos => pos._id === p._id) + 1;
+
+    const statsBlock = `BANK-VERIFIED FINANCIAL OVERVIEW:
+Business: ${businessName}
+True Monthly Revenue (bank-verified): ${fmt(revenue)}
+Combined MCA Weekly Burden: ${fmt(totalMCAMonthly / 4.33)} (${totalPositions} positions)
+Current Withhold % of Revenue: ${withholdPct}%
+${adbDays ? `Average Daily Balance Coverage: ${adbDays} days` : ''}
+${weeksToInsolvency ? `Days Until Likely Default: ${Math.round(weeksToInsolvency * 7)} days` : ''}
+Risk Assessment: ${dsr > 50 ? 'UNSUSTAINABLE' : dsr > 35 ? 'CRITICAL' : 'STRESSED'}
+
+NOTE: All revenue figures are bank-statement verified — not merchant-reported estimates.`;
+
+    const positioningBlock = `IMPORTANT — WHO WE ARE:
+Funders First is NOT a debt settlement company. We do not advise merchants that MCAs are predatory, unfair, or that they don't owe what they contracted for. We believe in and support revenue-based finance as a legitimate funding tool for small businesses.
+
+The issue here is over-stacking. This merchant is servicing ${totalPositions} concurrent funding positions, consuming ${withholdPct}% of weekly revenue. This level of debt service is mathematically unsustainable and, without intervention, leads to default — which benefits no one.
+
+Our solution protects your investment by ensuring 100% repayment while giving the merchant breathing room to operate their business. This is not debt reduction — this is debt restructuring that works for everyone.
+
+We are advocates of the Revenue Based Finance Coalition (RBFC) and work WITH funders, not against them.`;
+
+    const yourPositionBlock = `YOUR POSITION:
+You are 1 of ${totalPositions} funders in this portfolio
+Current Weekly Payment: ${fmt(currentWeekly)}
+Estimated Remaining Balance: ${fmt(balance)}`;
+
+    const proposalBlock = `OUR ${templateId === 'final' ? 'FINAL ' : templateId === 'middle2' ? 'IMPROVED ' : templateId === 'middle1' ? 'REVISED ' : 'OPENING '}PROPOSAL:
+Proposed Payment: ${fmt(proposedWeekly)} ${templateId === 'opening' ? 'bi-weekly' : 'weekly'}
+Proposed Term: ${termWeeks} weeks (${termMonths} months)
+Total Repayment: ${fmt(balance)} — 100% of your balance
+Payment Reduction: ${reductionPct}% from current
+Payments Begin: Within 72 hours of agreement`;
+
+    const comparisonBox = generateComparisonBox(balance, termWeeks);
+
+    const signature = `Best regards,
+${FF_CONTACT.name}
+${FF_CONTACT.title}
+${FF_CONTACT.phone}
+${FF_CONTACT.email}
+${FF_CONTACT.address}
+
+${FF_CONTACT.tagline}`;
+
+    const lnaaNotice = `⚠️ IMPORTANT: Per the enclosed LNAA, all communications regarding this account must now be directed to our office. Please do not contact the merchant directly.`;
+
+    const impossibilityNotice = dsr > 50 ? `
+⚠️ MATHEMATICAL IMPOSSIBILITY NOTICE:
+Bank statement analysis confirms ${fmt(totalMCAMonthly)} in monthly MCA debt service against ${fmt(grossProfit)} in monthly gross profit after ${fmt(opex)} in verified operating expenses. There is no repayment scenario that services all current positions without default.
+` : '';
+
+    const urgencyNotice = (weeksToInsolvency && weeksToInsolvency < 8) || (adbDays && adbDays < 14) ? `
+⚠️ URGENT: Based on current cash flow analysis, this merchant has approximately ${weeksToInsolvency ? Math.round(weeksToInsolvency * 7) : adbDays} days before account balances become critically depleted.
+` : '';
+
+    if (templateId === 'opening') {
+      return `Subject: Payment Modification Request - ${businessName} - Position ${funderPosition} of ${totalPositions} - Immediate Attention Required
+
+Dear ${p.funder_name} Collections/Servicing Team,
+
+We are reaching out on behalf of ${businessName} regarding their merchant cash advance position with your organization.
+
+${positioningBlock}
+
+${statsBlock}
+${impossibilityNotice}${urgencyNotice}
+${yourPositionBlock}
+
+${proposalBlock}
+
+${comparisonBox}
+
+We are prepared to begin payments within 72 hours of reaching agreement. We want to start paying you right away.
+
+ATTACHMENT: Please find enclosed our Limited Negotiation Authorization Agreement (LNAA), executed by ${businessName}, authorizing Funders First to negotiate on their behalf.
+
+${lnaaNotice}
+
+${signature}`;
+    } else if (templateId === 'middle1') {
+      return `Subject: Follow-Up: Modification Proposal - ${businessName} - Revised Terms
+
+Dear ${p.funder_name} Collections/Servicing Team,
+
+Following our previous communication regarding ${businessName}, we are presenting revised terms for your consideration.
+
+${statsBlock}
+
+${proposalBlock}
+
+This proposal shifts to weekly payments while maintaining full repayment of your balance.
+
+${comparisonBox}
+
+We remain committed to ensuring you receive 100% of what is owed. Please respond so we can finalize terms and begin remittance immediately.
+
+${lnaaNotice}
+
+${signature}`;
+    } else if (templateId === 'middle2') {
+      const improvedWeekly = Math.round(proposedWeekly * 1.5);
+      const improvedTerm = Math.ceil(balance / improvedWeekly);
+      return `Subject: Revised Proposal - ${businessName} - Improved Terms Available
+
+Dear ${p.funder_name} Collections/Servicing Team,
+
+We are submitting improved terms for your position with ${businessName}.
+
+${statsBlock}
+
+OUR IMPROVED PROPOSAL:
+Proposed Payment: ${fmt(improvedWeekly)} weekly (1.5x allocation)
+Proposed Term: ${improvedTerm} weeks (${Math.round(improvedTerm / 4.33)} months)
+Total Repayment: ${fmt(balance)} — 100% of your balance
+Payment Reduction: ${Math.round((1 - improvedWeekly / currentWeekly) * 100)}% from current
+
+This represents a more aggressive payment schedule that shortens your recovery timeline while maintaining sustainable merchant payments.
+
+${comparisonBox}
+
+We urge your prompt consideration. The sooner we reach agreement, the sooner payments begin. Other funders in this portfolio have been responsive — we want to include you in the initial payment distribution.
+
+${lnaaNotice}
+
+${signature}`;
+    } else {
+      return `Subject: Final Proposal - ${businessName} - Maximum Allocation Available
+
+Dear ${p.funder_name} Collections/Servicing Team,
+
+This represents our final proposal for the ${businessName} restructuring.
+
+${statsBlock}
+
+FINAL PROPOSAL (Full Weekly Allocation):
+${proposalBlock}
+
+This is our maximum allocation offer. This is the last opportunity to participate in the structured repayment before we are forced to notify you that your position cannot be accommodated in the current payment structure.
+
+${comparisonBox}
+
+${lnaaNotice}
+
+${signature}`;
+    }
+  };
+
+  const copyToClipboard = (text) => {
+    navigator.clipboard.writeText(text);
+    setCopied(true);
+    setTimeout(() => setCopied(false), 2000);
+  };
+
+  const updateFunderTracking = (funderId, field, value) => {
+    setFunderTracking(prev => ({
+      ...prev,
+      [funderId]: { ...(prev[funderId] || {}), [field]: value }
+    }));
+  };
+
+  return (
+    <>
+      <div style={S.divider} />
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 }}>
+        <div style={S.sectionTitle}>✉️ Negotiation Email Generator</div>
+        <span style={{ fontSize: 11, color: 'rgba(232,232,240,0.4)' }}>Select a funder to generate pre-filled emails</span>
+      </div>
+
+      {/* Funder Selection */}
+      <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginBottom: 16 }}>
+        {positions.map((p, i) => {
+          const tracking = funderTracking[p._id] || {};
+          const statusColors = { not_contacted: 'grey', email_sent: 'amber', in_negotiation: 'cyan', accepted: 'green', declined: 'red' };
+          return (
+            <button
+              key={p._id}
+              onClick={() => setSelectedFunder(selectedFunder?._id === p._id ? null : p)}
+              style={{
+                padding: '8px 14px',
+                borderRadius: 8,
+                border: selectedFunder?._id === p._id ? '2px solid #00e5ff' : '1px solid rgba(255,255,255,0.15)',
+                background: selectedFunder?._id === p._id ? 'rgba(0,229,255,0.15)' : 'rgba(255,255,255,0.04)',
+                color: selectedFunder?._id === p._id ? '#00e5ff' : '#e8e8f0',
+                cursor: 'pointer',
+                fontSize: 12,
+                fontFamily: 'inherit',
+                display: 'flex',
+                alignItems: 'center',
+                gap: 6
+              }}>
+              <span style={{ width: 8, height: 8, borderRadius: '50%', background: statusColors[tracking.status] || 'rgba(255,255,255,0.2)' }} />
+              {p.funder_name}
+            </button>
+          );
+        })}
+      </div>
+
+      {/* Email Generator Panel */}
+      {selectedFunder && (
+        <div style={{ background: 'rgba(0,229,255,0.04)', border: '1px solid rgba(0,229,255,0.2)', borderRadius: 12, padding: 20, marginBottom: 20 }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 16 }}>
+            <div>
+              <div style={{ fontSize: 18, color: '#00e5ff', marginBottom: 4 }}>{selectedFunder.funder_name}</div>
+              <div style={{ fontSize: 12, color: 'rgba(232,232,240,0.5)' }}>
+                {fmt(selectedFunder.payment_amount_current || selectedFunder.payment_amount)}/{selectedFunder.frequency} · Est. {fmt(selectedFunder.estimated_monthly_total)}/mo
+              </div>
+            </div>
+            <select
+              value={funderTracking[selectedFunder._id]?.status || 'not_contacted'}
+              onChange={e => updateFunderTracking(selectedFunder._id, 'status', e.target.value)}
+              style={{ padding: '6px 10px', borderRadius: 6, border: '1px solid rgba(0,229,255,0.3)', background: 'rgba(0,0,0,0.3)', color: '#e8e8f0', fontSize: 11, fontFamily: 'inherit' }}>
+              <option value="not_contacted">Not Contacted</option>
+              <option value="email_sent">Email Sent</option>
+              <option value="in_negotiation">In Negotiation</option>
+              <option value="accepted">Accepted</option>
+              <option value="declined">Declined</option>
+            </select>
+          </div>
+
+          {/* Template Selection */}
+          <div style={{ display: 'flex', gap: 8, marginBottom: 16, flexWrap: 'wrap' }}>
+            {templates.map(t => (
+              <button
+                key={t.id}
+                onClick={() => setSelectedTemplate(t.id)}
+                style={{
+                  flex: 1,
+                  minWidth: 140,
+                  padding: '10px 12px',
+                  borderRadius: 8,
+                  border: selectedTemplate === t.id ? '2px solid #EAD068' : '1px solid rgba(255,255,255,0.12)',
+                  background: selectedTemplate === t.id ? 'rgba(234,208,104,0.1)' : 'rgba(255,255,255,0.03)',
+                  color: selectedTemplate === t.id ? '#EAD068' : 'rgba(232,232,240,0.7)',
+                  cursor: 'pointer',
+                  fontSize: 11,
+                  fontFamily: 'inherit',
+                  textAlign: 'left'
+                }}>
+                <div style={{ fontWeight: 600, marginBottom: 2 }}>{t.label}</div>
+                <div style={{ fontSize: 10, opacity: 0.7 }}>{t.desc}</div>
+              </button>
+            ))}
+          </div>
+
+          {/* Email Preview */}
+          <div style={{ background: 'rgba(0,0,0,0.3)', borderRadius: 8, padding: 16, marginBottom: 12, maxHeight: 400, overflowY: 'auto' }}>
+            <pre style={{ margin: 0, fontFamily: 'inherit', fontSize: 11, color: 'rgba(232,232,240,0.85)', whiteSpace: 'pre-wrap', lineHeight: 1.6 }}>
+              {generateEmail(selectedFunder, selectedTemplate)}
+            </pre>
+          </div>
+
+          {/* Actions */}
+          <div style={{ display: 'flex', gap: 10, alignItems: 'center' }}>
+            <button
+              onClick={() => copyToClipboard(generateEmail(selectedFunder, selectedTemplate))}
+              style={{ ...S.btn('primary'), padding: '10px 20px', display: 'flex', alignItems: 'center', gap: 6 }}>
+              {copied ? '✓ Copied!' : '📋 Copy Email'}
+            </button>
+            <input
+              placeholder="Contact email..."
+              value={funderTracking[selectedFunder._id]?.contactEmail || ''}
+              onChange={e => updateFunderTracking(selectedFunder._id, 'contactEmail', e.target.value)}
+              style={{ flex: 1, padding: '10px 14px', borderRadius: 8, border: '1px solid rgba(255,255,255,0.15)', background: 'rgba(0,0,0,0.3)', color: '#e8e8f0', fontSize: 12, fontFamily: 'inherit' }}
+            />
+            <input
+              placeholder="Notes..."
+              value={funderTracking[selectedFunder._id]?.notes || ''}
+              onChange={e => updateFunderTracking(selectedFunder._id, 'notes', e.target.value)}
+              style={{ flex: 1, padding: '10px 14px', borderRadius: 8, border: '1px solid rgba(255,255,255,0.15)', background: 'rgba(0,0,0,0.3)', color: '#e8e8f0', fontSize: 12, fontFamily: 'inherit' }}
+            />
+          </div>
+        </div>
+      )}
+
+      {/* Funder Status Summary */}
+      {Object.keys(funderTracking).length > 0 && (
+        <div style={{ background: 'rgba(255,255,255,0.03)', border: '1px solid rgba(255,255,255,0.08)', borderRadius: 10, padding: 14 }}>
+          <div style={{ fontSize: 11, letterSpacing: 1, textTransform: 'uppercase', color: 'rgba(232,232,240,0.4)', marginBottom: 10 }}>Negotiation Progress</div>
+          <div style={{ display: 'flex', gap: 16, flexWrap: 'wrap' }}>
+            {['accepted', 'in_negotiation', 'email_sent', 'declined'].map(status => {
+              const count = Object.values(funderTracking).filter(t => t.status === status).length;
+              if (count === 0) return null;
+              const colors = { accepted: '#4caf50', in_negotiation: '#00e5ff', email_sent: '#ff9800', declined: '#ef5350' };
+              const labels = { accepted: 'Accepted', in_negotiation: 'In Negotiation', email_sent: 'Contacted', declined: 'Declined' };
+              return (
+                <div key={status} style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                  <span style={{ width: 10, height: 10, borderRadius: '50%', background: colors[status] }} />
+                  <span style={{ fontSize: 12, color: colors[status] }}>{count} {labels[status]}</span>
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      )}
+    </>
   );
 }
 
