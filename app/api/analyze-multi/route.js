@@ -22,11 +22,18 @@ TRUE REVENUE — ALWAYS COUNT (never exclude these):
 • "FIRST DATA" → Card processing settlement. TRUE REVENUE.
 
 EXCLUSIONS — NEVER COUNT AS REVENUE:
-• MCA advance wire proceeds: Large credits labeled with funder names (MERCHANT MARKETPLACE, THE MERCHANT MARKETP, TBF, TBF GRP, ROWAN ADVANCE, ONDECK, etc.) — these are ADVANCE PROCEEDS, not revenue
+• MCA advance wire proceeds: Large credits labeled with funder names (MERCHANT MARKETPLACE, THE MERCHANT MARKETP, TBF, TBF GRP, ROWAN ADVANCE, ONDECK, NEWTEK, etc.) — these are ADVANCE PROCEEDS, not revenue
+• ANY credit containing the keywords: "WIRE", "ADVANCE", "GRP", "FUNDING", "CAPITAL", "LOAN", "PROCEEDS" — classify as type "loan" with is_excluded: true unless it clearly matches a known revenue processor (Square, Cantaloupe, USA Technologies, etc.)
 • Returned/NSF items: "NSF RETURN ITEM", "RETURN ITEM" credits — these are bounced debits returning to the account, not income
 • Returned ACH debits: When a funder's ACH bounces, the bank credits back the amount — this is NOT revenue
 • "CREDIT MEMO" entries under $100 — bank fee adjustments
 • Inter-account transfers: "TRANSFER FROM", "TRANSFER IN" between own accounts
+
+ACH CREDITS CLASSIFICATION (CRITICAL — DO NOT LUMP ALL ACH TOGETHER):
+• ACH credits from known processors (Cantaloupe, USA Technologies, Square, First Data) → type: "card_processing" or "ach_credit", is_excluded: false
+• ACH credits from MCA funders (any funder name, or containing "wire", "advance", "grp", "funding", "capital") → type: "loan", is_excluded: true
+• ACH credits you cannot identify → type: "ach_credit", is_excluded: false (benefit of the doubt), but add note: "unidentified ACH — manual review recommended"
+• NEVER combine MCA advance wires into the ach_credits revenue bucket. They are LOANS, not revenue.
 
 CRITICAL REVENUE CALCULATION METHOD:
 1. Start with the gross deposits total printed on page 1 of the statement
@@ -191,7 +198,12 @@ If you see debits from the same payee at DIFFERENT amounts on the SAME dates or 
       "pattern_description": "string",
       "confidence": "high|medium|low",
       "status": "active|paid_off|unmatched_advance|modified",
-      "flag": "standard|modified|undisclosed|paid_off|unmatched",
+      "flag": "standard|modified|undisclosed|paid_off|unmatched|double_pull",
+      "fuzzy_match": false,
+      "fuzzy_match_source": "string or null — original bank descriptor if fuzzy matched",
+      "double_pull": false,
+      "double_pull_dates": [],
+      "double_pull_amounts": [],
       "notes": "string — e.g. ACH reference series, payoff details"
     }
   ],
@@ -290,7 +302,46 @@ If you see debits from the same payee at DIFFERENT amounts on the SAME dates or 
 
 9. SCANNED MONTHS: If a statement has empty or unreadable text, note in months_missing and set revenue_confidence to "partial" or "low".
 
-10. MERCHANT MARKETPLACE SPECIFICS: Different ACH reference series = different positions. $35.00 debits are fees, not positions.`;
+10. MERCHANT MARKETPLACE SPECIFICS: Different ACH reference series = different positions. $35.00 debits are fees, not positions.
+
+## FUZZY NAME MATCHING FOR OCR ARTIFACTS (CRITICAL FOR SCANNED STATEMENTS)
+
+When matching funder names across transactions and months, apply these techniques in order:
+1. NORMALIZE: Strip all spaces, lowercase, remove special characters. "Merchant Market8882711420" → "merchantmarket8882711420"
+2. TOKEN MATCH: If 60%+ of tokens in the bank descriptor match a known funder name, it's a match. "MERCH MKTPLCE HLDGS" matches "Merchant Marketplace Holdings"
+3. SUBSTRING MATCH: If a 6+ character substring of a known funder appears in the descriptor, it's a match. "ROWANADVANCEGROU" matches "Rowan Advance Group"
+4. KNOWN ALIASES — always treat these as the same funder:
+   - "Merchant Market8882711420", "THE MERCHANT MARKETP", "THE MERCHANT MARKETPLACE CORP", "MERCH MKTPLCE", "TMM" → "The Merchant Marketplace"
+   - "TBF GRP", "TBF GRPID:56085", "TBF GRPID" → "TBF GRP"
+   - "ROWANADVANCEGROUACHPAYMENT", "ROWAN ADVANCE", "ROWAN ADV" → "Rowan Advance Group"
+   - "ONDECK CAPITAL", "ONDECK CAP", "ON DECK" → "OnDeck Capital"
+   - "Newtek S Bus Fin", "NEWTEK SMALL", "NEWTEK" → "Newtek"
+   - "FUNDKITE", "FUND KITE" → "Fundkite"
+   - "LIBERTAS FUND", "LIBERTAS" → "Libertas Funding"
+   - "FORWARD FIN", "FORWARD FINANCING" → "Forward Financing"
+
+If a funder match was made via fuzzy/alias matching rather than an exact descriptor match, set fuzzy_match: true and fuzzy_match_source to the original bank descriptor text.
+
+## PAYMENT CHANGE DETECTION ACROSS MONTHS
+
+For each funder, group ALL debits chronologically across ALL months. Compare the payment amount in the MOST RECENT month to prior months:
+- If the amount changed by >2%, set payment_modified: true
+- payment_amount_current = the LATEST month's recurring debit amount (this is the authoritative current figure)
+- payment_amount_original = the amount from the earlier month(s)
+- modification_date = first date the new amount appeared
+- modification_direction = "reduced" if current < original, "increased" if current > original
+- >2% change → add to flags_and_alerts as severity "warning": "Payment change detected: [funder] changed from $X to $Y in [month]"
+- >10% change → add to flags_and_alerts as severity "critical": "Significant payment change: [funder] dropped from $X to $Y (XX% reduction) — possible default modification"
+- ALWAYS use the latest month's payment for estimated_monthly_total calculations
+
+## DOUBLE-PULL DETECTION
+
+If MORE THAN ONE debit from the same funder occurs within a 7-day window at DIFFERENT amounts, flag as a double-pull. This does NOT apply to regular daily/weekly patterns at the SAME amount — only flag when two DIFFERENT debit amounts from the same funder hit within 7 days.
+- Set double_pull: true on the position
+- Set double_pull_dates to the array of dates involved
+- Set double_pull_amounts to the array of amounts involved
+- Add to flags_and_alerts as severity "critical": "Double pull detected: [funder] debited $X on [date1] and $Y on [date2] within 7 days"
+- This is a CRITICAL red flag — it may indicate the funder is pulling two separate advances or made an unauthorized extra pull`;
 
 export async function POST(request) {
   try {

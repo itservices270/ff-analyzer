@@ -32,6 +32,8 @@ Return ONLY valid JSON with this structure (no markdown, no backticks):
     "payment_amount": 0, "frequency": "weekly",
     "payments_in_period": 0, "monthly_total": 0,
     "confidence": "high|medium|low", "status": "active",
+    "fuzzy_match": false, "fuzzy_match_source": "string or null",
+    "double_pull": false, "double_pull_dates": [], "double_pull_amounts": [],
     "notes": ""
   }],
   "other_debt_service": [{
@@ -51,8 +53,11 @@ RULES:
 1. Monthly estimate = weekly × 4.33
 2. MCA = recurring ACH debits with "CAPITAL", "FUNDING", "ADVANCE", "MCA", "MERCHANT" etc.
 3. Term loans (monthly, declining) go in other_debt_service, NOT mca_positions
-4. Exclude MCA advance wires, NSF returns, transfers from revenue
-5. The text_content field should contain your best reading of every transaction — this will be used for the full multi-month analysis later`;
+4. Exclude MCA advance wires, NSF returns, transfers from revenue. ANY credit containing "WIRE", "ADVANCE", "GRP", "FUNDING", "CAPITAL", "LOAN", "PROCEEDS" → type "loan", is_excluded: true
+5. Do NOT lump MCA advance wires into ach_credits. They are loans, not revenue.
+6. The text_content field should contain your best reading of every transaction — this will be used for the full multi-month analysis later
+7. FUZZY NAME MATCHING: For OCR artifacts, normalize descriptors (strip spaces, lowercase, remove special chars), use token matching (60%+ overlap), substring matching (6+ chars), and known aliases: "Merchant Market8882711420"/"THE MERCHANT MARKETP"/"TMM" → "The Merchant Marketplace"; "TBF GRP"/"TBF GRPID:56085" → "TBF GRP"; "ROWANADVANCEGROUACHPAYMENT" → "Rowan Advance Group". If fuzzy matched, set fuzzy_match: true and fuzzy_match_source to original descriptor.
+8. DOUBLE-PULL DETECTION: If >1 debit from same funder within 7 days at DIFFERENT amounts, set double_pull: true with dates and amounts arrays.`;
 
 export async function POST(request) {
   try {

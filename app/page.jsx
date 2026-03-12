@@ -135,6 +135,87 @@ function getTagColor(posture) {
   return map[posture] || 'grey';
 }
 
+// ─── Agreement ↔ Position Matching & Payment Compliance ─────────────────────
+function matchAgreementToPosition(positionName, agreementResults) {
+  if (!positionName || !agreementResults || agreementResults.length === 0) return null;
+  const pName = (positionName || '').toLowerCase().replace(/[^a-z0-9]/g, '');
+  const pTokens = (positionName || '').toLowerCase().split(/\s+/).filter(t => t.length > 2);
+  return (agreementResults || []).find(ag => {
+    const agName = (ag?.analysis?.funder_name || '').toLowerCase();
+    if (!agName) return false;
+    const agNorm = agName.replace(/[^a-z0-9]/g, '');
+    // Exact normalized match
+    if (agNorm && pName && (agNorm.includes(pName.slice(0, 8)) || pName.includes(agNorm.slice(0, 8)))) return true;
+    // Token overlap
+    const agTokens = agName.split(/\s+/).filter(t => t.length > 2);
+    const overlap = pTokens.filter(t => agTokens.some(at => at.includes(t) || t.includes(at)));
+    if (agTokens.length > 0 && overlap.length / Math.max(agTokens.length, pTokens.length) >= 0.5) return true;
+    // First-word match (fallback)
+    const pFirst = pTokens[0] || '';
+    const agFirst = agTokens[0] || '';
+    return pFirst.length > 3 && agFirst.length > 3 && (agFirst.includes(pFirst) || pFirst.includes(agFirst));
+  }) || null;
+}
+
+function getContractWeekly(agMatch) {
+  if (!agMatch?.analysis) return null;
+  const ag = agMatch.analysis;
+  const w = ag.weekly_payment || ag.financial_terms?.specified_weekly_payment || 0;
+  if (w > 0) return w;
+  // Fall back to daily × 5 if only daily exists
+  const d = ag.daily_payment || ag.financial_terms?.specified_daily_payment || 0;
+  if (d > 0) return d * 5;
+  return null;
+}
+
+function buildPaymentCompliance(positions, agreementResults, monthlyBreakdown) {
+  if (!positions || positions.length === 0) return [];
+  const months = (monthlyBreakdown || []).map(m => m.month).sort();
+  const latestMonth = months.length > 0 ? months[months.length - 1] : null;
+
+  return positions.map(p => {
+    const agMatch = matchAgreementToPosition(p.funder_name, agreementResults);
+    const contractWeekly = getContractWeekly(agMatch);
+    const latestActual = p.payment_amount_current || p.payment_amount || 0;
+    const priorActual = p.payment_amount_original || latestActual;
+    const toWeekly = (amt, freq) => freq === 'daily' ? amt * 5 : freq === 'bi-weekly' ? amt / 2 : freq === 'monthly' ? amt / 4.33 : amt;
+    const latestWeekly = toWeekly(latestActual, p.frequency);
+    const priorWeekly = toWeekly(priorActual, p.frequency);
+
+    let contractStatus = null, contractDelta = 0, contractDeltaPct = 0;
+    if (contractWeekly && contractWeekly > 0) {
+      contractDelta = latestWeekly - contractWeekly;
+      contractDeltaPct = (contractDelta / contractWeekly) * 100;
+      if (Math.abs(contractDeltaPct) <= 1) contractStatus = 'match';
+      else if (contractDeltaPct > 1) contractStatus = 'overpull';
+      else contractStatus = 'underpull';
+    }
+
+    let paymentChanged = false, paymentChangeDelta = 0, paymentChangePct = 0;
+    if (priorWeekly > 0 && Math.abs(latestWeekly - priorWeekly) / priorWeekly > 0.01) {
+      paymentChanged = true;
+      paymentChangeDelta = latestWeekly - priorWeekly;
+      paymentChangePct = (paymentChangeDelta / priorWeekly) * 100;
+    }
+
+    return {
+      funder_name: p.funder_name,
+      _id: p._id,
+      contractWeekly,
+      priorWeekly,
+      latestWeekly,
+      frequency: p.frequency,
+      contractStatus,
+      contractDelta,
+      contractDeltaPct,
+      paymentChanged,
+      paymentChangeDelta,
+      paymentChangePct,
+      agMatch: agMatch?.analysis || null,
+    };
+  });
+}
+
 // ─── CSV Export ──────────────────────────────────────────────────────────────
 function buildCSV(a, activePositions, totalMCAMonthly, dsr, totalOtherDebt, totalDSR, trueFree, adjustedRevenue) {
   const m = { ...a.calculated_metrics, total_mca_monthly: totalMCAMonthly || a.calculated_metrics?.total_mca_monthly, dsr_percent: dsr || a.calculated_metrics?.dsr_percent };
@@ -271,7 +352,7 @@ function RevenueTab({ a, excludedDepositIds, setExcludedDepositIds }) {
 }
 
 // ─── MCA Tab ─────────────────────────────────────────────────────────────────
-function MCATab({ a, positions, setPositions, excludedIds, setExcludedIds, otherExcludedIds, setOtherExcludedIds, excludedDepositIds }) {
+function MCATab({ a, positions, setPositions, excludedIds, setExcludedIds, otherExcludedIds, setOtherExcludedIds, excludedDepositIds, agreementResults }) {
   const [addText, setAddText] = useState('');
   const [addLoading, setAddLoading] = useState(false);
   const [addError, setAddError] = useState(null);
@@ -339,6 +420,11 @@ function MCATab({ a, positions, setPositions, excludedIds, setExcludedIds, other
   const dsrPercent = (totalAllDebt / revenue) * 100;
   const mcaOnlyDSR = (totalMCAMonthly / revenue) * 100;
 
+  // Payment compliance: contract vs actual cross-reference
+  const compliance = buildPaymentCompliance(activePositions, agreementResults, a.monthly_breakdown);
+  const complianceMap = {};
+  compliance.forEach(c => { complianceMap[c._id] = c; });
+
   const exclude = (id) => setExcludedIds(prev => [...prev, id]);
   const restore = (id) => setExcludedIds(prev => prev.filter(x => x !== id));
 
@@ -403,6 +489,8 @@ function MCATab({ a, positions, setPositions, excludedIds, setExcludedIds, other
                 {(p.isEdited || p.isManual) && <span style={S.tag('cyan')}>(edited)</span>}
                 <span style={S.tag(p.confidence === 'high' ? 'green' : p.confidence === 'medium' ? 'amber' : p.confidence === 'manual' ? 'cyan' : 'grey')}>{p.confidence === 'manual' ? 'manual entry' : (p.confidence || 'medium') + ' confidence'}</span>
                 <span style={S.tag('grey')}>{p.frequency}</span>
+                {p.fuzzy_match && <span style={S.tag('amber')}>fuzzy match</span>}
+                {p.double_pull && <span style={S.tag('red')}>DOUBLE PULL</span>}
                 {p.status === 'paid_off' && <span style={S.tag('grey')}>PAID OFF - Verify</span>}
               </div>
             </div>
@@ -452,6 +540,25 @@ function MCATab({ a, positions, setPositions, excludedIds, setExcludedIds, other
               </span>
             </div>
           )}
+          {/* Double-pull alert */}
+          {p.double_pull && p.double_pull_dates && p.double_pull_dates.length > 0 && (
+            <div style={{ background: 'rgba(239,83,80,0.1)', border: '1px solid rgba(239,83,80,0.3)', borderRadius: 6, padding: '8px 12px', marginBottom: 10, fontSize: 12 }}>
+              <span style={{ color: '#ef9a9a' }}>🚨 Double Pull Detected</span>
+              <span style={{ color: 'rgba(232,232,240,0.5)', marginLeft: 8 }}>
+                {(p.double_pull_amounts || []).map((amt, i) => (
+                  <span key={i}>{i > 0 ? ' and ' : ''}{fmt(amt)} on {(p.double_pull_dates || [])[i]}</span>
+                ))}
+                <span style={{ color: 'rgba(232,232,240,0.4)' }}> — possible unauthorized extra pull or overlapping advances</span>
+              </span>
+            </div>
+          )}
+          {/* Fuzzy match info */}
+          {p.fuzzy_match && p.fuzzy_match_source && (
+            <div style={{ background: 'rgba(249,168,37,0.06)', border: '1px solid rgba(249,168,37,0.15)', borderRadius: 6, padding: '8px 12px', marginBottom: 10, fontSize: 12, color: 'rgba(232,232,240,0.5)' }}>
+              <span style={{ color: '#ffd54f' }}>⚡ Fuzzy Match</span>
+              <span style={{ marginLeft: 8 }}>Bank descriptor: <code style={{ background: 'rgba(0,0,0,0.3)', padding: '2px 6px', borderRadius: 4, fontSize: 11 }}>{p.fuzzy_match_source}</code></span>
+            </div>
+          )}
           {/* Advance deposit correlation */}
           {p.advance_deposit_date && p.advance_deposit_amount > 0 && (
             <div style={{ background: 'rgba(0,229,255,0.06)', border: '1px solid rgba(0,229,255,0.15)', borderRadius: 6, padding: '8px 12px', marginBottom: 10, fontSize: 12, color: 'rgba(232,232,240,0.55)' }}>
@@ -459,6 +566,57 @@ function MCATab({ a, positions, setPositions, excludedIds, setExcludedIds, other
               {p.days_from_deposit_to_payments > 0 && <span> · payments started {p.days_from_deposit_to_payments} days later</span>}
             </div>
           )}
+          {/* Contract vs Actual payment compliance */}
+          {(() => {
+            const pc = complianceMap[p._id];
+            if (!pc || !pc.contractWeekly) return null;
+            const statusColor = pc.contractStatus === 'match' ? '#4caf50' : pc.contractStatus === 'overpull' ? '#ef5350' : '#ffd54f';
+            const statusIcon = pc.contractStatus === 'match' ? '✓' : pc.contractStatus === 'overpull' ? '🚨' : '⚠';
+            const statusLabel = pc.contractStatus === 'match' ? 'MATCH' : pc.contractStatus === 'overpull' ? 'OVERPULL' : 'UNDERPULL';
+            return (
+              <div style={{ background: pc.contractStatus === 'overpull' ? 'rgba(239,83,80,0.08)' : pc.contractStatus === 'underpull' ? 'rgba(249,168,37,0.06)' : 'rgba(76,175,80,0.06)', border: `1px solid ${pc.contractStatus === 'overpull' ? 'rgba(239,83,80,0.25)' : pc.contractStatus === 'underpull' ? 'rgba(249,168,37,0.2)' : 'rgba(76,175,80,0.2)'}`, borderRadius: 6, padding: '10px 12px', marginBottom: 10, fontSize: 12 }}>
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 6 }}>
+                  <span style={{ color: statusColor, fontWeight: 600, letterSpacing: 0.5 }}>{statusIcon} {statusLabel}</span>
+                  <span style={S.tag(pc.contractStatus === 'match' ? 'green' : pc.contractStatus === 'overpull' ? 'red' : 'amber')}>agreement cross-ref</span>
+                </div>
+                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: 8 }}>
+                  <div>
+                    <div style={{ fontSize: 10, color: 'rgba(232,232,240,0.4)', marginBottom: 2 }}>Contract Payment</div>
+                    <div style={{ fontSize: 13, color: '#e8e8f0' }}>{fmt(pc.contractWeekly)}<span style={{ fontSize: 10, color: 'rgba(232,232,240,0.4)' }}>/wk</span></div>
+                  </div>
+                  <div>
+                    <div style={{ fontSize: 10, color: 'rgba(232,232,240,0.4)', marginBottom: 2 }}>Prior Actual</div>
+                    <div style={{ fontSize: 13, color: '#e8e8f0' }}>{fmt(pc.priorWeekly)}<span style={{ fontSize: 10, color: 'rgba(232,232,240,0.4)' }}>/wk</span></div>
+                  </div>
+                  <div>
+                    <div style={{ fontSize: 10, color: 'rgba(232,232,240,0.4)', marginBottom: 2 }}>Latest Actual</div>
+                    <div style={{ fontSize: 13, color: statusColor }}>{fmt(pc.latestWeekly)}<span style={{ fontSize: 10, color: 'rgba(232,232,240,0.4)' }}>/wk</span>
+                      {Math.abs(pc.contractDelta) > 0.01 && (
+                        <span style={{ color: statusColor, marginLeft: 6, fontSize: 11 }}>
+                          {pc.contractDelta > 0 ? '+' : ''}{fmt(pc.contractDelta)}
+                        </span>
+                      )}
+                    </div>
+                  </div>
+                </div>
+                {pc.contractStatus === 'overpull' && (
+                  <div style={{ marginTop: 6, fontSize: 11, color: '#ef9a9a', lineHeight: 1.5 }}>
+                    Funder is pulling {fmt(Math.abs(pc.contractDelta))} ({Math.abs(pc.contractDeltaPct).toFixed(1)}%) more than contractual amount
+                  </div>
+                )}
+                {pc.contractStatus === 'underpull' && (
+                  <div style={{ marginTop: 6, fontSize: 11, color: '#ffd54f', lineHeight: 1.5 }}>
+                    Funder is pulling {fmt(Math.abs(pc.contractDelta))} ({Math.abs(pc.contractDeltaPct).toFixed(1)}%) less than contractual amount — may indicate reconciliation
+                  </div>
+                )}
+                {pc.paymentChanged && (
+                  <div style={{ marginTop: 4, fontSize: 11, color: '#ffd54f' }}>
+                    Payment changed from {fmt(pc.priorWeekly)}/wk to {fmt(pc.latestWeekly)}/wk ({pc.paymentChangePct > 0 ? '+' : ''}{pc.paymentChangePct.toFixed(1)}%)
+                  </div>
+                )}
+              </div>
+            );
+          })()}
           <div style={{ fontSize: 12, color: 'rgba(232,232,240,0.45)', lineHeight: 1.6 }}>{p.pattern_description}</div>
           {(p.first_payment_date || p.last_payment_date) && (
             <div style={{ fontSize: 11, color: 'rgba(232,232,240,0.35)', marginTop: 6 }}>{p.first_payment_date} → {p.last_payment_date}</div>
@@ -1651,7 +1809,7 @@ function AgreementsTab({ agreementResults }) {
 }
 
 // ─── Cross-Reference Tab (NEW) ───────────────────────────────────────────────
-function CrossReferenceTab({ crossRefResult, agreementResults }) {
+function CrossReferenceTab({ crossRefResult, agreementResults, positions, a }) {
   if (!agreementResults || agreementResults.length === 0) {
     return (
       <div style={{ textAlign: 'center', padding: 40, color: 'rgba(232,232,240,0.4)' }}>
@@ -1694,6 +1852,70 @@ function CrossReferenceTab({ crossRefResult, agreementResults }) {
           {revenueReality.revenue_methodology && <div style={{ fontSize: 12, color: 'rgba(232,232,240,0.5)', marginTop: 10, lineHeight: 1.6 }}>{revenueReality.revenue_methodology}</div>}
         </div>
       )}
+
+      {/* Payment Compliance — Agreement vs Actual */}
+      {(() => {
+        const compliance = buildPaymentCompliance(positions || [], agreementResults, a?.monthly_breakdown);
+        const withContract = compliance.filter(c => c.contractWeekly);
+        if (withContract.length === 0) return null;
+        const overpulls = withContract.filter(c => c.contractStatus === 'overpull');
+        return (
+          <>
+            <div style={{ ...S.divider, marginTop: 4 }} />
+            <div style={S.sectionTitle}>Payment Compliance — Agreement vs Actual</div>
+            {overpulls.length > 0 && (
+              <div style={{ background: 'rgba(239,83,80,0.08)', border: '1px solid rgba(239,83,80,0.25)', borderRadius: 10, padding: 16, marginBottom: 16 }}>
+                <div style={{ fontSize: 13, color: '#ef9a9a', fontWeight: 600, marginBottom: 10 }}>OVERPULL DETECTED — {overpulls.length} Position{overpulls.length > 1 ? 's' : ''}</div>
+                {overpulls.map((c, i) => (
+                  <div key={i} style={{ fontSize: 12, color: '#ef9a9a', lineHeight: 1.8, marginBottom: 6, padding: '8px 12px', background: 'rgba(0,0,0,0.2)', borderRadius: 6 }}>
+                    <strong>OVERPULL DETECTED:</strong> {c.funder_name} is debiting {fmt(c.latestWeekly)}/wk — {fmt(Math.abs(c.contractDelta))} above their contractual weekly installment of {fmt(c.contractWeekly)}. This may constitute a breach of the MCA agreement.
+                  </div>
+                ))}
+              </div>
+            )}
+            <div style={{ display: 'grid', gap: 10 }}>
+              {withContract.map((c, i) => {
+                const statusColor = c.contractStatus === 'match' ? '#4caf50' : c.contractStatus === 'overpull' ? '#ef5350' : '#ffd54f';
+                const statusIcon = c.contractStatus === 'match' ? '✓' : c.contractStatus === 'overpull' ? '🚨' : '⚠';
+                return (
+                  <div key={i} style={{ ...S.funderCard, borderColor: c.contractStatus === 'overpull' ? 'rgba(239,83,80,0.3)' : undefined }}>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 10 }}>
+                      <div style={{ fontSize: 14, color: '#e8e8f0' }}>{c.funder_name}</div>
+                      <span style={S.tag(c.contractStatus === 'match' ? 'green' : c.contractStatus === 'overpull' ? 'red' : 'amber')}>{statusIcon} {c.contractStatus?.toUpperCase()}</span>
+                    </div>
+                    <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: 12 }}>
+                      <div>
+                        <div style={{ fontSize: 11, color: 'rgba(232,232,240,0.4)', marginBottom: 3 }}>Contract Payment</div>
+                        <div style={{ fontSize: 16, color: '#e8e8f0' }}>{fmt(c.contractWeekly)}<span style={{ fontSize: 11, color: 'rgba(232,232,240,0.4)' }}>/wk</span></div>
+                      </div>
+                      <div>
+                        <div style={{ fontSize: 11, color: 'rgba(232,232,240,0.4)', marginBottom: 3 }}>Prior Actual</div>
+                        <div style={{ fontSize: 16, color: '#e8e8f0' }}>{fmt(c.priorWeekly)}<span style={{ fontSize: 11, color: 'rgba(232,232,240,0.4)' }}>/wk</span></div>
+                      </div>
+                      <div>
+                        <div style={{ fontSize: 11, color: 'rgba(232,232,240,0.4)', marginBottom: 3 }}>Latest Actual</div>
+                        <div style={{ fontSize: 16, color: statusColor }}>
+                          {fmt(c.latestWeekly)}<span style={{ fontSize: 11, color: 'rgba(232,232,240,0.4)' }}>/wk</span>
+                          {Math.abs(c.contractDelta) > 0.01 && (
+                            <span style={{ fontSize: 12, color: statusColor, marginLeft: 6 }}>
+                              {c.contractDelta > 0 ? '+' : ''}{fmt(c.contractDelta)}
+                            </span>
+                          )}
+                        </div>
+                      </div>
+                    </div>
+                    {c.paymentChanged && (
+                      <div style={{ marginTop: 8, fontSize: 12, color: '#ffd54f', padding: '6px 10px', background: 'rgba(249,168,37,0.06)', borderRadius: 6 }}>
+                        Payment changed from {fmt(c.priorWeekly)}/wk to {fmt(c.latestWeekly)}/wk ({c.paymentChangePct > 0 ? '+' : ''}{c.paymentChangePct.toFixed(1)}%)
+                      </div>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+          </>
+        );
+      })()}
 
       {/* Cascading Burden Narrative */}
       {cascading.narrative && (
@@ -2457,8 +2679,21 @@ Days Until Likely Default: ${daysToDefault < 999 ? daysToDefault + ' days' : 'N/
 
 NOTE: All revenue figures are bank-statement verified — not merchant-reported estimates.`;
 
+    // Contract vs actual cross-reference for this funder
+    const agMatch = matchAgreementToPosition(ft2.name, agreementResults);
+    const contractWeekly = getContractWeekly(agMatch);
+    const currentWeeklyLabel = contractWeekly && contractWeekly > 0
+      ? `${f$(contractWeekly)} (per agreement)`
+      : f$(ft2.originalWeekly);
+    const overpullDelta = contractWeekly && contractWeekly > 0
+      ? ft2.originalWeekly - contractWeekly : 0;
+    const hasOverpull = overpullDelta > contractWeekly * 0.01;
+    const overpullNote = hasOverpull
+      ? `\nNote: Recent debits of ${f$(ft2.originalWeekly)} exceed your contractual installment — this has been noted in our analysis.`
+      : '';
+
     const proposalBlock = `YOUR POSITION:
-Your Current Weekly Payment:    ${f$(ft2.originalWeekly)}
+Your Current Weekly Payment:    ${currentWeeklyLabel}
 Proposed Weekly Payment:        ${f$(tier.weeklyPayment)}
 Weekly Reduction:               ${f$(tier.reductionDollars)} less per week
 Payment Reduction:              ${tier.reductionPct.toFixed(1)}%
@@ -2466,7 +2701,7 @@ Your Original Term:             ${ft2.originalTermWeeks} weeks
 Proposed Term:                  ${tier.proposedTermWeeks} weeks
 Term Extension:                 +${tier.extensionPct.toFixed(1)}% longer
 Total Repayment:                ${f$(ft2.balance)} — 100% of your balance
-Payments Begin:                 Within 72 hours of agreement`;
+Payments Begin:                 Within 72 hours of agreement${overpullNote}`;
 
     const defaultRecovery = Math.round(ft2.balance * 0.35);
     const defaultNet = Math.round(defaultRecovery * 0.7);
@@ -2619,8 +2854,8 @@ ${signature}`;
   const negTierColors = ['#00bcd4', '#f59e0b', '#ef5350'];
   const negTierLabels = ['Opening (50%)', 'Revised (75%)', 'Final (100%)'];
 
-  const statusColors = { include: '#00e5ff', buyout: '#CFA529', exclude: 'rgba(232,232,240,0.3)' };
-  const statusLabels = { include: 'Include', buyout: 'Buyout', exclude: 'Exclude' };
+  const statusColors = { include: '#00e5ff', buyout: '#CFA529', exclude: 'rgba(232,232,240,0.3)', paid_off: '#4caf50' };
+  const statusLabels = { include: 'Include', buyout: 'Buyout', exclude: 'Exclude', paid_off: 'Paid Off' };
 
   return (
     <div>
@@ -2674,14 +2909,20 @@ ${signature}`;
           {uwFunders.map((f, i) => {
             const st = f.status;
             const isExcluded = st !== 'include';
+            const isPaidOff = st === 'paid_off';
+            const nameColor = isPaidOff ? '#4caf50' : isExcluded ? 'rgba(232,232,240,0.4)' : '#e8e8f0';
+            const borderColor = isPaidOff ? 'rgba(76,175,80,0.3)' : isExcluded ? 'rgba(255,255,255,0.06)' : 'rgba(0,229,255,0.2)';
             return (
-              <div key={i} style={{ flex: '1 1 200px', background: isExcluded ? 'rgba(255,255,255,0.02)' : 'rgba(255,255,255,0.04)', border: `1px solid ${isExcluded ? 'rgba(255,255,255,0.06)' : 'rgba(0,229,255,0.2)'}`, borderRadius: 10, padding: '12px 14px', opacity: isExcluded ? 0.5 : 1 }}>
-                <div style={{ fontSize: 13, color: isExcluded ? 'rgba(232,232,240,0.4)' : '#e8e8f0', fontWeight: 600, marginBottom: 4, textDecoration: isExcluded ? 'line-through' : 'none' }}>{f.name}</div>
+              <div key={i} style={{ flex: '1 1 200px', background: isExcluded ? 'rgba(255,255,255,0.02)' : 'rgba(255,255,255,0.04)', border: `1px solid ${borderColor}`, borderRadius: 10, padding: '12px 14px', opacity: isExcluded && !isPaidOff ? 0.5 : isPaidOff ? 0.65 : 1 }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 4 }}>
+                  <span style={{ fontSize: 13, color: nameColor, fontWeight: 600, textDecoration: isExcluded ? 'line-through' : 'none', textDecorationColor: isPaidOff ? '#4caf50' : undefined }}>{f.name}</span>
+                  {isPaidOff && <span style={{ fontSize: 9, background: 'rgba(76,175,80,0.2)', color: '#4caf50', padding: '1px 6px', borderRadius: 4, fontWeight: 700, textTransform: 'uppercase', letterSpacing: 0.5 }}>PAID OFF</span>}
+                </div>
                 <div style={{ fontSize: 11, color: 'rgba(232,232,240,0.4)', marginBottom: 6 }}>{fmt(toWeeklyEquiv(f.payment, f.frequency))}/wk · {fmt(f.balance)} bal</div>
                 <input type="number" value={balances[i] || ''} onChange={e => setBalances(b => ({ ...b, [i]: e.target.value }))} placeholder="Balance $" style={{ width: '100%', padding: '5px 8px', borderRadius: 6, border: '1px solid rgba(0,229,255,0.2)', background: 'rgba(0,0,0,0.3)', color: '#e8e8f0', fontSize: 12, fontFamily: 'inherit', boxSizing: 'border-box', marginBottom: 8 }} />
-                <div style={{ display: 'flex', gap: 4 }}>
-                  {['include', 'buyout', 'exclude'].map(s2 => (
-                    <button key={s2} onClick={() => setPositionStatuses(prev => ({ ...prev, [i]: s2 }))} style={{ flex: 1, padding: '4px 2px', borderRadius: 5, fontSize: 10, fontWeight: 600, cursor: 'pointer', border: `1px solid ${st === s2 ? statusColors[s2] : 'rgba(255,255,255,0.08)'}`, background: st === s2 ? `${statusColors[s2]}22` : 'transparent', color: st === s2 ? statusColors[s2] : 'rgba(232,232,240,0.4)', textTransform: 'uppercase', letterSpacing: 0.3, fontFamily: 'inherit' }}>
+                <div style={{ display: 'flex', gap: 3 }}>
+                  {['include', 'buyout', 'exclude', 'paid_off'].map(s2 => (
+                    <button key={s2} onClick={() => setPositionStatuses(prev => ({ ...prev, [i]: s2 }))} style={{ flex: 1, padding: '4px 1px', borderRadius: 5, fontSize: 9, fontWeight: 600, cursor: 'pointer', border: `1px solid ${st === s2 ? statusColors[s2] : 'rgba(255,255,255,0.08)'}`, background: st === s2 ? `${statusColors[s2]}22` : 'transparent', color: st === s2 ? statusColors[s2] : 'rgba(232,232,240,0.4)', textTransform: 'uppercase', letterSpacing: 0.2, fontFamily: 'inherit' }}>
                       {statusLabels[s2]}
                     </button>
                   ))}
@@ -2911,7 +3152,9 @@ function TrendTab({ a }) {
     );
   }
 
-  const revenues = trend?.monthly_revenues || monthly.map(m => ({ month: m.month, amount: m.net_verified_revenue }));
+  const rawRevenues = trend?.monthly_revenues || monthly.map(m => ({ month: m.month, amount: m.net_verified_revenue }));
+  // Normalize: trend data uses 'revenue' key, monthly fallback uses 'amount' — unify to 'amount'
+  const revenues = rawRevenues.map(r => ({ month: r.month, amount: r.amount ?? r.revenue ?? 0 }));
   const maxRev = Math.max(...revenues.map(r => r.amount), 1);
 
   return (
@@ -3724,10 +3967,10 @@ export default function FFAnalyzer() {
           <div style={S.card}>
             {activeTab === 0 && <RevenueTab a={result.analysis} excludedDepositIds={excludedDepositIds} setExcludedDepositIds={setExcludedDepositIds} />}
             {activeTab === 1 && <TrendTab a={result.analysis} />}
-            {activeTab === 2 && <MCATab a={result.analysis} positions={positions} setPositions={setPositions} excludedIds={excludedIds} setExcludedIds={setExcludedIds} otherExcludedIds={otherExcludedIds} setOtherExcludedIds={setOtherExcludedIds} excludedDepositIds={excludedDepositIds} />}
+            {activeTab === 2 && <MCATab a={result.analysis} positions={positions} setPositions={setPositions} excludedIds={excludedIds} setExcludedIds={setExcludedIds} otherExcludedIds={otherExcludedIds} setOtherExcludedIds={setOtherExcludedIds} excludedDepositIds={excludedDepositIds} agreementResults={agreementResults} />}
             {activeTab === 3 && <RiskTab a={result.analysis} positions={positions} excludedIds={excludedIds} otherExcludedIds={otherExcludedIds} excludedDepositIds={excludedDepositIds} />}
             {activeTab === 4 && <AgreementsTab agreementResults={agreementResults} />}
-            {activeTab === 5 && <CrossReferenceTab crossRefResult={crossRefResult} agreementResults={agreementResults} />}
+            {activeTab === 5 && <CrossReferenceTab crossRefResult={crossRefResult} agreementResults={agreementResults} positions={positions} a={result.analysis} />}
             {activeTab === 6 && <NegotiationTab a={result.analysis} positions={positions} excludedIds={excludedIds} otherExcludedIds={otherExcludedIds} excludedDepositIds={excludedDepositIds} agreementResults={agreementResults} />}
             {activeTab === 7 && <ConfidenceTab a={result.analysis} positions={positions} excludedIds={excludedIds} excludedDepositIds={excludedDepositIds} />}
             {activeTab === 8 && <ExportTab a={result.analysis} fileName={result.file_name || 'analysis'} positions={positions} excludedIds={excludedIds} otherExcludedIds={otherExcludedIds} excludedDepositIds={excludedDepositIds} agreementResults={agreementResults} />}

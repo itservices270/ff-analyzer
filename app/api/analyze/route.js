@@ -56,7 +56,12 @@ Analyze this bank statement text thoroughly and return ONLY a valid JSON object 
       "days_from_deposit_to_payments": 0,
       "pattern_description": "string",
       "confidence": "high|medium|low",
-      "flag": "standard|modified|undisclosed|default_modified"
+      "flag": "standard|modified|undisclosed|default_modified|double_pull",
+      "fuzzy_match": false,
+      "fuzzy_match_source": "string or null",
+      "double_pull": false,
+      "double_pull_dates": [],
+      "double_pull_amounts": []
     }
   ],
 
@@ -120,8 +125,9 @@ CRITICAL EXTRACTION RULES:
 1. MCA detection: Look for recurring ACH debits with consistent amounts on daily/weekly patterns. Known funders include: OnDeck, TBF GRP, The Merchant Marketplace, TMM, Fundkite, Libertas, Forward Financing, Fora Financial, Rapid Finance, Credibly, Kapitus, CAN Capital, Newtek, FleetCor Funding, Cantaloupe, Square Capital, and any "CAPITAL", "FUNDING", "ADVANCE", "MCA", "MERCHANT" in ACH descriptions. CRITICAL: A single funder can have MULTIPLE simultaneous advances — if you see two different recurring payment amounts from the same funder name, list them as SEPARATE positions with a suffix e.g. "The Merchant Marketplace (Advance 1)" and "The Merchant Marketplace (Advance 2)". Never merge two different payment amounts from the same funder into one position. Look carefully at every unique recurring debit amount separately.
 2. PAYMENT MODIFICATION DETECTION: For each funder, scan ALL payments across the entire statement chronologically. If the payment amount CHANGED at any point (e.g. was $3,000/week for first 3 weeks then dropped to $1,500/week), set payment_modified=true, flag="default_modified", record payment_amount_original (what it was before), payment_amount_current (most recent payment), modification_date (first date the new amount appeared), and modification_direction ("reduced" or "increased"). The payment_amount field should always reflect the CURRENT/MOST RECENT payment amount. A reduced payment is a strong signal of default modification or hardship agreement.
 3. ADVANCE DEPOSIT CORRELATION: Look for large lump-sum credits from funder names (these are the MCA advance proceeds). Record advance_deposit_amount and advance_deposit_date. Calculate days_from_deposit_to_payments as the number of days between the deposit date and the first payment date. This helps estimate remaining balance and advance age.
-4. Revenue exclusions: Exclude MCA advance proceeds (large round-number credits labeled with funder names), inter-account transfers, SBA/loan proceeds.
+4. Revenue exclusions: Exclude MCA advance proceeds (large round-number credits labeled with funder names), inter-account transfers, SBA/loan proceeds. ANY credit containing keywords: "WIRE", "ADVANCE", "GRP", "FUNDING", "CAPITAL", "LOAN", "PROCEEDS" should be classified as type "loan" with is_excluded: true — unless it clearly matches a known revenue processor (Square, Cantaloupe, USA Technologies, etc.).
 5. Card processing credits (Square, Three Square MAR, LE-USA TECHNOL, Cantaloupe Payouts) are TRUE REVENUE.
+5a. ACH CREDITS CLASSIFICATION: Do NOT lump all ACH credits together. ACH from known processors → type "card_processing" or "ach_credit", is_excluded: false. ACH from MCA funders or containing "wire/advance/grp/funding/capital" → type "loan", is_excluded: true. Never combine MCA advance wires into the ach_credits revenue bucket.
 6. NSF risk score formula: +15 per NSF event, +10 per overdraft, +20 if NSF in final 10 days, +15 if increasing trend. Max 100.
 7. DSR = total_mca_monthly / net_verified_revenue * 100
 8. Free cash = net_verified_revenue - total_mca_monthly - total_operating_expenses
@@ -130,7 +136,18 @@ CRITICAL EXTRACTION RULES:
 Do NOT include MCA or loan payments in expense_categories — only true operating costs. For vending businesses, inventory purchases go in inventory_cogs only, never double-counted.
 11. Be precise with dollar amounts. Cross-reference the balance summary totals with your transaction tallies.
 12. If this is a vending business (Square, Cantaloupe, USA Technologies credits), card processing settlements are the primary revenue source.
-13. estimated_monthly_total should always be calculated using payment_amount_current (most recent payment), not the original amount.`;
+13. estimated_monthly_total should always be calculated using payment_amount_current (most recent payment), not the original amount.
+
+FUZZY NAME MATCHING FOR OCR ARTIFACTS:
+When matching funder names across transactions, apply these techniques:
+1. NORMALIZE: Strip spaces, lowercase, remove special chars. "Merchant Market8882711420" → "merchantmarket8882711420"
+2. TOKEN MATCH: 60%+ token overlap = match. "MERCH MKTPLCE HLDGS" matches "Merchant Marketplace Holdings"
+3. SUBSTRING MATCH: 6+ char substring of known funder = match. "ROWANADVANCEGROU" matches "Rowan Advance Group"
+4. KNOWN ALIASES: "Merchant Market8882711420"/"THE MERCHANT MARKETP"/"TMM" → "The Merchant Marketplace"; "TBF GRP"/"TBF GRPID:56085" → "TBF GRP"; "ROWANADVANCEGROUACHPAYMENT"/"ROWAN ADVANCE" → "Rowan Advance Group"; "ONDECK CAPITAL"/"ONDECK CAP" → "OnDeck Capital"; "Newtek S Bus Fin"/"NEWTEK" → "Newtek"
+If fuzzy/alias matched, set fuzzy_match: true and fuzzy_match_source to the original bank descriptor.
+
+DOUBLE-PULL DETECTION:
+If >1 debit from the same funder within a 7-day window at DIFFERENT amounts, set double_pull: true, double_pull_dates: [dates], double_pull_amounts: [amounts]. Add critical flag: "Double pull detected: [funder] debited $X on [date1] and $Y on [date2] within 7 days". Does NOT apply to regular same-amount daily/weekly patterns.`;
 
 export async function POST(request) {
   try {
