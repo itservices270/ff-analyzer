@@ -2245,6 +2245,100 @@ function toWeeklyEquiv(payment, frequency) {
   return payment; // weekly
 }
 
+// ─── Position Deduplication ──────────────────────────────────────────────────
+// Groups multiple advances from the same funder into one consolidated record.
+// Uses normalized name matching to identify same-funder positions.
+function normalizeFunderKey(name) {
+  return (name || '').toLowerCase().replace(/[^a-z0-9]/g, '').replace(/advance\d*|position[a-z]?|pos[a-z]?|\(.*?\)/g, '').trim();
+}
+
+function deduplicatePositions(allPositions, balances, positionStatuses, agreementResults) {
+  const groups = {};
+  const groupOrder = [];
+
+  allPositions.forEach((p, i) => {
+    const key = normalizeFunderKey(p.funder_name);
+    // Also try first-word match for cases like "The Merchant Marketplace (Advance 1)"
+    const firstWord = (p.funder_name || '').toLowerCase().split(/\s+/)[0];
+    const matchKey = key.length >= 6 ? key : (firstWord.length >= 4 ? firstWord : `_pos_${i}`);
+
+    // Find existing group with overlapping key
+    let foundGroup = null;
+    for (const gk of groupOrder) {
+      const gKey = normalizeFunderKey(groups[gk].positions[0].funder_name);
+      if (matchKey.length >= 6 && gKey.length >= 6 && (matchKey.includes(gKey.slice(0, 6)) || gKey.includes(matchKey.slice(0, 6)))) {
+        foundGroup = gk;
+        break;
+      }
+    }
+
+    if (foundGroup) {
+      groups[foundGroup].positions.push(p);
+      groups[foundGroup].indices.push(i);
+    } else {
+      groups[matchKey] = { positions: [p], indices: [i] };
+      groupOrder.push(matchKey);
+    }
+  });
+
+  return groupOrder.map(gk => {
+    const g = groups[gk];
+    if (g.positions.length === 1) {
+      const i = g.indices[0];
+      return {
+        ...g.positions[0],
+        _dedupId: gk,
+        _sourceIndices: [i],
+        _advanceCount: 1,
+        _consolidatedBalance: parseFloat(balances[i]) || 0,
+        _consolidatedStatus: positionStatuses[i] || 'include',
+        _consolidatedWeekly: toWeeklyEquiv(g.positions[0].payment_amount_current || g.positions[0].payment_amount || 0, g.positions[0].frequency),
+      };
+    }
+
+    // Multiple positions from same funder — consolidate
+    const primary = g.positions[0]; // use first as primary name
+    const cleanName = primary.funder_name.replace(/\s*\(Advance\s*\d+\)/i, '').replace(/\s*\(Position\s*[A-Z]\)/i, '').trim();
+    const totalBalance = g.indices.reduce((s, i) => s + (parseFloat(balances[i]) || 0), 0);
+    const totalWeekly = g.positions.reduce((s, p) => s + toWeeklyEquiv(p.payment_amount_current || p.payment_amount || 0, p.frequency), 0);
+
+    // Status: if any is 'include', consolidated is 'include'; else use first non-exclude
+    const statuses = g.indices.map(i => positionStatuses[i] || 'include');
+    const consolidatedStatus = statuses.includes('include') ? 'include' : statuses.includes('buyout') ? 'buyout' : statuses[0];
+
+    // If agreement exists, prefer agreement balance
+    const agMatch = (agreementResults || []).find(ag => {
+      const agName = (ag?.analysis?.funder_name || '').toLowerCase();
+      const pName = cleanName.toLowerCase();
+      return agName && pName && (agName.includes(pName.split(' ')[0]) || pName.includes(agName.split(' ')[0]));
+    });
+    const agBalance = agMatch?.analysis?.financial_terms?.purchased_amount;
+    const finalBalance = agBalance ? Math.round(agBalance) : totalBalance;
+
+    return {
+      ...primary,
+      funder_name: cleanName,
+      _dedupId: gk,
+      _sourceIndices: g.indices,
+      _advanceCount: g.positions.length,
+      _advances: g.positions.map((p, idx) => ({
+        name: p.funder_name,
+        payment: p.payment_amount_current || p.payment_amount || 0,
+        frequency: p.frequency,
+        weekly: toWeeklyEquiv(p.payment_amount_current || p.payment_amount || 0, p.frequency),
+        depositAmount: p.advance_deposit_amount || 0,
+        depositDate: p.advance_deposit_date || null,
+      })),
+      _consolidatedBalance: finalBalance,
+      _consolidatedStatus: consolidatedStatus,
+      _consolidatedWeekly: totalWeekly,
+      payment_amount_current: totalWeekly, // total of all advances
+      frequency: 'weekly', // normalized to weekly
+      estimated_monthly_total: totalWeekly * 4.33,
+    };
+  });
+}
+
 function calcSmartAlloc(uwFunders) {
   const tiers = [
     { name: 'Opening Offer', multiplier: 2.0, freq: 'bi-weekly' },
@@ -2396,21 +2490,46 @@ function ExportTab({ a, fileName, positions, excludedIds, otherExcludedIds, excl
     return init;
   });
 
-  const uwFunders = allPositions.map((p, i) => ({
+  // Deduplicate positions: group same-funder advances into one record
+  const dedupedPositions = useLocalMemo(
+    () => deduplicatePositions(allPositions, balances, positionStatuses, agreementResults),
+    [JSON.stringify(allPositions.map(p => p.funder_name)), JSON.stringify(balances), JSON.stringify(positionStatuses)]
+  );
+
+  // ── Enrollment state: separate from classification ──
+  // Enrolled = position participates in FF restructuring program (gets TAD allocation, appears in emails)
+  // Unenrolled = still counts toward DSR/debt burden but does NOT get TAD or appear in negotiation
+  const [enrolled, setEnrolled] = useLocalState(() => {
+    const init = {};
+    dedupedPositions.forEach((dp, i) => {
+      init[i] = dp._consolidatedStatus !== 'paid_off';
+    });
+    return init;
+  });
+
+  const uwFunders = dedupedPositions.map((dp, i) => ({
     id: i,
-    name: p.funder_name || `Funder ${i + 1}`,
-    payment: p.payment_amount_current || p.payment_amount || 0,
-    frequency: p.frequency || 'weekly',
-    balance: parseFloat(balances[i]) || 0,
-    status: positionStatuses[i] || 'include',
+    name: dp.funder_name || `Funder ${i + 1}`,
+    payment: dp._consolidatedWeekly,
+    frequency: 'weekly',
+    balance: dp._consolidatedBalance > 0 ? dp._consolidatedBalance : (parseFloat(balances[dp._sourceIndices[0]]) || 0),
+    status: dp._consolidatedStatus,
+    enrolled: enrolled[i] !== false,
+    _advanceCount: dp._advanceCount,
+    _advances: dp._advances || null,
+    _sourceIndices: dp._sourceIndices,
   }));
 
-  // Filtered sets
-  const includedFunders = uwFunders.filter(f => f.status === 'include' && f.balance > 0);
+  // Filtered sets — enrolled funders get TAD allocation; all included count toward DSR
+  const includedFunders = uwFunders.filter(f => f.status === 'include' && f.balance > 0 && f.enrolled);
   const totalDebt = uwFunders.reduce((s, f) => s + f.balance, 0);
   const includedDebt = includedFunders.reduce((s, f) => s + f.balance, 0);
   const totalCurrentWeekly = uwFunders.reduce((s, f) => s + toWeeklyEquiv(f.payment, f.frequency), 0);
   const includedCurrentWeekly = includedFunders.reduce((s, f) => s + toWeeklyEquiv(f.payment, f.frequency), 0);
+  const dsrOnlyFunders = uwFunders.filter(f => f.status === 'include' && f.balance > 0 && !f.enrolled);
+  const enrolledCount = includedFunders.length;
+  const dsrOnlyCount = dsrOnlyFunders.length;
+  const activeCount = enrolledCount + dsrOnlyCount;
 
   // ISO Pricing math
   const reductionPct = UW_SETTINGS.baseReduction - (isoPoints * UW_SETTINGS.reductionPerPoint);
@@ -2978,26 +3097,49 @@ ${signature}`;
 
       {/* 2. POSITION MANAGEMENT */}
       <div style={{ ...S.divider }} />
-      <div style={S.sectionTitle}>Position Management</div>
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 }}>
+        <div style={S.sectionTitle}>Position Management</div>
+        <div style={{ fontSize: 11, color: 'rgba(232,232,240,0.5)' }}>
+          Enrolled: <span style={{ color: '#00e5ff', fontWeight: 700 }}>{enrolledCount}</span> of {activeCount} active
+          {dsrOnlyCount > 0 && <span style={{ marginLeft: 8 }}>· DSR-only: <span style={{ color: '#ffd54f', fontWeight: 600 }}>{dsrOnlyCount}</span></span>}
+        </div>
+      </div>
       <div style={{ marginBottom: 20 }}>
         <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap' }}>
           {uwFunders.map((f, i) => {
             const st = f.status;
             const isExcluded = st !== 'include';
             const isPaidOff = st === 'paid_off';
+            const isEnrolled = f.enrolled;
             const nameColor = isPaidOff ? '#4caf50' : isExcluded ? 'rgba(232,232,240,0.4)' : '#e8e8f0';
-            const borderColor = isPaidOff ? 'rgba(76,175,80,0.3)' : isExcluded ? 'rgba(255,255,255,0.06)' : 'rgba(0,229,255,0.2)';
+            const borderColor = isPaidOff ? 'rgba(76,175,80,0.3)' : isExcluded ? 'rgba(255,255,255,0.06)' : isEnrolled ? 'rgba(0,229,255,0.2)' : 'rgba(255,200,50,0.2)';
             return (
               <div key={i} style={{ flex: '1 1 200px', background: isExcluded ? 'rgba(255,255,255,0.02)' : 'rgba(255,255,255,0.04)', border: `1px solid ${borderColor}`, borderRadius: 10, padding: '12px 14px', opacity: isExcluded && !isPaidOff ? 0.5 : isPaidOff ? 0.65 : 1 }}>
                 <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 4 }}>
                   <span style={{ fontSize: 13, color: nameColor, fontWeight: 600, textDecoration: isExcluded ? 'line-through' : 'none', textDecorationColor: isPaidOff ? '#4caf50' : undefined }}>{f.name}</span>
                   {isPaidOff && <span style={{ fontSize: 9, background: 'rgba(76,175,80,0.2)', color: '#4caf50', padding: '1px 6px', borderRadius: 4, fontWeight: 700, textTransform: 'uppercase', letterSpacing: 0.5 }}>PAID OFF</span>}
+                  {f._advanceCount > 1 && <span style={{ fontSize: 9, background: 'rgba(0,229,255,0.15)', color: '#00e5ff', padding: '1px 6px', borderRadius: 4, fontWeight: 700 }}>{f._advanceCount} advances</span>}
                 </div>
-                <div style={{ fontSize: 11, color: 'rgba(232,232,240,0.4)', marginBottom: 6 }}>{fmt(toWeeklyEquiv(f.payment, f.frequency))}/wk · {fmt(f.balance)} bal</div>
-                <input type="number" value={balances[i] || ''} onChange={e => setBalances(b => ({ ...b, [i]: e.target.value }))} placeholder="Balance $" style={{ width: '100%', padding: '5px 8px', borderRadius: 6, border: '1px solid rgba(0,229,255,0.2)', background: 'rgba(0,0,0,0.3)', color: '#e8e8f0', fontSize: 12, fontFamily: 'inherit', boxSizing: 'border-box', marginBottom: 8 }} />
+                <div style={{ fontSize: 11, color: 'rgba(232,232,240,0.4)', marginBottom: 4 }}>{fmt(toWeeklyEquiv(f.payment, f.frequency))}/wk · {fmt(f.balance)} bal</div>
+                {f._advances && f._advanceCount > 1 && (
+                  <div style={{ fontSize: 10, color: 'rgba(232,232,240,0.3)', marginBottom: 4, lineHeight: 1.6 }}>
+                    {f._advances.map((adv, ai) => (
+                      <div key={ai}>Adv {ai + 1}: {fmt(adv.weekly)}/wk{adv.depositDate ? ` · funded ${adv.depositDate}` : ''}</div>
+                    ))}
+                  </div>
+                )}
+                <input type="number" value={(() => { const idx = f._sourceIndices[0]; return balances[idx] || ''; })()} onChange={e => { const updates = {}; f._sourceIndices.forEach(idx => { updates[idx] = e.target.value; }); setBalances(b => ({ ...b, ...updates })); }} placeholder="Balance $" style={{ width: '100%', padding: '5px 8px', borderRadius: 6, border: '1px solid rgba(0,229,255,0.2)', background: 'rgba(0,0,0,0.3)', color: '#e8e8f0', fontSize: 12, fontFamily: 'inherit', boxSizing: 'border-box', marginBottom: 6 }} />
+                {/* Enrollment checkbox */}
+                {st === 'include' && (
+                  <label style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 6, cursor: 'pointer', userSelect: 'none' }}>
+                    <input type="checkbox" checked={isEnrolled} onChange={e => setEnrolled(prev => ({ ...prev, [i]: e.target.checked }))} style={{ accentColor: '#00e5ff', width: 14, height: 14, cursor: 'pointer' }} />
+                    <span style={{ fontSize: 10, color: isEnrolled ? '#00e5ff' : 'rgba(232,232,240,0.4)', fontWeight: 600, letterSpacing: 0.3 }}>Enroll in Program</span>
+                    {!isEnrolled && <span style={{ fontSize: 9, color: '#ffd54f', fontWeight: 500 }}>(DSR only)</span>}
+                  </label>
+                )}
                 <div style={{ display: 'flex', gap: 3 }}>
                   {['include', 'buyout', 'exclude', 'paid_off'].map(s2 => (
-                    <button key={s2} onClick={() => setPositionStatuses(prev => ({ ...prev, [i]: s2 }))} style={{ flex: 1, padding: '4px 1px', borderRadius: 5, fontSize: 9, fontWeight: 600, cursor: 'pointer', border: `1px solid ${st === s2 ? statusColors[s2] : 'rgba(255,255,255,0.08)'}`, background: st === s2 ? `${statusColors[s2]}22` : 'transparent', color: st === s2 ? statusColors[s2] : 'rgba(232,232,240,0.4)', textTransform: 'uppercase', letterSpacing: 0.2, fontFamily: 'inherit' }}>
+                    <button key={s2} onClick={() => { const updates = {}; f._sourceIndices.forEach(idx => { updates[idx] = s2; }); setPositionStatuses(prev => ({ ...prev, ...updates })); }} style={{ flex: 1, padding: '4px 1px', borderRadius: 5, fontSize: 9, fontWeight: 600, cursor: 'pointer', border: `1px solid ${st === s2 ? statusColors[s2] : 'rgba(255,255,255,0.08)'}`, background: st === s2 ? `${statusColors[s2]}22` : 'transparent', color: st === s2 ? statusColors[s2] : 'rgba(232,232,240,0.4)', textTransform: 'uppercase', letterSpacing: 0.2, fontFamily: 'inherit' }}>
                       {statusLabels[s2]}
                     </button>
                   ))}

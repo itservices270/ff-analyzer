@@ -4,6 +4,124 @@ export const maxDuration = 120;
 
 const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
 
+// ─── Payload Trimming ────────────────────────────────────────────────────────
+// Strip raw text, transaction lists, and verbose fields to stay within limits.
+function trimBankAnalysis(ba) {
+  if (!ba) return {};
+  return {
+    business_name: ba.business_name,
+    bank_name: ba.bank_name,
+    statement_period: ba.statement_period,
+    statement_month: ba.statement_month,
+    statement_periods: ba.statement_periods,
+    balance_summary: ba.balance_summary,
+    revenue: ba.revenue ? {
+      gross_deposits: ba.revenue.gross_deposits,
+      net_verified_revenue: ba.revenue.net_verified_revenue,
+      monthly_average_revenue: ba.revenue.monthly_average_revenue,
+      excluded_mca_proceeds: ba.revenue.excluded_mca_proceeds,
+      excluded_transfers: ba.revenue.excluded_transfers,
+      excluded_loan_proceeds: ba.revenue.excluded_loan_proceeds,
+      revenue_sources: (ba.revenue.revenue_sources || []).map(s => ({
+        name: s.name, type: s.type, total: s.total,
+        monthly_avg: s.monthly_avg, is_excluded: s.is_excluded,
+      })),
+    } : undefined,
+    mca_positions: (ba.mca_positions || []).map(p => ({
+      funder_name: p.funder_name,
+      payment_amount: p.payment_amount,
+      payment_amount_current: p.payment_amount_current,
+      payment_amount_original: p.payment_amount_original,
+      frequency: p.frequency,
+      payments_detected: p.payments_detected,
+      estimated_monthly_total: p.estimated_monthly_total,
+      first_payment_date: p.first_payment_date,
+      last_payment_date: p.last_payment_date,
+      payment_modified: p.payment_modified,
+      modification_direction: p.modification_direction,
+      advance_deposit_amount: p.advance_deposit_amount,
+      advance_deposit_date: p.advance_deposit_date,
+      confidence: p.confidence,
+      flag: p.flag,
+      status: p.status,
+    })),
+    other_debt_service: ba.other_debt_service,
+    expense_categories: ba.expense_categories,
+    nsf_analysis: ba.nsf_analysis ? {
+      nsf_count: ba.nsf_analysis.nsf_count,
+      overdraft_count: ba.nsf_analysis.overdraft_count,
+      nsf_risk_score: ba.nsf_analysis.nsf_risk_score,
+    } : undefined,
+    calculated_metrics: ba.calculated_metrics,
+    negotiation_intel: ba.negotiation_intel,
+    monthly_breakdown: (ba.monthly_breakdown || []).map(m => ({
+      month: m.month,
+      revenue: m.revenue || m.net_verified_revenue,
+      total_deposits: m.total_deposits,
+      total_withdrawals: m.total_withdrawals,
+      ending_balance: m.ending_balance,
+      mca_positions: (m.mca_positions || []).map(p => ({
+        funder_name: p.funder_name,
+        payment_amount: p.payment_amount,
+        payment_amount_current: p.payment_amount_current,
+        frequency: p.frequency,
+        payments_detected: p.payments_detected,
+        estimated_monthly_total: p.estimated_monthly_total,
+      })),
+    })),
+  };
+}
+
+function trimAgreement(ag) {
+  if (!ag) return {};
+  return {
+    funder_name: ag.funder_name,
+    seller_name: ag.seller_name,
+    effective_date: ag.effective_date,
+    funding_date: ag.funding_date,
+    governing_law_state: ag.governing_law_state,
+    purchase_price: ag.purchase_price,
+    purchased_amount: ag.purchased_amount,
+    factor_rate: ag.factor_rate,
+    weekly_payment: ag.weekly_payment,
+    daily_payment: ag.daily_payment,
+    payment_frequency: ag.payment_frequency,
+    specified_percentage: ag.specified_percentage,
+    origination_fee: ag.origination_fee,
+    prior_balance_amount: ag.prior_balance_amount,
+    prior_balance_paid_to: ag.prior_balance_paid_to,
+    prior_balance_is_self_renewal: ag.prior_balance_is_self_renewal,
+    net_to_seller: ag.net_to_seller,
+    stated_monthly_revenue: ag.stated_monthly_revenue,
+    reconciliation_right: ag.reconciliation_right,
+    reconciliation_days: ag.reconciliation_days,
+    anti_stacking_clause: ag.anti_stacking_clause,
+    coj_clause: ag.coj_clause,
+    coj_state: ag.coj_state,
+    financial_terms: ag.financial_terms ? {
+      purchase_price: ag.financial_terms.purchase_price,
+      purchased_amount: ag.financial_terms.purchased_amount,
+      factor_rate: ag.financial_terms.factor_rate,
+      specified_daily_payment: ag.financial_terms.specified_daily_payment,
+      specified_weekly_payment: ag.financial_terms.specified_weekly_payment,
+      specified_payment_frequency: ag.financial_terms.specified_payment_frequency,
+      specified_receivable_percentage: ag.financial_terms.specified_receivable_percentage,
+      stated_merchant_revenue: ag.financial_terms.stated_merchant_revenue,
+      estimated_term_weeks: ag.financial_terms.estimated_term_weeks,
+    } : undefined,
+    fee_analysis: ag.fee_analysis ? {
+      origination_fee: ag.fee_analysis.origination_fee,
+      total_fees: ag.fee_analysis.total_fees,
+      total_fees_pct_of_purchase: ag.fee_analysis.total_fees_pct_of_purchase,
+      net_proceeds_to_merchant: ag.fee_analysis.net_proceeds_to_merchant,
+      true_factor_rate: ag.fee_analysis.true_factor_rate,
+      effective_annual_rate: ag.fee_analysis.effective_annual_rate,
+    } : undefined,
+    stacking_analysis: ag.stacking_analysis,
+    negotiation_leverage: ag.negotiation_leverage,
+  };
+}
+
 const XREF_PROMPT = `You are a senior MCA restructuring analyst for Funders First Inc. You have 15+ years of experience negotiating MCA restructurings and you are now performing the most critical step: CROSS-REFERENCING the contracted agreement terms against the actual bank statement data.
 
 This is the analysis that makes funders negotiate. You are proving, with math, that their underwriting was flawed, their contracted terms don't match reality, and restructuring is the rational path to 100% recovery.
@@ -214,27 +332,46 @@ export async function POST(request) {
 
     const selectedModel = model === 'sonnet' ? 'claude-sonnet-4-20250514' : 'claude-opus-4-20250514';
 
-    // Build the context payload
+    // Trim payloads — send only the fields Claude needs, not raw text/PDFs
+    const trimmedBank = trimBankAnalysis(bankAnalysis);
+    const trimmedAgreements = agreementAnalyses.map(a => trimAgreement(a));
+
     const contextPayload = `## BANK STATEMENT ANALYSIS (source of truth for actual numbers):
-${JSON.stringify(bankAnalysis, null, 2)}
+${JSON.stringify(trimmedBank, null, 2)}
 
-## MCA AGREEMENT ANALYSES (${agreementAnalyses.length} agreements):
-${agreementAnalyses.map((a, i) => `### Agreement ${i + 1}: ${a.funder_name || 'Unknown'}\n${JSON.stringify(a, null, 2)}`).join('\n\n')}`;
+## MCA AGREEMENT ANALYSES (${trimmedAgreements.length} agreements):
+${trimmedAgreements.map((a, i) => `### Agreement ${i + 1}: ${a.funder_name || 'Unknown'}\n${JSON.stringify(a, null, 2)}`).join('\n\n')}`;
 
-    // Truncate if massive
-    const truncated = contextPayload.length > 150000
-      ? contextPayload.slice(0, 150000) + '\n[TRUNCATED]'
-      : contextPayload;
+    console.log(`Cross-ref payload size: ${contextPayload.length} chars, ${trimmedAgreements.length} agreements, model: ${selectedModel}`);
 
-    const response = await client.messages.create({
-      model: selectedModel,
-      max_tokens: 16000,
-      temperature: 0,
-      messages: [{
-        role: 'user',
-        content: `${XREF_PROMPT}\n\nDATA TO CROSS-REFERENCE:\n\n${truncated}`
-      }]
-    });
+    // AbortController: fail gracefully before Vercel's 120s limit
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 110000);
+
+    let response;
+    try {
+      response = await client.messages.create({
+        model: selectedModel,
+        max_tokens: 16000,
+        temperature: 0,
+        messages: [{
+          role: 'user',
+          content: `${XREF_PROMPT}\n\nDATA TO CROSS-REFERENCE:\n\n${contextPayload}`
+        }]
+      }, { signal: controller.signal });
+    } catch (abortErr) {
+      clearTimeout(timeout);
+      if (abortErr.name === 'AbortError' || controller.signal.aborted) {
+        console.error('Cross-ref timed out after 110s');
+        return Response.json({
+          error: 'Analysis timed out — try with fewer agreements loaded or switch to Sonnet.',
+          partial: true
+        }, { status: 408 });
+      }
+      throw abortErr;
+    } finally {
+      clearTimeout(timeout);
+    }
 
     const rawText = response.content.filter(b => b.type === 'text').map(b => b.text).join('');
     const cleaned = rawText.replace(/```json\n?/g, '').replace(/```\n?/g, '').trim();
@@ -251,13 +388,15 @@ ${agreementAnalyses.map((a, i) => `### Agreement ${i + 1}: ${a.funder_name || 'U
       if (start >= 0 && end > start) {
         try {
           analysis = JSON.parse(cleaned.slice(start, end));
-        } catch {
+        } catch (parseErr) {
+          console.error('Cross-ref JSON parse failed:', parseErr.message, 'Raw (first 500):', cleaned.slice(0, 500));
           return Response.json({
             error: 'Cross-reference analysis returned malformed data. Try re-analyzing.',
             debug: cleaned.slice(0, 500)
           }, { status: 500 });
         }
       } else {
+        console.error('Cross-ref no JSON found in response. Raw (first 500):', cleaned.slice(0, 500));
         return Response.json({
           error: 'Cross-reference did not return structured data.',
           debug: cleaned.slice(0, 500)
@@ -273,7 +412,7 @@ ${agreementAnalyses.map((a, i) => `### Agreement ${i + 1}: ${a.funder_name || 'U
     });
 
   } catch (err) {
-    console.error('Cross-reference error:', err);
+    console.error('Cross-ref error:', err.message, err.stack);
     return Response.json({
       error: err.message || 'Cross-reference failed'
     }, { status: 500 });
