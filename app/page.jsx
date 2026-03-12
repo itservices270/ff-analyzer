@@ -1,5 +1,5 @@
 'use client';
-import { useState, useCallback, useRef } from 'react';
+import React, { useState, useCallback, useRef, useMemo } from 'react';
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 const fmt = (n) => '$' + (parseFloat(n) || 0).toLocaleString('en-US', { minimumFractionDigits: 0, maximumFractionDigits: 0 });
@@ -895,7 +895,7 @@ function NegotiationTab({ a, positions, excludedIds, otherExcludedIds, excludedD
           totalMCAMonthly={totalMCAMonthly}
           dsr={dsr}
           weeksToInsolvency={m.weeks_to_insolvency}
-          adbDays={a.balance_summary?.avg_daily_balance ? Math.round(a.balance_summary.avg_daily_balance / (totalMCAMonthly / 30)) : null}
+          adbDays={a.balance_summary?.avg_daily_balance && totalMCAMonthly > 0 ? Math.round(a.balance_summary.avg_daily_balance / (totalMCAMonthly / 30)) : null}
           grossProfit={revenue - (a.expense_categories?.inventory_cogs || 0)}
           opex={opexForNeg}
         />
