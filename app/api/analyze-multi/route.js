@@ -28,6 +28,8 @@ EXCLUSIONS — NEVER COUNT AS REVENUE:
 • Returned ACH debits: When a funder's ACH bounces, the bank credits back the amount — this is NOT revenue
 • "CREDIT MEMO" entries under $100 — bank fee adjustments
 • Inter-account transfers: "TRANSFER FROM", "TRANSFER IN" between own accounts
+• STAFFING COMPANIES: "AMF TEAM" / "AMFTEAM" / "AMF STAFFING" / any credit containing "STAFFING" → type: "transfer", is_excluded: true. These are staffing company payments/refunds, NOT revenue.
+• Any credit containing "TRANSFER" that is NOT from a known revenue processor → type: "transfer", is_excluded: true
 
 ACH CREDITS CLASSIFICATION (CRITICAL — DO NOT LUMP ALL ACH TOGETHER):
 • ACH credits from known processors (Cantaloupe, USA Technologies, Square, First Data) → type: "card_processing" or "ach_credit", is_excluded: false
@@ -295,7 +297,7 @@ If you see debits from the same payee at DIFFERENT amounts on the SAME dates or 
 
 2. MULTIPLE POSITIONS: Same funder with different amounts = SEPARATE positions. Merchant Market at $11,693/wk AND $9,764/wk = TWO positions.
 
-3. WIRE TRACKING: List EACH MCA wire as separate revenue_source entry with its own date. Never combine or sum multiple wires from same funder.
+3. WIRE TRACKING: List EACH MCA wire as separate revenue_source entry with its own date. Never combine or sum multiple wires from same funder. EVERY excluded transaction (MCA wires, staffing credits, transfers) MUST appear in the revenue_sources array with is_excluded: true. If a wire appears as an advance_deposit on an MCA position, it must ALSO appear in revenue_sources as type "loan", is_excluded: true.
 
 4. DSR DENOMINATOR: dsr_percent = total_mca_monthly / (monthly_average_revenue × 0.60). Use gross profit, NOT revenue.
 
@@ -349,8 +351,19 @@ If MORE THAN ONE debit from the same funder occurs within a 7-day window at DIFF
 - Set double_pull: true on the position
 - Set double_pull_dates to the array of dates involved
 - Set double_pull_amounts to the array of amounts involved
+- payments_detected should count ALL debits attributed to this position (including double-pull debits)
+- estimated_monthly_total should be the SUM of all debits in the most recent month, not just one payment
 - Add to flags_and_alerts as severity "critical": "Double pull detected: [funder] debited $X on [date1] and $Y on [date2] within 7 days"
-- This is a CRITICAL red flag — it may indicate the funder is pulling two separate advances or made an unauthorized extra pull`;
+- This is a CRITICAL red flag — it may indicate the funder is pulling two separate advances or made an unauthorized extra pull
+
+## DATE RANGE AND PAYMENT COUNTING RULES
+
+- first_payment_date = the EARLIEST debit date detected for this position across all months
+- last_payment_date = the LATEST debit date detected for this position across all months
+- If only ONE payment was detected, set last_payment_date to "present" (indicating the position is still active)
+- payments_detected = total COUNT of ALL debits attributed to this position across all months
+- If a funder has double-pull debits (two different amounts in same week), count BOTH as separate payments
+- estimated_monthly_total should reflect the ACTUAL total debited in the most recent month (sum all debits for that month)`;
 
 export async function POST(request) {
   try {

@@ -647,7 +647,7 @@ function MCATab({ a, positions, setPositions, excludedIds, setExcludedIds, other
           })()}
           <div style={{ fontSize: 12, color: 'rgba(232,232,240,0.45)', lineHeight: 1.6 }}>{p.pattern_description}</div>
           {(p.first_payment_date || p.last_payment_date) && (
-            <div style={{ fontSize: 11, color: 'rgba(232,232,240,0.35)', marginTop: 6 }}>{p.first_payment_date} → {p.last_payment_date}</div>
+            <div style={{ fontSize: 11, color: 'rgba(232,232,240,0.35)', marginTop: 6 }}>{p.first_payment_date} → {(!p.last_payment_date || p.last_payment_date === p.first_payment_date || p.last_payment_date === 'present') && p.status !== 'paid_off' ? 'present' : p.last_payment_date}</div>
           )}
           <div style={{ marginTop: 10 }}>
             <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 11, color: 'rgba(232,232,240,0.4)', marginBottom: 4 }}>
@@ -2105,15 +2105,23 @@ function ConfidenceTab({ a, positions, excludedIds, excludedDepositIds, agreemen
   const monthsCount = a.monthly_breakdown?.length || 0;
   const hasAgreements = (agreementResults || []).length > 0;
 
-  // Per-field confidence scoring — calibrated realistically
-  const revenueConfidence = monthsCount >= 3 ? 'high' : monthsCount >= 2 ? 'medium' : 'low';
-  const dsrConfidence = activePositions.length > 0 && activePositions.every(p => p.confidence === 'high') ? 'high' : activePositions.some(p => p.confidence === 'low') ? 'low' : 'medium';
-  const grossProfitConfidence = 'medium'; // COGS is always estimated without a P&L
-  const opexConfidence = 'low'; // No P&L provided — OpEx is inferred from bank debits
-  const adbConfidence = (a.balance_summary?.avg_daily_balance || a.adb_by_month?.length > 0) ? 'high' : 'medium';
-  const daysToDefaultConfidence = 'medium'; // Projection, not a fact
-  const balanceEstConfidence = hasAgreements ? 'medium' : 'low'; // Better with agreements but still estimated
-  const nsfConfidence = monthsCount >= 2 ? 'high' : 'medium'; // Direct count from statements
+  // Per-field confidence scoring — DETERMINISTIC RULES (no AI dependency)
+  // Revenue: HIGH if 3+ months, MEDIUM if 1-2, LOW if 0
+  const revenueConfidence = monthsCount >= 3 ? 'high' : monthsCount >= 1 ? 'medium' : 'low';
+  // DSR: HIGH if we have revenue AND confirmed MCA payment amounts from statements
+  const hasConfirmedPayments = activePositions.length > 0 && activePositions.some(p => (p.payments_detected || 0) >= 2);
+  const dsrConfidence = (monthsCount >= 1 && hasConfirmedPayments) ? 'high' : 'medium';
+  // Gross Profit: ALWAYS MEDIUM — COGS is estimated without P&L
+  const grossProfitConfidence = 'medium';
+  // OpEx: ALWAYS LOW — inferred from debits, no P&L
+  const opexConfidence = 'low';
+  // ADB: HIGH if daily balances available, MEDIUM if only end-of-month
+  const adbConfidence = (a.adb_by_month?.length > 0 || a.balance_summary?.avg_daily_balance > 0) ? 'high' : 'medium';
+  // Days to Default: ALWAYS MEDIUM — projection, not fact
+  const daysToDefaultConfidence = 'medium';
+  // NSF: HIGH if text-readable statements, MEDIUM if scanned
+  const hasScannedStatements = (a.revenue_confidence === 'partial' || a.revenue_confidence === 'low');
+  const nsfConfidence = hasScannedStatements ? 'medium' : (monthsCount >= 1 ? 'high' : 'medium');
 
   // Build the field confidence list for accurate counting
   const fieldConfidences = [
@@ -2181,21 +2189,28 @@ function ConfidenceTab({ a, positions, excludedIds, excludedDepositIds, agreemen
 
       {/* Position Confidence Detail */}
       <div style={S.divider} />
-      <div style={S.sectionTitle}>Position Confidence Detail</div>
-      {allPositions.map((p, i) => (
-        <div key={i} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '10px 12px', background: i%2===0 ? 'rgba(255,255,255,0.03)' : 'transparent', borderRadius: 6, opacity: (excludedIds || []).includes(p._id) ? 0.4 : 1 }}>
-          <div style={{ flex: 1 }}>
-            <div style={{ fontSize: 13, color: '#e8e8f0' }}>{p.funder_name} {p.isManual && <span style={{ fontSize: 10, color: '#00e5ff' }}>(manual)</span>}</div>
-            <div style={{ fontSize: 11, color: 'rgba(232,232,240,0.4)' }}>
-              {fmt(p.payment_amount_current || p.payment_amount)}/{p.frequency} · {p.payments_detected || 0} payments · {p.status || 'active'}
+      <div style={S.sectionTitle}>Per-Funder Balance Confidence</div>
+      <div style={{ fontSize: 11, color: 'rgba(232,232,240,0.4)', marginBottom: 12 }}>HIGH = agreement uploaded & matched, MEDIUM = estimated from statement debits, LOW = manually entered</div>
+      {allPositions.map((p, i) => {
+        // Deterministic per-position confidence: HIGH if agreement matched, MEDIUM if detected from statements, LOW if manual
+        const agMatch = matchAgreementToPosition(p.funder_name, agreementResults);
+        const posConf = p.isManual ? 'low' : agMatch ? 'high' : (p.payments_detected || 0) >= 2 ? 'medium' : 'low';
+        const posNote = p.isManual ? 'Manually entered — no supporting data' : agMatch ? 'Agreement uploaded & matched' : (p.payments_detected || 0) >= 2 ? 'Estimated from statement debits' : 'Few payments detected — verify';
+        return (
+          <div key={i} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '10px 12px', background: i%2===0 ? 'rgba(255,255,255,0.03)' : 'transparent', borderRadius: 6, opacity: (excludedIds || []).includes(p._id) ? 0.4 : 1 }}>
+            <div style={{ flex: 1 }}>
+              <div style={{ fontSize: 13, color: '#e8e8f0' }}>{p.funder_name} {p.isManual && <span style={{ fontSize: 10, color: '#00e5ff' }}>(manual)</span>}</div>
+              <div style={{ fontSize: 11, color: 'rgba(232,232,240,0.4)' }}>
+                {fmt(p.payment_amount_current || p.payment_amount)}/{p.frequency} · {p.payments_detected || 0} payments · {posNote}
+              </div>
+            </div>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+              <span style={S.tag(posConf === 'high' ? 'green' : posConf === 'low' ? 'red' : 'amber')}>{posConf}</span>
+              {posConf === 'low' && <span style={{ cursor: 'pointer', opacity: 0.6 }} title="Edit this position">✏️</span>}
             </div>
           </div>
-          <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-            <span style={S.tag(p.confidence === 'high' ? 'green' : p.confidence === 'low' ? 'red' : p.confidence === 'manual' ? 'cyan' : 'amber')}>{p.confidence || 'unknown'}</span>
-            {(p.confidence === 'low' || p.confidence === 'manual') && <span style={{ cursor: 'pointer', opacity: 0.6 }} title="Edit this position">✏️</span>}
-          </div>
-        </div>
-      ))}
+        );
+      })}
 
       {/* Analysis Alerts */}
       {flags.length > 0 && (

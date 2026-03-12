@@ -53,7 +53,7 @@ RULES:
 1. Monthly estimate = weekly × 4.33
 2. MCA = recurring ACH debits with "CAPITAL", "FUNDING", "ADVANCE", "MCA", "MERCHANT" etc.
 3. Term loans (monthly, declining) go in other_debt_service, NOT mca_positions
-4. Exclude MCA advance wires, NSF returns, transfers from revenue. Credits containing "WIRE", "ADVANCE", "GRP", "FUNDING", "CAPITAL", "LOAN", "PROCEEDS" that match a known MCA funder → type "loan", is_excluded: true
+4. Exclude MCA advance wires, NSF returns, transfers from revenue. Credits containing "WIRE", "ADVANCE", "GRP", "FUNDING", "CAPITAL", "LOAN", "PROCEEDS" that match a known MCA funder → type "loan", is_excluded: true. "AMF TEAM"/"AMFTEAM"/"STAFFING" → type "transfer", is_excluded: true. Credits with "TRANSFER" (not from revenue processors) → type "transfer", is_excluded: true
 5. Do NOT lump MCA advance wires into ach_credits. They are loans, not revenue.
 5a. PROTECTED REVENUE: "ROUTE"/"ROUTE COLLECTION", "CUSTOMER"/"CUST PMT", "VEND"/"VENDING" → always TRUE REVENUE (ach_credit, is_excluded: false). Any ACH credit NOT matching a known funder → default to ach_credit, is_excluded: false.
 6. The text_content field should contain your best reading of every transaction — this will be used for the full multi-month analysis later
