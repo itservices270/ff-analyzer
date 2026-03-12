@@ -737,20 +737,125 @@ function RiskTab({ a, positions, excludedIds, otherExcludedIds, excludedDepositI
 }
 
 // ─── Negotiation Tab ──────────────────────────────────────────────────────────
-function NegotiationTab({ a, positions, excludedIds, otherExcludedIds, excludedDepositIds }) {
+function NegotiationTab({ a, positions, excludedIds, otherExcludedIds, excludedDepositIds, agreementResults }) {
   const intel = a.negotiation_intel || {};
   const activePositions = (positions || a.mca_positions || []).filter(p => !(excludedIds || []).includes(p._id));
   const totalMCAMonthly = activePositions.reduce((s, p) => s + (p.estimated_monthly_total || 0), 0);
   const activeOther = (a.other_debt_service || []).filter((_, i) => !(otherExcludedIds || []).includes(i));
   const totalOtherDebt = activeOther.reduce((s, o) => s + (o.monthly_total || 0), 0);
   const revenue = calcAdjustedRevenue(a, excludedDepositIds);
+  const cogs = a.expense_categories?.inventory_cogs || 0;
+  const grossProfit = revenue - cogs;
   const freeCashAfterMCA = revenue - totalMCAMonthly;
-  const dsr = (totalMCAMonthly / revenue) * 100;
+  // DSR using gross profit as denominator (FF method per knowledge base)
+  const dsr = grossProfit > 0 ? (totalMCAMonthly / grossProfit) * 100 : 0;
+  const dsrRevenue = revenue > 0 ? (totalMCAMonthly / revenue) * 100 : 0; // Traditional DSR for comparison
   const posture = dsr > 50 ? 'unsustainable' : dsr > 35 ? 'critical' : dsr > 25 ? 'stressed' : dsr > 15 ? 'elevated' : 'healthy';
   const opexForNeg = a.expense_categories?.total_operating_expenses || 0;
   const trueFreeForNeg = freeCashAfterMCA - totalOtherDebt - opexForNeg;
   const m = { ...a.calculated_metrics, free_cash_after_mca: freeCashAfterMCA, total_mca_monthly: totalMCAMonthly, dsr_percent: dsr };
   const color = dsrColor(posture);
+
+  // Build stacking violation narrative from agreement data
+  const stackingViolations = useMemo(() => {
+    if (!agreementResults || agreementResults.length === 0) return null;
+    const violations = [];
+    const fundingTimeline = [];
+
+    // Build funding timeline from agreements and bank-detected positions
+    agreementResults.forEach(ar => {
+      const d = ar.analysis || ar;
+      const fundingDate = d.funding_date || d.purchase_date || d.contract_date;
+      const hasAntiStack = d.stacking_analysis?.has_anti_stacking_clause ||
+        (d.key_clauses || []).some(c => c.clause_type === 'anti_stacking');
+      if (fundingDate && d.funder_name) {
+        fundingTimeline.push({
+          funder: d.funder_name,
+          date: new Date(fundingDate),
+          dateStr: fundingDate,
+          amount: d.purchase_amount || d.funding_amount || 0,
+          hasAntiStack,
+          antiStackText: d.stacking_analysis?.anti_stacking_text_summary ||
+            (d.key_clauses || []).find(c => c.clause_type === 'anti_stacking')?.clause_text_summary || ''
+        });
+      }
+    });
+
+    // Also add bank-detected advance deposits
+    activePositions.forEach(p => {
+      if (p.advance_deposit_date && !fundingTimeline.find(f => f.funder === p.funder_name)) {
+        fundingTimeline.push({
+          funder: p.funder_name,
+          date: new Date(p.advance_deposit_date),
+          dateStr: p.advance_deposit_date,
+          amount: p.advance_deposit_amount || 0,
+          hasAntiStack: false,
+          source: 'bank'
+        });
+      }
+    });
+
+    // Sort by date
+    fundingTimeline.sort((a, b) => a.date - b.date);
+
+    // Check for violations - each funder that funded AFTER other positions existed
+    fundingTimeline.forEach((entry, idx) => {
+      if (idx > 0) {
+        const priorStack = fundingTimeline.slice(0, idx);
+        const priorWeekly = priorStack.reduce((sum, p) => {
+          const pos = activePositions.find(ap => ap.funder_name === p.funder);
+          return sum + (pos ? (pos.payment_amount || pos.payment_amount_current || 0) : 0);
+        }, 0);
+
+        if (priorStack.length > 0 && entry.hasAntiStack) {
+          violations.push({
+            funder: entry.funder,
+            fundingDate: entry.dateStr,
+            priorPositions: priorStack.length,
+            priorFunders: priorStack.map(p => p.funder).join(', '),
+            priorWeeklyBurden: priorWeekly,
+            hasAntiStack: entry.hasAntiStack,
+            antiStackText: entry.antiStackText
+          });
+        }
+      }
+    });
+
+    return { violations, timeline: fundingTimeline };
+  }, [agreementResults, activePositions]);
+
+  const generateStackingNarrative = () => {
+    if (!stackingViolations || stackingViolations.violations.length === 0) return null;
+    const v = stackingViolations.violations;
+    const timeline = stackingViolations.timeline;
+
+    let narrative = `STACKING VIOLATION ANALYSIS:\n\n`;
+    narrative += `This merchant has ${timeline.length} MCA positions. Timeline analysis reveals the following:\n\n`;
+
+    timeline.forEach((entry, idx) => {
+      const weeklyPayment = activePositions.find(p => p.funder_name === entry.funder)?.payment_amount || 0;
+      narrative += `${idx + 1}. ${entry.funder} — Funded ${entry.dateStr}`;
+      if (entry.amount) narrative += ` ($${entry.amount.toLocaleString()})`;
+      if (weeklyPayment) narrative += ` — $${weeklyPayment.toLocaleString()}/week`;
+      if (idx > 0) {
+        const priorCount = idx;
+        narrative += `\n   ⚠️ At funding: ${priorCount} existing position${priorCount > 1 ? 's' : ''} already in place`;
+      }
+      narrative += '\n';
+    });
+
+    if (v.length > 0) {
+      narrative += `\nVIOLATIONS DETECTED:\n`;
+      v.forEach(viol => {
+        narrative += `• ${viol.funder} funded on ${viol.fundingDate} with an anti-stacking clause, `;
+        narrative += `despite ${viol.priorPositions} existing position${viol.priorPositions > 1 ? 's' : ''} `;
+        narrative += `(${viol.priorFunders}) totaling $${viol.priorWeeklyBurden.toLocaleString()}/week.\n`;
+        narrative += `  Their own anti-stacking clause was violated at origination, materially impairing their enforcement standing.\n`;
+      });
+    }
+
+    return narrative;
+  };
   return (
     <div>
       {/* Free Cash Headlines */}
@@ -850,6 +955,94 @@ function NegotiationTab({ a, positions, excludedIds, otherExcludedIds, excludedD
             <div style={{ fontWeight: 600, marginBottom: 4 }}>Impossibility Statement</div>
             <div style={{ lineHeight: 1.7 }}>{intel.impossibility_statement}</div>
           </div>
+        </div>
+      )}
+
+      {/* DSR Comparison - Gross Profit vs Revenue */}
+      {cogs > 0 && (
+        <div style={{ background: 'rgba(234,208,104,0.08)', border: '1px solid rgba(234,208,104,0.2)', borderRadius: 10, padding: 16, marginBottom: 20 }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 12 }}>
+            <span style={{ fontSize: 16 }}>📊</span>
+            <div style={{ fontSize: 13, fontWeight: 600, color: '#EAD068', letterSpacing: 0.5 }}>DSR METHODOLOGY — FF vs Traditional</div>
+          </div>
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 16 }}>
+            <div style={{ background: 'rgba(255,255,255,0.04)', borderRadius: 8, padding: 14 }}>
+              <div style={{ fontSize: 11, color: 'rgba(232,232,240,0.45)', marginBottom: 6 }}>Traditional DSR (vs Revenue)</div>
+              <div style={{ fontSize: 22, color: dsrRevenue > 35 ? '#ef5350' : dsrRevenue > 25 ? '#ff9800' : '#ffd54f' }}>{fmtP(dsrRevenue)}</div>
+              <div style={{ fontSize: 11, color: 'rgba(232,232,240,0.4)', marginTop: 4 }}>{fmt(totalMCAMonthly)} ÷ {fmt(revenue)}</div>
+            </div>
+            <div style={{ background: 'rgba(255,255,255,0.04)', borderRadius: 8, padding: 14 }}>
+              <div style={{ fontSize: 11, color: 'rgba(232,232,240,0.45)', marginBottom: 6 }}>FF DSR (vs Gross Profit)</div>
+              <div style={{ fontSize: 22, color }}>{fmtP(dsr)}</div>
+              <div style={{ fontSize: 11, color: 'rgba(232,232,240,0.4)', marginTop: 4 }}>{fmt(totalMCAMonthly)} ÷ {fmt(grossProfit)}</div>
+            </div>
+          </div>
+          <div style={{ fontSize: 11, color: 'rgba(232,232,240,0.5)', marginTop: 12, lineHeight: 1.6 }}>
+            <strong>Why Gross Profit?</strong> The FF method uses Gross Profit (Revenue − COGS) as the true available cash for debt service. COGS of {fmt(cogs)}/mo must be paid to keep the business operating. This shows the real burden on available cash.
+          </div>
+        </div>
+      )}
+
+      {/* Stacking Violation Narrative */}
+      {stackingViolations && stackingViolations.timeline.length > 1 && (
+        <div style={{ background: 'rgba(239,83,80,0.08)', border: '1px solid rgba(239,83,80,0.25)', borderRadius: 10, padding: 16, marginBottom: 20 }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 14 }}>
+            <span style={{ fontSize: 16 }}>⚠️</span>
+            <div style={{ fontSize: 13, fontWeight: 600, color: '#ef9a9a', letterSpacing: 0.5 }}>STACKING VIOLATION ANALYSIS</div>
+          </div>
+
+          {/* Timeline */}
+          <div style={{ marginBottom: 16 }}>
+            <div style={{ fontSize: 11, color: 'rgba(232,232,240,0.45)', marginBottom: 10, textTransform: 'uppercase', letterSpacing: 0.5 }}>Funding Timeline</div>
+            {stackingViolations.timeline.map((entry, idx) => {
+              const weeklyPayment = activePositions.find(p => p.funder_name === entry.funder)?.payment_amount || 0;
+              const priorCount = idx;
+              return (
+                <div key={idx} style={{ display: 'flex', gap: 12, marginBottom: 10, alignItems: 'flex-start' }}>
+                  <div style={{ width: 24, height: 24, borderRadius: '50%', background: idx === 0 ? 'rgba(76,175,80,0.2)' : 'rgba(239,83,80,0.2)', border: `1px solid ${idx === 0 ? 'rgba(76,175,80,0.4)' : 'rgba(239,83,80,0.4)'}`, display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 11, color: idx === 0 ? '#81c784' : '#ef9a9a', flexShrink: 0 }}>{idx + 1}</div>
+                  <div style={{ flex: 1 }}>
+                    <div style={{ fontSize: 13, color: '#e8e8f0', marginBottom: 2 }}>
+                      <strong>{entry.funder}</strong> — {entry.dateStr}
+                      {entry.amount > 0 && <span style={{ color: 'rgba(232,232,240,0.5)' }}> ({fmt(entry.amount)})</span>}
+                      {weeklyPayment > 0 && <span style={{ color: '#ef9a9a' }}> — {fmt(weeklyPayment)}/week</span>}
+                    </div>
+                    {priorCount > 0 && (
+                      <div style={{ fontSize: 11, color: '#ffd54f' }}>
+                        ⚠️ {priorCount} existing position{priorCount > 1 ? 's' : ''} at time of funding
+                        {entry.hasAntiStack && <span style={{ color: '#ef9a9a' }}> — HAS ANTI-STACKING CLAUSE</span>}
+                      </div>
+                    )}
+                    {idx === 0 && <div style={{ fontSize: 11, color: '#81c784' }}>✓ First position (no violation)</div>}
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+
+          {/* Violations */}
+          {stackingViolations.violations.length > 0 && (
+            <div style={{ background: 'rgba(239,83,80,0.1)', borderRadius: 8, padding: 14, marginBottom: 14 }}>
+              <div style={{ fontSize: 11, color: '#ef9a9a', marginBottom: 8, textTransform: 'uppercase', letterSpacing: 0.5, fontWeight: 600 }}>Violations Detected</div>
+              {stackingViolations.violations.map((v, idx) => (
+                <div key={idx} style={{ fontSize: 12, color: 'rgba(232,232,240,0.7)', lineHeight: 1.7, marginBottom: idx < stackingViolations.violations.length - 1 ? 10 : 0 }}>
+                  <strong>{v.funder}</strong> funded on {v.fundingDate} with an anti-stacking clause, despite {v.priorPositions} existing position{v.priorPositions > 1 ? 's' : ''} ({v.priorFunders}) totaling {fmt(v.priorWeeklyBurden)}/week. <em style={{ color: '#ffd54f' }}>Their own anti-stacking clause was violated at origination, materially impairing their enforcement standing.</em>
+                </div>
+              ))}
+            </div>
+          )}
+
+          {/* Copy Narrative */}
+          <button
+            onClick={() => {
+              const narrative = generateStackingNarrative();
+              if (narrative) {
+                navigator.clipboard.writeText(narrative);
+              }
+            }}
+            style={{ ...S.btn('secondary'), padding: '8px 14px', fontSize: 12 }}
+          >
+            📋 Copy Stacking Narrative
+          </button>
         </div>
       )}
 
@@ -1521,9 +1714,12 @@ function ConfidenceTab({ a, positions, excludedIds, excludedDepositIds }) {
 
   const revenue = calcAdjustedRevenue(a, excludedDepositIds);
   const totalMCAMonthly = activePositions.reduce((s, p) => s + (p.estimated_monthly_total || 0), 0);
-  const dsr = revenue > 0 ? (totalMCAMonthly / revenue) * 100 : 0;
-  const grossProfit = revenue - (a.expense_categories?.inventory_cogs || 0);
-  const mcaBurden = revenue > 0 ? (totalMCAMonthly / revenue) * 100 : 0;
+  const cogs = a.expense_categories?.inventory_cogs || 0;
+  const grossProfit = revenue - cogs;
+  // DSR using gross profit (FF method) vs revenue (traditional)
+  const dsr = grossProfit > 0 ? (totalMCAMonthly / grossProfit) * 100 : 0;
+  const dsrRevenue = revenue > 0 ? (totalMCAMonthly / revenue) * 100 : 0;
+  const mcaBurden = dsrRevenue; // Traditional measure for comparison
 
   // Per-field confidence scoring
   const revenueConfidence = (a.monthly_breakdown?.length || 0) >= 3 ? 'high' : (a.monthly_breakdown?.length || 0) >= 2 ? 'medium' : 'low';
@@ -1574,9 +1770,9 @@ function ConfidenceTab({ a, positions, excludedIds, excludedDepositIds }) {
       <div style={{ fontSize: 11, color: 'rgba(232,232,240,0.4)', marginBottom: 12 }}>Fields with low confidence should be manually verified before sending to funders</div>
 
       <FieldRow label="Total Monthly Revenue (Bank-Verified)" value={fmt(revenue)} confidence={revenueConfidence} note={`Based on ${a.monthly_breakdown?.length || 0} months of statements`} />
-      <FieldRow label="Debt Service Ratio (DSR)" value={fmtP(dsr)} confidence={dsrConfidence} note={`${activePositions.length} active positions`} />
-      <FieldRow label="MCA Burden %" value={fmtP(mcaBurden)} confidence={dsrConfidence} note={`${fmt(totalMCAMonthly)}/mo in MCA payments`} />
-      <FieldRow label="Gross Profit Margin" value={fmt(grossProfit)} confidence={grossProfitConfidence} note={a.expense_categories?.inventory_cogs > 0 ? `After ${fmt(a.expense_categories.inventory_cogs)} COGS` : 'COGS not detected - using gross revenue'} />
+      <FieldRow label="DSR (FF Method - vs Gross Profit)" value={fmtP(dsr)} confidence={dsrConfidence} note={cogs > 0 ? `${fmt(totalMCAMonthly)} ÷ ${fmt(grossProfit)} gross profit` : 'No COGS detected - using revenue'} />
+      <FieldRow label="DSR (Traditional - vs Revenue)" value={fmtP(dsrRevenue)} confidence={dsrConfidence} note={`${fmt(totalMCAMonthly)}/mo ÷ ${fmt(revenue)} revenue`} />
+      <FieldRow label="Gross Profit" value={fmt(grossProfit)} confidence={grossProfitConfidence} note={cogs > 0 ? `Revenue ${fmt(revenue)} − COGS ${fmt(cogs)}` : 'COGS not detected - equals gross revenue'} />
 
       {/* Position Confidence Detail */}
       <div style={S.divider} />
@@ -2806,7 +3002,7 @@ export default function FFAnalyzer() {
             {activeTab === 3 && <RiskTab a={result.analysis} positions={positions} excludedIds={excludedIds} otherExcludedIds={otherExcludedIds} excludedDepositIds={excludedDepositIds} />}
             {activeTab === 4 && <AgreementsTab agreementResults={agreementResults} />}
             {activeTab === 5 && <CrossReferenceTab crossRefResult={crossRefResult} />}
-            {activeTab === 6 && <NegotiationTab a={result.analysis} positions={positions} excludedIds={excludedIds} otherExcludedIds={otherExcludedIds} excludedDepositIds={excludedDepositIds} />}
+            {activeTab === 6 && <NegotiationTab a={result.analysis} positions={positions} excludedIds={excludedIds} otherExcludedIds={otherExcludedIds} excludedDepositIds={excludedDepositIds} agreementResults={agreementResults} />}
             {activeTab === 7 && <ConfidenceTab a={result.analysis} positions={positions} excludedIds={excludedIds} excludedDepositIds={excludedDepositIds} />}
             {activeTab === 8 && <ExportTab a={result.analysis} fileName={result.file_name || 'analysis'} positions={positions} excludedIds={excludedIds} otherExcludedIds={otherExcludedIds} excludedDepositIds={excludedDepositIds} agreementResults={agreementResults} />}
           </div>
