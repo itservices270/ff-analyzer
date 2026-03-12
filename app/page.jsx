@@ -2236,7 +2236,7 @@ export default function FFAnalyzer() {
 
           if (looksIncomplete && !ag.autoRetried) {
             // Auto-retry with image scan — pages likely blank
-            setUploadedAgreements(prev => prev.map(a => a.id === ag.id ? { ...a, status: 'analyzing', autoRetried: true, error: 'Some pages appear blank — auto-retrying with image scan...' } : a));
+            setUploadedAgreements(prev => prev.map(a => a.id === ag.id ? { ...a, status: 'retrying', autoRetried: true, error: null } : a));
             try {
               const images = await renderPDFToImages(ag.file);
               const formData = new FormData();
@@ -2667,15 +2667,34 @@ export default function FFAnalyzer() {
               <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap', marginBottom: 8 }}>
                 <input ref={agreementInputRef} type="file" accept=".pdf" multiple style={{ display: 'none' }} onChange={onAgreementDrop} />
                 <button style={{ ...S.btn('secondary'), padding: '8px 16px', fontSize: 12 }} onClick={() => agreementInputRef.current?.click()}>📎 Add Agreements</button>
-                {uploadedAgreements.length > 0 && <span style={{ fontSize: 12, color: 'rgba(232,232,240,0.5)' }}>{uploadedAgreements.length} loaded</span>}
+                {uploadedAgreements.filter(a => a.status === 'pending' || a.status === 'ready').length > 0 && (
+                  <button style={{ ...S.btn('gold'), padding: '8px 16px', fontSize: 12, opacity: agreementLoading ? 0.5 : 1 }} onClick={analyzeAgreements} disabled={agreementLoading}>
+                    {agreementLoading ? '⏳ Analyzing…' : `📋 Analyze ${uploadedAgreements.filter(a => a.status === 'pending' || a.status === 'ready').length} Agreement${uploadedAgreements.filter(a => a.status === 'pending' || a.status === 'ready').length > 1 ? 's' : ''}`}
+                  </button>
+                )}
+                {uploadedAgreements.length > 0 && <span style={{ fontSize: 12, color: 'rgba(232,232,240,0.5)' }}>{uploadedAgreements.filter(a => a.status === 'done').length}/{uploadedAgreements.length} analyzed</span>}
               </div>
               {uploadedAgreements.map(ag => (
-                <span key={ag.id} style={{ display: 'inline-flex', alignItems: 'center', gap: 5, background: ag.isScanned ? 'rgba(249,168,37,0.08)' : 'rgba(234,208,104,0.08)', border: `1px solid ${ag.isScanned ? 'rgba(249,168,37,0.3)' : 'rgba(234,208,104,0.2)'}`, borderRadius: 6, padding: '4px 8px', marginRight: 6, marginBottom: 4, fontSize: 11 }}>
-                  {ag.status === 'detecting' ? <span style={{color:'#00e5ff'}}>⏳</span> : ag.isScanned ? <span style={{color:'#ff9800'}}>🖨️</span> : <span style={{ color: '#EAD068' }}>📋</span>}
+                <span key={ag.id} style={{ display: 'inline-flex', alignItems: 'center', gap: 5, background: ag.status === 'analyzing' || ag.status === 'retrying' ? 'rgba(0,229,255,0.08)' : ag.status === 'error' ? 'rgba(239,83,80,0.08)' : ag.status === 'done' ? 'rgba(76,175,80,0.08)' : ag.isScanned ? 'rgba(249,168,37,0.08)' : 'rgba(234,208,104,0.08)', border: `1px solid ${ag.status === 'analyzing' || ag.status === 'retrying' ? 'rgba(0,229,255,0.3)' : ag.status === 'error' ? 'rgba(239,83,80,0.3)' : ag.status === 'done' ? 'rgba(76,175,80,0.3)' : ag.isScanned ? 'rgba(249,168,37,0.3)' : 'rgba(234,208,104,0.2)'}`, borderRadius: 6, padding: '4px 8px', marginRight: 6, marginBottom: 4, fontSize: 11 }}>
+                  {ag.status === 'detecting' && <span style={{color:'#00e5ff'}}>⏳</span>}
+                  {ag.status === 'analyzing' && <span style={{color:'#00e5ff', animation: 'pulse 1s infinite'}}>⏳</span>}
+                  {ag.status === 'retrying' && <span style={{color:'#00e5ff', animation: 'spin 1s linear infinite', display: 'inline-block'}}>↻</span>}
+                  {ag.status === 'done' && <span style={{color:'#81c784'}}>✓</span>}
+                  {ag.status === 'error' && <span style={{color:'#ef9a9a'}}>✕</span>}
+                  {ag.status === 'pending' && (ag.isScanned ? <span style={{color:'#ff9800'}}>🖨️</span> : <span style={{ color: '#EAD068' }}>📋</span>)}
                   <span style={{ color: 'rgba(232,232,240,0.6)' }}>{ag.name.slice(0, 22)}{ag.name.length > 22 ? '…' : ''}</span>
-                  {ag.isScanned && ag.status !== 'detecting' && <span style={{fontSize:9, color:'#ff9800', letterSpacing:0.5}}>SCANNED</span>}
+                  {ag.status === 'analyzing' && <span style={{fontSize:9, color:'#00e5ff', letterSpacing:0.5}}>SCANNING</span>}
+                  {ag.status === 'retrying' && <span style={{fontSize:9, color:'#00e5ff', letterSpacing:0.5}}>RETRYING</span>}
+                  {ag.status === 'done' && <span style={{fontSize:9, color:'#81c784', letterSpacing:0.5}}>DONE</span>}
+                  {ag.isScanned && ag.status === 'pending' && <span style={{fontSize:9, color:'#ff9800', letterSpacing:0.5}}>SCANNED</span>}
                   {!ag.isScanned && ag.status === 'pending' && <span style={{fontSize:9, color:'#81c784', letterSpacing:0.5}}>TEXT ✓</span>}
-                  <button onClick={() => setUploadedAgreements(prev => prev.filter(a => a.id !== ag.id))} style={{ background: 'none', border: 'none', color: 'rgba(232,232,240,0.3)', cursor: 'pointer', fontSize: 12, padding: 0, marginLeft: 2 }}>✕</button>
+                  {ag.status === 'error' && (
+                    <>
+                      <button onClick={() => { setUploadedAgreements(prev => prev.map(a => a.id === ag.id ? {...a, status: 'pending', error: null} : a)); }} style={{ marginLeft: 4, padding: '1px 6px', borderRadius: 4, border: '1px solid rgba(0,229,255,0.3)', background: 'rgba(0,229,255,0.1)', color: '#00e5ff', cursor: 'pointer', fontSize: 9, fontFamily: 'inherit' }}>↺</button>
+                      <button onClick={() => retryAgreementAsImages(ag)} style={{ padding: '1px 6px', borderRadius: 4, border: '1px solid rgba(234,208,104,0.3)', background: 'rgba(234,208,104,0.1)', color: '#EAD068', cursor: 'pointer', fontSize: 9, fontFamily: 'inherit' }}>📷</button>
+                    </>
+                  )}
+                  {ag.status !== 'analyzing' && ag.status !== 'retrying' && ag.status !== 'detecting' && <button onClick={() => setUploadedAgreements(prev => prev.filter(a => a.id !== ag.id))} style={{ background: 'none', border: 'none', color: 'rgba(232,232,240,0.3)', cursor: 'pointer', fontSize: 12, padding: 0, marginLeft: 2 }}>✕</button>}
                 </span>
               ))}
             </div>
