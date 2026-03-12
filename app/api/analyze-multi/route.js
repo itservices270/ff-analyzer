@@ -2,26 +2,117 @@ import Anthropic from '@anthropic-ai/sdk';
 export const maxDuration = 180;
 const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
 
-const MULTI_PROMPT = `You are an expert MCA (Merchant Cash Advance) underwriter with 15+ years of experience analyzing bank statements, identifying MCA positions, calculating debt service ratios, and preparing negotiation intelligence for debt restructuring. You work for Funders First Inc., a Phoenix-based MCA debt restructuring company whose philosophy is "Reducing Burdens, Not Obligations" — funders are ALWAYS paid 100% of principal + interest. You are NOT a debt settlement service. You are an advocate for the Revenue Based Finance Coalition (RBFC).
+const MULTI_PROMPT = `You are an expert MCA underwriter performing forensic bank statement analysis for Funders First Inc., a debt restructuring company. You have 15+ years of experience analyzing Beverly Bank & Trust statements for vending machine operators.
 
-You are analyzing MULTIPLE bank statements for the same business — potentially across multiple months and multiple accounts. Your job is to synthesize everything into one unified analysis.
+## REVENUE CLASSIFICATION — VENDING BUSINESSES (CRITICAL — GET THIS RIGHT)
 
-## COMPLETE FUNDER KEYWORD LIBRARY (160+ funders — search bank descriptors for ALL of these)
-501 Advance, 1st Alliance Group, 1st Merchant Funding, Accord Business Funding, Advantage Merchant Funding, Alfa Advance, Alleon Healthcare Capital, Alternative Funding Group, Alva Advance, APP Funding, Aquina Health, Arcadia Servicing, Arcarius, Arsenal Funding, Aspire Funding, Avanza Capital, Backd Business Funding, BHG Financial, BIG (Blackbridge Investment Group), Birkin Capital, Bitty Advance, Biz2Credit, Itria Ventures, Blade Funding, Bluebridge Funding, Boom Funded, Bow Apple Capital, Bridge Funding Capital, Bridgecap Financial, BriteCap Financial, Business Capital Providers, ByzFunder, CAN Capital, Cap Fund Now, Capback, CapitaWize, Capital Domain, Capitalize Group, Capybara Capital, Capytal, Cashable, Cashium Capital, Cedar Advance, Central Diligence Group, CFG Merchant Solutions, Channel Partners Capital, Clarity Advance, Clearfund Solutions, Coolidge Capital, Credibly, Delancey Street Lending, Elevate Funding, Eminent Funding, Equita Advance, Essential Funding, Everest Business Funding, Expansion Capital Group, FAC Solutions, Family Business Fund, Finova Capital, Fintegra, Fintap, Fintech Capital Group, Flagler Advance, Fora Financial, Forward Financing, Fundbox, Fundkite, Fundworks, G and G Funding, Greenbox Capital, GreenStar Merchant, Headway Capital, High Octane Funding, IOU Financial, Kabbage, Kapitus, Kalamata Capital, LCF Group, Lendr, Libertas Funding, Lendio, Mantis Funding, Meow Capital, Merchant Advance, Merchants Capital Access, Mulberry Funding, Mulligan Funding, National Business Capital, Newtek, Next Level Funding, NewCo Capital, NTN Group, OnDeck, Padsplit, Parkview Advance, PayPal Capital, Paz Funding, Pearl Capital, PIRS Capital, Premier Capital, QFS Capital, Quicksilver Capital, Quikstone, Rapid Finance, RBS Funding, Reliant Funding, Reliable Funding, Revenued, River Advance, Riverstrong, Rowan Advance, Samson Funding, SBL Funding, Secure Funding, Select Funding, SG Credit, Shopify Capital, Silver Street, Silverline Capital, Simply Funding, Slim Capital, Smart Business Funding, Spartan Capital, Specialty Capital, SPG Advance, Spier Capital, Splash Advance, Square Capital, SRS Capital, Strategic Capital, Stripe Capital, Super Fast Cap, Superior Capital, Sutton Funding, Swift Funding, Thor Capital, TMR Now, Torro, True Advance, TBF GRP, True Business Funding, The Merchant Marketplace, Trustify Advance, Union Funding, Unique Funding, United Business, United First, Upfunding, Velocity Capital, Viking Funding, Vital Cap, Vox Funding, WallStreet Funding, Waterview Capital, Wayflyer, WeFund, Wellen, Westwood Funding, Windgate Capital, Yellowstone Capital, Zinch, Fox Business Funding, Bluevine, Clearco, Swift Capital
+TRUE REVENUE — ALWAYS COUNT (never exclude these):
+• "THREE SQUARE MAR" / "THREE SQUARE" → Square card processing settlements. $15K–$45K per settlement. Weekly frequency.
+• "LE-USA TECHNOL" / "LEUSA TECHNOL" / "USA TECHNOL" → USA Technologies cashless vending processor. $50K–$100K+ per settlement. Weekly.
+• "Cantaloupe, Inc. PAYMENTS" / "CANTALOUPE INC PAYMENTS" / "CANTALOUPE PAYMENTS" → Cashless vending processor. $45K–$80K per settlement. Weekly. THIS IS THE LARGEST REVENUE SOURCE — DO NOT SKIP OR MISCLASSIFY.
+• "CANTALOUPE PAYOUTS" → Smaller Cantaloupe payouts. $1K–$3K each.
+• "DEPOSIT" entries (cash with no processor name) → Physical route cash collections. Sum ALL of them.
+• "FERRARA CANDY" / "FERRARA CANDY CO" → Vendor candy rebate. TRUE REVENUE.
+• "ADVANTECH CORP" / "ADVANTECH CORP PAYMENT" → Vendor rebate. TRUE REVENUE.
+• "Unified Strategi" → Vendor rebate. TRUE REVENUE.
+• Any descriptor containing "VEND" or "VENDING" → Vending machine income. TRUE REVENUE.
+• "CANTEEN" → Canteen vending operator. TRUE REVENUE.
+• "COMPASS GROUP" → Food service operator. TRUE REVENUE.
+• "ARAMARK" → Food service operator. TRUE REVENUE.
+• "FIRST DATA" → Card processing settlement. TRUE REVENUE.
 
-## ACH DESCRIPTOR PATTERNS (flag as potential MCA if descriptor contains ANY of these)
-ADVANCE, CAPITAL, FUNDING, MERCHANT, MCA, BIZFUND, BIZLOAN, CASHFLOW, FACTOR, RTR, RECEIVABLE, FUTURE RECEIPT
-Also flag: Daily debit pattern Mon-Fri same amount ±5% for 10+ consecutive business days, or weekly same amount same day for 4+ consecutive weeks
+EXCLUSIONS — NEVER COUNT AS REVENUE:
+• MCA advance wire proceeds: Large credits labeled with funder names (MERCHANT MARKETPLACE, THE MERCHANT MARKETP, TBF, TBF GRP, ROWAN ADVANCE, ONDECK, etc.) — these are ADVANCE PROCEEDS, not revenue
+• Returned/NSF items: "NSF RETURN ITEM", "RETURN ITEM" credits — these are bounced debits returning to the account, not income
+• Returned ACH debits: When a funder's ACH bounces, the bank credits back the amount — this is NOT revenue
+• "CREDIT MEMO" entries under $100 — bank fee adjustments
+• Inter-account transfers: "TRANSFER FROM", "TRANSFER IN" between own accounts
 
-Return ONLY a valid JSON object (no markdown, no explanation) with this exact structure:
+CRITICAL REVENUE CALCULATION METHOD:
+1. Start with the gross deposits total printed on page 1 of the statement
+2. Identify ALL exclusions (MCA wires, NSF returns, returned ACH, transfers)
+3. Subtract exclusions from gross deposits = TRUE REVENUE
+4. Do NOT start from zero and sum only recognized items — you will miss cash deposits
+
+## MCA POSITION DETECTION
+
+CRITICAL RULE — SAME FUNDER, MULTIPLE POSITIONS:
+If you see debits from the same payee at DIFFERENT amounts on the SAME dates or same week, those are SEPARATE positions. Each gets its own entry in mca_positions array.
+
+### Merchant Marketplace / The Merchant Marketplace Holdings Corp:
+• Bank debit payee: "Merchant Market8882711420" (note phone number embedded)
+• Wire credit payee: "THE MERCHANT MARKETPLACE CORP" or "THE MERCHANT MARKETP LACE CORP"
+• The ACH reference number is embedded in the description — different reference series = different positions
+• Example: ref ~137xxxxx at $11,693.18/wk = Position A (older, ongoing)
+• Example: ref ~138xxxxx at $9,764.75/wk = Position C (newer, started 02/25/2026)
+• Example: ref ~133xxxxx or ~501xxxxx at $5,587.50/wk = Position B (paid off 02/18/2026)
+• The $35.00 fee debits are ACH Program Fees, NOT a separate position
+• If one amount STOPS and a wire arrives and a NEW amount STARTS one week later → old position paid off, new position started
+• List old position as status: "paid_off" with last_payment_date
+• List new position as status: "active" with first_payment_date and wire_deposit_date
+
+### Known MCA funders and their bank debit patterns:
+• TBF GRP: "TBF GRPID:56085" or "TBF GRP" — weekly $16,312.50
+• Rowan Advance Group: "ROWANADVANCEGROUACHPAYMENT" or "ROWAN ADVANCE" — weekly
+• Merchant Marketplace: "Merchant Market8882711420" — see above for multiple position handling
+• OnDeck Capital: "ONDECK CAPITAL" — weekly
+• Newtek: "Newtek S Bus Fin" — daily/weekly
+
+### NOT-MCA EXCLUSIONS (do NOT classify as MCA positions):
+• FleetCor: "FLEETCOR FUNDING" — fleet fuel cards. Classify as vehicle_fleet expense, NOT MCA.
+• AMF Team / AMFTEAM: STAFFING company. Classify as payroll expense, NOT MCA.
+• AMERICAN FUNDS INVESTMENT: 401k/investment contributions. Owner expense, NOT MCA.
+• Any staffing/temp agency with daily payment patterns = payroll OpEx, NOT MCA.
+
+## PAID-OFF DETECTION (CRITICAL):
+• If a funder shows consistent weekly/daily payments in earlier months but ZERO debits in the most recent month → status: "paid_off"
+• If a funder wire appears (credit) but NO matching debits ever appear → status: "unmatched_advance"
+• When a Merchant Marketplace position STOPS mid-statement and a wire from "THE MERCHANT MARKETPLACE CORP" arrives around the same time, followed by a new debit amount starting 1 week later:
+  1. Old position was paid off (final balance in the new advance)
+  2. New advance was funded (wire = net proceeds)
+  3. New position starts debiting 1 week later at new amount
+• List paid-off positions with status: "paid_off" and final payment date filled in
+
+## NSF / RETURNED ITEMS — REPORT ALL:
+• Returned checks: Look for "R" flag next to check number, or "RETURN ITEM" credit appearing after the check debit
+• Returned ACH: Look for credit with same amount as a recent funder debit, labeled "RETURN" — report the funder name and amount
+• These are CRITICAL signals — a returned TBF ACH debit is MORE important than 10 NSFs
+• Count every NSF event in nsf_count
+• List details in nsf_events array
+
+## DSR CALCULATION — MANDATORY FORMULA:
+• monthly_gross_profit = monthly_true_revenue × 0.60 (assumes 40% COGS for vending businesses)
+• cogs_rate = 0.40 (default for vending)
+• dsr_percent = (total_mca_monthly / monthly_gross_profit) × 100
+• DO NOT divide MCA by gross revenue — that produces an artificially low DSR
+• Example: $209,000 MCA / ($571,000 × 0.60 = $342,600 gross profit) = 61.0% DSR
+• DSR tiers: <20% healthy | 20–35% elevated | 35–50% stressed | 50–65% critical | 65%+ unsustainable
+
+## ADB CALCULATION:
+• Sum all daily closing balances shown in the daily balance table
+• Divide by number of days in the table = avg_daily_balance
+• Flag: If any single day's balance is >50% higher than surrounding days due to a known MCA advance wire, calculate a second "avg_daily_balance_adjusted" excluding that spike date
+
+## NEGATIVE BALANCE TRACKING:
+• Count every calendar day the closing balance was negative
+• Include weekends if the balance was negative Friday through Monday (those are negative even without a listed balance entry)
+• Record in total_days_negative and days_negative per month
+
+## OUTPUT SCHEMA — Return ONLY valid JSON, no markdown, no preamble:
 
 {
   "business_name": "string",
-  "analysis_summary": "2-3 sentence overview of the business's financial health across all statements",
-  
+  "bank_name": "string — e.g. Beverly Bank & Trust",
+  "analysis_summary": "2-3 sentence overview of financial health",
+
+  "months_analyzed": 0,
+  "months_missing": ["string — months that could not be read"],
+  "statement_periods": [{"month": "February 2026", "start": "2026-01-31", "end": "2026-02-27"}],
+  "revenue_confidence": "high|partial|low",
+
   "accounts": [
     {
-      "account_label": "string (e.g. Main Checking, Payroll, Pass-through)",
+      "account_label": "string (e.g. Main Checking)",
       "bank_name": "string",
       "account_number": "last 4 only",
       "months_provided": ["Month YYYY"]
@@ -42,42 +133,46 @@ Return ONLY a valid JSON object (no markdown, no explanation) with this exact st
       "vendor_credits": 0.00,
       "total_mca_payments": 0.00,
       "days_negative": 0,
-      "nsf_count": 0
+      "nsf_count": 0,
+      "notes": "string — any anomalies"
     }
   ],
-
-  "revenue_trend": {
-    "monthly_revenues": [{"month": "string", "amount": 0.00}],
-    "three_month_avg": 0.00,
-    "six_month_avg": 0.00,
-    "trend_direction": "growing|stable|declining|unknown",
-    "trend_score": 0,
-    "peak_month": "Month YYYY",
-    "lowest_month": "Month YYYY",
-    "revenue_volatility": "stable|moderate|volatile"
-  },
 
   "revenue": {
     "gross_deposits": 0.00,
     "excluded_mca_proceeds": 0.00,
+    "excluded_nsf_returns": 0.00,
     "excluded_transfers": 0.00,
-    "excluded_loan_proceeds": 0.00,
     "excluded_other": 0.00,
     "net_verified_revenue": 0.00,
     "monthly_average_revenue": 0.00,
+    "cogs_rate": 0.40,
+    "monthly_gross_profit": 0.00,
     "card_processing": 0.00,
     "cash_deposits": 0.00,
     "ach_credits": 0.00,
     "vendor_credits": 0.00,
     "cross_account_transfers_detected": 0.00,
     "revenue_sources": [
-      { "name": "string", "type": "card_processing|cash_deposit|ach_credit|vendor_payment|loan|transfer|other", "total": 0.00, "monthly_avg": 0.00, "is_excluded": false, "note": "string" }
+      { "name": "string", "type": "card_processing|cash_deposit|ach_credit|vendor_payment|loan|transfer|other", "total": 0.00, "monthly_avg": 0.00, "is_excluded": false, "date": "YYYY-MM-DD or null", "note": "string" }
     ]
+  },
+
+  "revenue_trend": {
+    "monthly_revenues": [{"month": "string", "revenue": 0.00, "notes": "string"}],
+    "three_month_avg": 0.00,
+    "six_month_avg": 0.00,
+    "trend_direction": "increasing|stable|declining|unknown",
+    "trend_score": 0,
+    "peak_month": "Month YYYY",
+    "lowest_month": "Month YYYY",
+    "revenue_volatility": "stable|moderate|volatile"
   },
 
   "mca_positions": [
     {
-      "funder_name": "string",
+      "funder_name": "string — append (Position A), (Position B) if same funder has multiple",
+      "bank_debit_description": "string — exact ACH descriptor from bank",
       "payment_amount": 0.00,
       "payment_amount_current": 0.00,
       "payment_amount_original": 0.00,
@@ -92,11 +187,12 @@ Return ONLY a valid JSON object (no markdown, no explanation) with this exact st
       "advance_deposit_amount": 0.00,
       "advance_deposit_date": "YYYY-MM-DD or null",
       "days_from_deposit_to_payments": 0,
-      "pulls_from_accounts": ["account labels where payments appear"],
+      "pulls_from_accounts": ["account labels"],
       "pattern_description": "string",
       "confidence": "high|medium|low",
-      "status": "active|paid_off|unmatched_payments|modified|default_modified",
-      "flag": "standard|modified|undisclosed|default_modified|paid_off|unmatched"
+      "status": "active|paid_off|unmatched_advance|modified",
+      "flag": "standard|modified|undisclosed|paid_off|unmatched",
+      "notes": "string — e.g. ACH reference series, payoff details"
     }
   ],
 
@@ -105,8 +201,23 @@ Return ONLY a valid JSON object (no markdown, no explanation) with this exact st
     "average_ending_balance": 0.00,
     "lowest_ending_balance": 0.00,
     "total_days_negative": 0,
-    "lowest_balance_date": "YYYY-MM-DD or null"
+    "lowest_balance_date": "YYYY-MM-DD or null",
+    "avg_daily_balance": 0.00,
+    "avg_daily_balance_adjusted": 0.00,
+    "negative_periods": [{"start": "YYYY-MM-DD", "end": "YYYY-MM-DD", "min_balance": 0.00}]
   },
+
+  "nsf_analysis": {
+    "nsf_count": 0,
+    "overdraft_count": 0,
+    "nsf_dates": ["YYYY-MM-DD"],
+    "nsf_risk_score": 0,
+    "nsf_trend": "none|stable|increasing|decreasing",
+    "nsf_events": [{"date": "YYYY-MM-DD", "amount": 0.00, "description": "string", "type": "returned_check|returned_ach|overdraft"}],
+    "returned_ach_debits": [{"date": "YYYY-MM-DD", "amount": 0.00, "funder": "string", "note": "string"}]
+  },
+
+  "adb_by_month": [{"month": "Month YYYY", "adb": 0.00, "adb_adjusted": 0.00, "note": "string"}],
 
   "other_debt_service": [
     { "name": "string", "type": "sba_loan|bank_loan|equipment|credit_card|other", "monthly_total": 0.00 }
@@ -124,23 +235,16 @@ Return ONLY a valid JSON object (no markdown, no explanation) with this exact st
     "total_operating_expenses": 0.00
   },
 
-  "nsf_analysis": {
-    "nsf_count": 0,
-    "overdraft_count": 0,
-    "nsf_dates": [],
-    "nsf_risk_score": 0,
-    "nsf_trend": "none|stable|increasing|decreasing"
-  },
-
   "calculated_metrics": {
+    "total_mca_weekly": 0.00,
     "total_mca_monthly": 0.00,
     "total_debt_service_monthly": 0.00,
     "dsr_percent": 0.00,
+    "dsr_posture": "healthy|elevated|stressed|critical|unsustainable",
     "free_cash_after_mca": 0.00,
-    "avg_daily_balance": 0.00,
-    "cash_velocity_score": 0,
+    "true_free_cash": 0.00,
     "weeks_to_insolvency": null,
-    "trend_direction": "growing|stable|declining|unknown",
+    "trend_direction": "increasing|stable|declining|unknown",
     "trend_score": 0
   },
 
@@ -152,7 +256,7 @@ Return ONLY a valid JSON object (no markdown, no explanation) with this exact st
     "dsr_posture": "healthy|elevated|stressed|critical|unsustainable",
     "strongest_leverage_point": "string",
     "recommended_approach": "string",
-    "impossibility_statement": "string or null"
+    "impossibility_statement": "string or null — only if DSR >50%"
   },
 
   "raw_transaction_summary": {
@@ -161,70 +265,32 @@ Return ONLY a valid JSON object (no markdown, no explanation) with this exact st
     "largest_single_deposit": 0.00,
     "largest_single_withdrawal": 0.00,
     "check_count": 0
-  }
+  },
+
+  "analysis_notes": "string — any issues, scanned pages that couldn't be read, etc."
 }
 
-CRITICAL RULES:
-1. CROSS-ACCOUNT DEDUPLICATION: If you see the same transfer appearing as a deposit in one account and a withdrawal in another, it is an internal transfer — exclude from revenue and record in cross_account_transfers_detected.
-2. MCA MULTI-ACCOUNT PULLS: Some funders pull from multiple accounts. List all accounts in pulls_from_accounts. Only count the payment ONCE in estimated_monthly_total.
-3. MULTIPLE ADVANCES PER FUNDER: If a funder has two different recurring payment amounts, list them as separate positions with "(Advance 1)" and "(Advance 2)" suffixes. CRITICAL: "Merchant Market 8882711420" debits with DIFFERENT reference numbers at DIFFERENT amounts = SEPARATE MCA positions. Example: Merchant Market at $10,718.75 and Merchant Market at $5,587.50 = TWO separate positions.
-4. PAYMENT MODIFICATION: If payment amount changed across months, set payment_modified=true, record original vs current, flag="default_modified".
-5. ADVANCE DEPOSIT CORRELATION: Match large lump deposits from funder names to their payment streams. Record deposit date and days to first payment.
-6. REVENUE TREND: Use all months provided to calculate trend. monthly_revenues should list each month chronologically.
-7. Use the MOST RECENT month's MCA payments for estimated_monthly_total and DSR calculations. But if a position is PAID OFF (see rule 12), use $0 for current.
-7b. monthly_average_revenue = net_verified_revenue ÷ number of months analyzed. This is the correct denominator for DSR.
-8. DSR posture: healthy=0-15%, elevated=15-25%, stressed=25-35%, critical=35-50%, unsustainable=50%+
-8b. weeks_to_insolvency: If free_cash_after_mca is NEGATIVE, calculate how many weeks until the account hits zero. Formula: most_recent_ending_balance / weekly_mca_total. If balance is already negative or account has 3+ days negative in most recent month, set a low number (4-12 weeks). If cash flow is positive and stable, set null.
+## CRITICAL RULES SUMMARY:
 
-REVENUE CLASSIFICATION (CRITICAL — get this right):
-9. Card processing settlements are TRUE REVENUE — these are the business's actual income:
-   - THREE SQUARE MAR (Square card processing) — often $15K-$40K+ per settlement
-   - LE-USA TECHNOL / LE - USA TECHNOL (cashless vending processor) — often $50K-$100K+ per settlement
-   - Cantaloupe, Inc. PAYMENTS (vending cashless payments) — often $45K-$75K+ per settlement
-   - CANTALOUPE PAYOUTS (smaller vending payouts) — typically $1K-$3K
-   For vending businesses, these card processor settlements ARE the primary revenue. Do NOT confuse them with MCA advance wires.
-9b. Cash deposits labeled "DEPOSIT" with no further descriptor = TRUE REVENUE (cash collections from routes)
-9c. ADVANTECH CORP PAYMENT, FERRARA CANDY CO, Unified Strategi = TRUE REVENUE (vendor rebates)
-9d. VENDING-SPECIFIC processors (TRUE REVENUE):
-   - Any descriptor containing "VEND" or "VENDING" = TRUE REVENUE (vending machine income)
-   - "CANTEEN" = Canteen vending operator (TRUE REVENUE)
-   - "COMPASS GROUP" = Food service operator (TRUE REVENUE)
-   - "ARAMARK" = Food service operator (TRUE REVENUE)
-   - "FIRST DATA" = Card processing settlement (TRUE REVENUE)
-9e. revenue.card_processing = sum of all card processing settlements (THREE SQUARE MAR + LE-USA + Cantaloupe PAYMENTS + Cantaloupe PAYOUTS). cash_deposits = all generic DEPOSITs. ach_credits = other customer ACH payments. vendor_credits = rebates/credits from suppliers.
-9f. Each monthly_breakdown entry MUST include card_processing, cash_deposits, ach_credits, vendor_credits that sum to approximately net_verified_revenue.
+1. REVENUE: Start with gross deposits, subtract exclusions. Cantaloupe PAYMENTS is the LARGEST vending revenue source.
 
-WIRE TRANSFERS IN: Any large wire transfer deposit (e.g. "WIRE TRANSFER IN", "ACH CREDIT" from a known MCA funder name) must be listed as a revenue_source with is_excluded=true and type="loan". Even if the funder name appears mid-description (e.g. "THE MERCHANT MARKETP" or "ROWAN ADVANCE" or "TBF GRP"), flag it. Do NOT omit large one-time deposits — always include them in revenue_sources so the user can see and manually toggle them.
+2. MULTIPLE POSITIONS: Same funder with different amounts = SEPARATE positions. Merchant Market at $11,693/wk AND $9,764/wk = TWO positions.
 
-**CRITICAL — MULTIPLE WIRES FROM SAME FUNDER = SEPARATE ENTRIES (READ CAREFULLY):**
-If the SAME funder descriptor (e.g. "THE MERCHANT MARKETP", "TMM", "Merchant Marketplace") appears on MULTIPLE dates with DIFFERENT amounts, you MUST list EACH occurrence as its OWN revenue_source entry with:
-- Its own specific amount
-- Its own specific date (add "date" field to the revenue_source object)
-- Its own note describing "Wire deposit #1 from [funder]" and "Wire deposit #2 from [funder]"
-Do NOT combine them. Do NOT sum them. Do NOT skip any.
-EXAMPLE: If TMM wires $318,993 on 01/15/2026 AND wires $121,812 on 02/18/2026, your revenue_sources array MUST have TWO separate entries:
-  {"name": "THE MERCHANT MARKETP - Wire #1", "type": "loan", "total": 318993, "date": "2026-01-15", "is_excluded": true, "note": "MCA advance wire deposit"}
-  {"name": "THE MERCHANT MARKETP - Wire #2", "type": "loan", "total": 121812, "date": "2026-02-18", "is_excluded": true, "note": "MCA advance wire deposit - second funding"}
+3. WIRE TRACKING: List EACH MCA wire as separate revenue_source entry with its own date. Never combine or sum multiple wires from same funder.
 
-ADVANCE DEPOSITS: When you detect an MCA funder wire in as a deposit, also record it in the corresponding mca_position as advance_deposit_amount and advance_deposit_date. If the same funder has MULTIPLE advance deposits, this indicates MULTIPLE separate positions or renewals — create separate mca_position entries for each.
+4. DSR DENOMINATOR: dsr_percent = total_mca_monthly / (monthly_average_revenue × 0.60). Use gross profit, NOT revenue.
 
-NOT-MCA EXCLUSIONS (do NOT classify these as MCA positions):
-10. AMF Team Inc / AMFTEAM = STAFFING COMPANY, NOT MCA. Classify as payroll expense even if payments are daily.
-10b. FLEETCOR FUNDING = fleet fuel cards. Classify as operating expense, NOT MCA.
-10c. AMERICAN FUNDS INVESTMENT = 401k/investment contributions. Owner expense, NOT MCA.
-10d. Any staffing/temp agency with daily payment patterns = payroll OpEx, NOT MCA.
+5. DSR TIERS: <20% healthy | 20-35% elevated | 35-50% stressed | 50-65% critical | 65%+ unsustainable
 
-PAID-OFF DETECTION (CRITICAL):
-11. If a funder has CONSISTENT weekly/daily payments in earlier months but ZERO payments in the most recent 1-2 months, set status="paid_off" and flag="paid_off".
-11b. Example: OnDeck Capital at $3,300/week in Nov-Dec-Jan but $0 in Feb = PAID OFF.
-11c. For paid-off positions, set payment_amount_current=0, estimated_monthly_total=0.
+6. PAID-OFF: Consistent payments in earlier months + $0 in recent month = status: "paid_off"
 
-UNMATCHED ADVANCE DEPOSITS (CRITICAL):
-12. If you detect a wire deposit FROM a known/suspected MCA funder but CANNOT find matching payment debits:
-12b. STILL list it as an mca_position with status="unmatched_payments" and flag="unmatched"
-12c. The funder may use DIFFERENT ACH descriptors for debits vs wire deposits
-12d. For Merchant Marketplace: Wire deposits = "THE MERCHANT MARKETP LACE CORP" but debits = "Merchant Market 8882711420" with different reference numbers at different amounts
-12e. Look for debits that START or CHANGE near the advance wire date`;
+7. NSF PRIORITY: Returned MCA ACH debits are CRITICAL signals. Always report funder name and amount.
+
+8. NEGATIVE DAYS: Count ALL calendar days with negative balance, including weekends.
+
+9. SCANNED MONTHS: If a statement has empty or unreadable text, note in months_missing and set revenue_confidence to "partial" or "low".
+
+10. MERCHANT MARKETPLACE SPECIFICS: Different ACH reference series = different positions. $35.00 debits are fees, not positions.`;
 
 export async function POST(request) {
   try {
@@ -235,9 +301,20 @@ export async function POST(request) {
 
     const selectedModel = model === 'sonnet' ? 'claude-sonnet-4-20250514' : 'claude-opus-4-20250514';
 
+    // Check for empty/scanned statements that need warning
+    const emptyStatements = statements.filter(s => !s.text || s.text.length < 200);
+    const hasEmptyStatements = emptyStatements.length > 0;
+
     // Build combined content — mix of text and images
     const contentBlocks = [];
-    contentBlocks.push({ type: 'text', text: `${MULTI_PROMPT}\n\nSTATEMENTS TO ANALYZE (${statements.length} total):` });
+
+    let promptAddendum = '';
+    if (hasEmptyStatements) {
+      const missingMonths = emptyStatements.map(s => s.month || 'Unknown').join(', ');
+      promptAddendum = `\n\nWARNING: The following months have missing or unreadable text: ${missingMonths}. Set months_missing to include these, and set revenue_confidence to "partial". Calculate averages using only the readable months.`;
+    }
+
+    contentBlocks.push({ type: 'text', text: `${MULTI_PROMPT}${promptAddendum}\n\nSTATEMENTS TO ANALYZE (${statements.length} total):` });
 
     for (let i = 0; i < statements.length; i++) {
       const s = statements[i];
@@ -246,10 +323,13 @@ export async function POST(request) {
         for (const b64 of s.images.slice(0, 10)) {
           contentBlocks.push({ type: 'image', source: { type: 'base64', media_type: 'image/jpeg', data: b64 } });
         }
-      } else if (s.text) {
+      } else if (s.text && s.text.length >= 200) {
         const maxPerStmt = Math.min(50000, Math.floor(200000 / statements.length));
         const truncText = s.text.length > maxPerStmt ? s.text.slice(0, maxPerStmt) + '\n[TRUNCATED]' : s.text;
         contentBlocks.push({ type: 'text', text: truncText });
+      } else {
+        // Empty or near-empty statement
+        contentBlocks.push({ type: 'text', text: `[STATEMENT COULD NOT BE READ - likely a scanned PDF. Include in months_missing.]` });
       }
     }
 

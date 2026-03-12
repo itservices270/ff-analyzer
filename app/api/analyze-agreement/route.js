@@ -4,88 +4,54 @@ export const maxDuration = 120;
 
 const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
 
-const AGREEMENT_PROMPT = `You are a senior MCA (Merchant Cash Advance) contract analyst for Funders First Inc., a debt restructuring company. You have 15+ years of experience reading MCA purchase agreements, identifying predatory terms, hidden fees, unenforceable clauses, and leverage points for restructuring negotiations.
+const AGREEMENT_PROMPT = `You are an expert MCA (Merchant Cash Advance) contract analyst. Extract ALL terms from this Future Receivables Sale and Purchase Agreement with maximum precision.
 
-You are analyzing an MCA agreement (also called a Merchant Cash Advance Agreement, Revenue Purchase Agreement, Future Receivables Purchase Agreement, or similar). Extract EVERY material term and flag anything that weakens the funder's position or could be used in restructuring negotiations.
-
-## CRITICAL EXTRACTION PRIORITIES
-
-### 1. FINANCIAL TERMS — Get these EXACT:
-- Purchase Price (the advance amount the merchant received)
-- Purchased Amount (total amount to be repaid — this is purchase price × factor rate)
-- Factor Rate (purchased_amount / purchase_price). If not stated, calculate it.
-- Specified Percentage of receivables being purchased (e.g. "10% of future receivables")
-- Daily/Weekly payment amount specified in contract
-- Estimated revenue the funder used to underwrite (often stated as "Merchant represents monthly revenue of $X")
-- Origination fee, closing fee, admin fee, processing fee — ANY fee deducted from proceeds
-- Net proceeds (purchase price minus all fees = what merchant actually received)
-
-### 2. REVENUE REPRESENTATION — This is the KEY leverage point:
-- Find the exact clause where merchant "represents" or "warrants" their monthly/annual revenue
-- Extract the EXACT dollar amount the funder claims the merchant's revenue is
-- Note if the agreement says "gross revenue", "net revenue", "receivables", or "deposits"
-- This number will be cross-referenced against actual bank statements to find discrepancies
-
-### 3. DEFAULT TRIGGERS — What gives the funder the right to accelerate:
-- Payment default (missed payments)
-- Breach of representation (including the revenue representation)
-- Change in business operations
-- Bankruptcy filing
-- Other MCA positions (stacking prohibition)
-- Change of bank account
-- Material adverse change clause (MAC clause — often abused)
-- CRITICAL: Note if the funder ALSO breached by funding into a stacked merchant despite their own anti-stacking clause
-
-### 4. PROBLEMATIC CLAUSES — Flag for negotiation leverage:
-- Confession of Judgment (COJ) — UNENFORCEABLE in NY as of Feb 2026 (FAIR Act), and restricted in many other states
-- Personal Guarantee — scope and limitations
-- UCC Filing — blanket vs specific
-- Venue/Jurisdiction clause — especially if filed in a state different from merchant's state
-- Waiver of right to jury trial
-- Waiver of right to assert counterclaims
-- Attorney fee shifting clauses
-- Non-solicitation of other funders (anti-competition)
-
-### 5. MERCHANT PROTECTIONS THEY MAY NOT KNOW ABOUT:
-- Reconciliation rights — if the agreement allows merchant to request payment adjustment based on actual revenue decline, this is HUGE and most merchants don't know they have it
-- Early payoff discount — some agreements allow payoff at less than full purchased amount
-- Cure periods — how many days to cure a default before acceleration
-- Revenue decline protection — some agreements reduce payments if revenue drops below threshold
-- Right to audit funder's records
-
-### 6. STACKING ANALYSIS:
-- Does this agreement prohibit additional MCA positions?
-- If yes, and the merchant HAS additional positions, was this funder the first or did THEY fund into an already stacked merchant?
-- A funder who funded knowing about existing positions AND has a no-stacking clause in their own contract has severely weakened enforcement position
-
-### 7. FEE ANALYSIS — Calculate TRUE cost of capital:
-- Origination fee
-- Closing/admin fee
-- Broker/ISO commission (if disclosed)
-- ACH processing fees
-- Technology/platform fees
-- Late fees / default fees
-- UCC filing fees
-- Any other fee that reduces net proceeds
-- Total fees as percentage of purchase price
-- TRUE advance amount = purchase_price - all_fees
-
-### 8. STATE-SPECIFIC COMPLIANCE FLAGS:
-- New York: FAIR Business Practices Act (Feb 2026) — COJ banned, disclosure requirements
-- California: SB 1286 — APR disclosure required, specific form requirements
-- Virginia: Commercial financing disclosure requirements
-- Utah: Commercial financing registration requirements
-- Connecticut: Small business lending disclosure
-- Maryland: Commercial financing disclosure
-- If agreement was executed after these laws took effect and doesn't comply, FLAG IT
-
-## OUTPUT FORMAT — Return ONLY valid JSON, no markdown, no backticks:
+Return ONLY valid JSON, no markdown, no preamble. Use null for any field not found.
 
 {
-  "funder_name": "string",
-  "merchant_name": "string",
-  "agreement_date": "YYYY-MM-DD",
-  "agreement_type": "MCA|revenue_purchase|factoring|other",
+  "funder_name": "exact legal name of the buying/funding entity",
+  "seller_name": "merchant legal name",
+  "effective_date": "MM/DD/YYYY",
+  "funding_date": "YYYY-MM-DD — the date funds were disbursed, if different from effective_date",
+  "governing_law_state": "state name",
+  "purchase_price": 0.00,
+  "purchased_amount": 0.00,
+  "factor_rate": 0.00,
+  "weekly_payment": 0.00,
+  "daily_payment": 0.00,
+  "payment_frequency": "weekly|daily|biweekly",
+  "specified_percentage": 0.00,
+  "origination_fee": 0.00,
+  "prior_balance_amount": 0.00,
+  "prior_balance_paid_to": "funder name or null",
+  "prior_balance_is_self_renewal": false,
+  "net_to_seller": 0.00,
+  "stated_monthly_revenue": 0.00,
+  "reconciliation_right": false,
+  "reconciliation_days": null,
+  "reconciliation_contact": "email or phone or null",
+  "anti_stacking_clause": false,
+  "anti_stacking_penalty": "description or null",
+  "coj_clause": false,
+  "coj_state": "state or null",
+  "coj_enforceability_note": "e.g. NY FAIR Act Feb 2026 may render unenforceable, or null",
+  "arbitration_clause": false,
+  "arbitration_opt_out": false,
+  "arbitration_opt_out_deadline_days": null,
+  "arbitration_opt_out_address": "address or null",
+  "fees": [
+    {"fee_name": "ACH Program Fee", "amount": 35.00, "frequency": "monthly"},
+    {"fee_name": "NSF Fee", "amount": 35.00, "frequency": "per event"}
+  ],
+  "guarantors": [
+    {"name": "full name", "ssn_last4": "last 4 or null", "ownership_pct": null}
+  ],
+  "bank_name": "depository institution name",
+  "routing_number": "9-digit routing or null",
+  "account_number": "account number or null",
+  "deposit_account_checked": "XXXXXX3000 format or null",
+  "extraction_confidence": "high|medium|low",
+  "extraction_notes": "note any blank pages, illegible sections, or missing clauses",
 
   "financial_terms": {
     "purchase_price": 0,
@@ -121,32 +87,38 @@ You are analyzing an MCA agreement (also called a Merchant Cash Advance Agreemen
 
   "default_triggers": [{
     "trigger": "string",
-    "clause_reference": "string — section/paragraph number",
+    "clause_reference": "string",
     "severity": "standard|aggressive|potentially_unenforceable",
     "notes": "string"
   }],
 
   "problematic_clauses": [{
     "clause_type": "coj|personal_guarantee|ucc_blanket|venue|jury_waiver|counterclaim_waiver|mac_clause|anti_stacking|attorney_fees|non_solicitation|other",
-    "clause_text_summary": "string — brief summary of what the clause says",
-    "clause_reference": "string — section/paragraph",
+    "clause_text_summary": "string",
+    "clause_reference": "string",
     "enforceability": "enforceable|questionable|unenforceable|state_dependent",
     "leverage_rating": "high|medium|low",
-    "negotiation_notes": "string — how to use this in restructuring"
+    "negotiation_notes": "string"
+  }],
+
+  "key_clauses": [{
+    "clause_type": "reconciliation|anti_stacking|coj|personal_guarantee|other",
+    "clause_text_summary": "string",
+    "clause_reference": "string"
   }],
 
   "merchant_protections": [{
     "protection_type": "reconciliation|early_payoff|cure_period|revenue_protection|audit_right|other",
     "description": "string",
     "clause_reference": "string",
-    "merchant_action_required": "string — what the merchant needs to do to invoke this right",
+    "merchant_action_required": "string",
     "leverage_rating": "high|medium|low"
   }],
 
   "stacking_analysis": {
     "has_anti_stacking_clause": false,
     "anti_stacking_text_summary": "",
-    "stacking_consequence": "string — what happens if merchant stacks (default trigger? acceleration?)",
+    "stacking_consequence": "string",
     "notes": ""
   },
 
@@ -166,18 +138,18 @@ You are analyzing an MCA agreement (also called a Merchant Cash Advance Agreemen
   "revenue_verification": {
     "stated_revenue": 0,
     "stated_revenue_type": "gross|net",
-    "revenue_clause_text": "string — exact or near-exact wording of the revenue representation",
+    "revenue_clause_text": "string",
     "withhold_percentage_stated": 0,
     "daily_payment_implied_annual_revenue": 0,
-    "notes": "string — any inconsistencies in the revenue representation"
+    "notes": "string"
   },
 
   "negotiation_leverage": {
     "overall_leverage_rating": "strong|moderate|weak",
     "top_leverage_points": ["string"],
     "funder_vulnerabilities": ["string"],
-    "recommended_approach": "string — how to approach this specific funder in restructuring",
-    "estimated_settlement_range_pct": "string — e.g. '65-80% of remaining balance' if there are strong leverage points"
+    "recommended_approach": "string",
+    "estimated_settlement_range_pct": "string"
   },
 
   "contract_red_flags": [{
@@ -188,22 +160,39 @@ You are analyzing an MCA agreement (also called a Merchant Cash Advance Agreemen
 
   "analysis_confidence": {
     "overall": "high|medium|low",
-    "notes": "string — what was hard to extract or unclear"
+    "notes": "string"
   }
 }
 
-RULES:
-1. Factor rate = purchased_amount / purchase_price. If >1.50, flag as "extreme"
-2. True factor rate = purchased_amount / net_proceeds_to_merchant (accounts for fees)
-3. Effective annual rate = ((factor_rate - 1) / (estimated_term_months / 12)) × 100
-4. If COJ clause exists AND agreement is governed by NY law or merchant is in NY, mark as UNENFORCEABLE per FAIR Act (Feb 2026)
-5. If reconciliation rights exist, this is always HIGH leverage — the merchant can demand payment adjustment
-6. If anti-stacking clause exists AND merchant had prior positions when this funder funded, the FUNDER breached first
-7. Always calculate net_proceeds = purchase_price - total_fees. This is what the merchant actually got.
-7b. prior_balance_paid: If the new advance paid off an earlier position with the SAME funder (or any funder), record that payoff amount in prior_balance_paid. This shows the merchant received LESS cash than purchase_price suggests. Example: TBF funded $450K but $250,125 went to pay off their prior TBF position — prior_balance_paid = 250125.
-8. daily_payment_implied_annual_revenue = (daily_payment / specified_receivable_percentage) × 365 if percentage is given
-9. Be precise with clause references — cite section numbers when visible
-10. Every fee matters. Even a $495 closing fee on a $50K advance is 1% — it adds up.`;
+IMPORTANT EXTRACTION RULES:
+
+1. "prior_balance_is_self_renewal" = true if prior_balance_paid_to matches the funder's own name (e.g., Merchant Marketplace paying off a prior Merchant Marketplace balance). This is CRITICAL evidence of stacking knowledge. The same funder renewing their own position means they knew about and approved the existing stack.
+
+2. If pages appear blank or unreadable, set extraction_confidence to "low" and describe in extraction_notes exactly which pages were blank and what clauses are therefore unknown.
+
+3. The "specified_percentage" is the % of future receipts the funder is entitled to receive — find this on page 1 of the agreement. It is NOT the factor rate.
+
+4. "reconciliation_days" — look for "X calendar days" language near the reconciliation section. Rowan uses 3 calendar days, which is unusually favorable to the seller.
+
+5. For COJ clauses: if the governing law is New York AND the agreement date is on or after February 1, 2026, note: "NY FAIR Business Practices Act (eff. Feb 2026) substantially restricts COJ enforceability."
+
+6. Read ALL riders (Rider 1, Rider 2, Rider 3, etc.) — these contain origination fees, prior balances, and fee schedules that are NOT on page 1.
+
+7. Factor rate = purchased_amount / purchase_price. If >1.50, flag as "extreme" in contract_red_flags.
+
+8. True factor rate = purchased_amount / net_proceeds_to_merchant (accounts for fees).
+
+9. Effective annual rate = ((factor_rate - 1) / (estimated_term_months / 12)) × 100
+
+10. If anti-stacking clause exists AND prior_balance_paid_to is a DIFFERENT funder, note: "Funder funded into existing stack despite anti-stacking clause — enforcement position weakened."
+
+11. Always calculate net_proceeds = purchase_price - total_fees - prior_balance_paid. This is what the merchant actually received.
+
+12. daily_payment_implied_annual_revenue = (daily_payment / specified_receivable_percentage) × 365 if percentage is given.
+
+13. Be precise with clause references — cite section numbers when visible.
+
+14. Every fee matters. Even a $495 closing fee on a $50K advance is 1% — it adds up.`;
 
 export async function POST(request) {
   try {
@@ -229,7 +218,7 @@ export async function POST(request) {
           }
         }
         imageEntries.sort((a, b) => parseInt(a.key.split('_')[1]) - parseInt(b.key.split('_')[1]));
-        // Build image content blocks directly (set below)
+        // Build image content blocks directly
         const imgBlocks = imageEntries.map(e => ({ type: 'image', source: { type: 'base64', media_type: 'image/jpeg', data: e.b64 } }));
         imgBlocks.push({ type: 'text', text: AGREEMENT_PROMPT + '\n\n[Read the agreement pages above and extract all terms.]' });
         const response = await client.messages.create({

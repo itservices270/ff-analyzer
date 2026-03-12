@@ -2713,6 +2713,9 @@ export default function FFAnalyzer() {
 
   const readyCount = uploadedFiles.filter(f => f.status === 'ready' && (f.text || (f.images && f.images.length > 0))).length;
   const detectingCount = uploadedFiles.filter(f => f.status === 'detecting').length;
+  const needsScanCount = uploadedFiles.filter(f => f.status === 'needs_scan').length;
+  const insufficientTextCount = uploadedFiles.filter(f => f.status === 'ready' && (!f.text || f.text.length < 200) && (!f.images || f.images.length === 0)).length;
+  const canAnalyze = readyCount > 0 && detectingCount === 0 && needsScanCount === 0 && insufficientTextCount === 0;
 
   return (
     <div style={S.page}>
@@ -2832,8 +2835,8 @@ export default function FFAnalyzer() {
               {/* Action bar */}
               <div style={{ display: 'flex', gap: 12, alignItems: 'center', flexWrap: 'wrap' }}>
                 <button
-                  style={{ ...S.btn('primary'), opacity: readyCount === 0 || detectingCount > 0 ? 0.5 : 1 }}
-                  disabled={readyCount === 0 || detectingCount > 0}
+                  style={{ ...S.btn('primary'), opacity: canAnalyze ? 1 : 0.5 }}
+                  disabled={!canAnalyze}
                   onClick={analyze}>
                   🔍 Analyze {readyCount} Statement{readyCount !== 1 ? 's' : ''}
                 </button>
@@ -2844,6 +2847,8 @@ export default function FFAnalyzer() {
                   <button onClick={() => setModel('sonnet')} style={{ fontSize: 12, padding: '3px 10px', borderRadius: 6, border: 'none', cursor: 'pointer', fontFamily: 'inherit', background: model === 'sonnet' ? 'rgba(234,208,104,0.2)' : 'transparent', color: model === 'sonnet' ? '#EAD068' : 'rgba(232,232,240,0.45)' }}>Sonnet ⚡</button>
                 </div>
                 {detectingCount > 0 && <span style={{ fontSize: 12, color: '#00e5ff', animation: 'pulse 1s infinite' }}>Detecting {detectingCount} file{detectingCount > 1 ? 's' : ''}…</span>}
+                {needsScanCount > 0 && <span style={{ fontSize: 12, color: '#ff9800' }}>⚠️ {needsScanCount} statement{needsScanCount > 1 ? 's need' : ' needs'} scanning first</span>}
+                {insufficientTextCount > 0 && <span style={{ fontSize: 12, color: '#ef5350' }}>⚠️ {insufficientTextCount} statement{insufficientTextCount > 1 ? 's have' : ' has'} insufficient text — scan first</span>}
               </div>
             </div>
           )}
