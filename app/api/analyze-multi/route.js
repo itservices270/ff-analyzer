@@ -45,6 +45,20 @@ PROTECTED REVENUE ACH PATTERNS — ALWAYS COUNT AS REVENUE (never exclude):
 • Any ACH credit that does NOT match a known MCA funder name → DEFAULT to ach_credit, is_excluded: false
 • The funder keyword list ("WIRE", "ADVANCE", "GRP", "FUNDING", "CAPITAL") should ONLY be used to classify credits that match a known funder — NEVER to demote an unrecognized customer ACH payment to LOAN type
 
+ACH CREDIT DEPOSITS — DO NOT REPORT AS $0:
+ACH credits are electronic deposits from customers, vendors, or payment processors. On bank statements they typically appear as:
+- "ACH Credit" or "ACH CREDIT"
+- "ACH Deposit"
+- "Electronic Deposit"
+- "Direct Deposit" (from a customer, not payroll)
+- Credits with a company name that is NOT a known payment processor AND NOT a known MCA funder
+
+ACH credits from CUSTOMERS or CLIENTS are REVENUE. Classify them as type "ach_credit" in the revenue breakdown with is_excluded: false.
+ACH credits from KNOWN MCA FUNDERS (wire deposits from TBF, TMM, Rowan, etc.) are NOT revenue — classify as type "loan" with is_excluded: true.
+ACH credits from payment processors (Cantaloupe, Square, etc.) should be classified under their specific processor type ("card_processing"), not as generic ACH credits.
+
+Do NOT report ach_credits as $0 if there are electronic deposits on the statements that don't fall into card processing, cash deposits, or MCA wires. If deposits exist on the statement that are not card processing and not MCA wires, they are likely ACH credits — count them.
+
 CONFIDENCE SCORING — EVERY revenue_source MUST have a "confidence" field (0-100):
 • 95-100: Known processor exact match (Cantaloupe, Square, LE-USA TECHNOL, Three Square MAR) or obvious MCA wire with funder name match
 • 80-94: Strong match with slightly ambiguous descriptor (e.g., cash deposit with clear business pattern, known staffing transfer)
@@ -112,9 +126,21 @@ If you see debits from the same payee at DIFFERENT amounts on the SAME dates or 
 • Example: $209,000 MCA / ($571,000 × 0.60 = $342,600 gross profit) = 61.0% DSR
 • DSR tiers: <20% healthy | 20–35% elevated | 35–50% stressed | 50–65% critical | 65%+ unsustainable
 
-## ADB CALCULATION:
-• Sum all daily closing balances shown in the daily balance table
-• Divide by number of days in the table = avg_daily_balance
+## AVERAGE DAILY BALANCE (ADB) EXTRACTION — CRITICAL:
+Many bank statements include a daily balance table, daily ledger, or a summary line showing "Average Daily Balance" or "Average Collected Balance" or "Average Ledger Balance."
+
+To extract ADB:
+1. FIRST: Look for an explicit "Average Daily Balance" or "Average Balance" line printed on the statement summary page. Many banks print this directly. If found, use that number.
+2. SECOND: If no explicit average is shown, look for a daily balance table (a table showing each day's ending balance). Sum all daily ending balances and divide by the number of days.
+3. THIRD: If neither is available, use the transaction ledger — each transaction line shows a running balance. Use the ending balance from the LAST transaction each day to get daily closing balances. Calculate the average of those daily closing balances.
+4. FOURTH: If no daily data can be extracted, estimate from (beginning balance + ending balance) / 2 for each month.
+
+For Beverly Bank & Trust specifically: The statement includes daily balance information in the transaction ledger — each transaction line shows a running balance column. Use the ending balance from the last transaction on each day to compute the daily closing balance, then average across all days.
+
+Output the ADB as "avg_daily_balance" in balance_summary AND populate "adb_by_month" with per-month ADB values.
+
+DO NOT return 0 for ADB unless the account truly had a $0 balance every day. An ADB of $0 on an active business account with deposits and withdrawals is ALWAYS an extraction error — try harder.
+
 • Flag: If any single day's balance is >50% higher than surrounding days due to a known MCA advance wire, calculate a second "avg_daily_balance_adjusted" excluding that spike date
 
 ## NEGATIVE BALANCE TRACKING:
@@ -320,6 +346,14 @@ If you see debits from the same payee at DIFFERENT amounts on the SAME dates or 
 9. SCANNED MONTHS: If a statement has empty or unreadable text, note in months_missing and set revenue_confidence to "partial" or "low".
 
 10. MERCHANT MARKETPLACE SPECIFICS: Different ACH reference series = different positions. $35.00 debits are fees, not positions.
+
+11. TAX EXPENSE CATEGORIZATION:
+When categorizing tax-related debits in expense_categories.taxes:
+• QUARTERLY ESTIMATED TAX PAYMENTS: If you see a large tax payment ($50K-$200K+) that appears once in a 3-4 month period, this is a quarterly estimated tax payment. Divide by 3 to get the monthly equivalent. Do NOT attribute the full quarterly amount to a single month's expense.
+• SALES TAX REMITTANCES: Payments to state tax authorities for collected sales tax are pass-throughs — include them in taxes but note they are sales tax remittances.
+• PAYROLL TAXES: Regular tax payments tied to payroll (941 deposits, state withholding) should be included under payroll, not under taxes.
+• REASONABLENESS CHECK: For a business doing $500K-$800K monthly revenue, total monthly tax expense (income + sales) should typically be 5-15% of revenue ($25K-$120K/month). If your calculation exceeds 20% of monthly revenue, re-examine — you likely counted a quarterly/annual payment as monthly. A $150K quarterly tax payment = $50K/month, not $150K/month.
+• Report the MONTHLY AVERAGE tax expense across all analyzed months, not a single month's spike.
 
 ## FUZZY NAME MATCHING FOR OCR ARTIFACTS (CRITICAL FOR SCANNED STATEMENTS)
 
