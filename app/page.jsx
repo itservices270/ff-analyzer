@@ -1,6 +1,7 @@
 'use client';
 import React, { useState, useEffect, useCallback, useRef, useMemo } from 'react';
 import { INDUSTRY_PROFILES, buildIndustryPromptBlock } from './data/industry-profiles';
+import NegotiationChat from './components/NegotiationChat';
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 const fmt = (n) => '$' + (parseFloat(n) || 0).toLocaleString('en-US', { minimumFractionDigits: 0, maximumFractionDigits: 0 });
@@ -4237,6 +4238,7 @@ export default function FFAnalyzer() {
   const [reviewDismissed, setReviewDismissed] = useState(false);
   const [enrolledPositions, setEnrolledPositions] = useState(null); // null = all enrolled (default)
   const [selectedIndustry, setSelectedIndustry] = useState('general');
+  const [chatOpen, setChatOpen] = useState(false);
   const inputRef = useRef(null);
 
   const TABS = ['📊 Revenue', '📈 Trend', '🏦 MCA Positions', '⚠️ Risk', '📋 Agreements', '🔄 Cross-Ref', '🤝 Negotiation', '📇 Funder Intel', '🎯 Confidence', '⬇️ Export'];
@@ -5033,6 +5035,56 @@ export default function FFAnalyzer() {
           </div>
         </div>
       )}
+
+      {/* Floating Chat Button */}
+      {result && result.analysis && (
+        <button
+          onClick={() => setChatOpen(!chatOpen)}
+          style={{
+            position: 'fixed',
+            bottom: chatOpen ? -100 : 24,
+            right: 24,
+            width: 56,
+            height: 56,
+            borderRadius: '50%',
+            background: 'linear-gradient(135deg, rgba(0,229,255,0.2), rgba(0,229,255,0.1))',
+            border: '1px solid rgba(0,229,255,0.3)',
+            color: '#00e5ff',
+            fontSize: 24,
+            cursor: 'pointer',
+            zIndex: 9998,
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            boxShadow: '0 4px 20px rgba(0,229,255,0.15)',
+            transition: 'all 0.3s ease',
+          }}
+          title="Open Negotiation Advisor"
+        >
+          💬
+        </button>
+      )}
+
+      {/* Chat Panel */}
+      <NegotiationChat
+        analysisContext={{
+          businessName: result?.analysis?.business_name || '',
+          revenue: result?.analysis?.true_monthly_revenue || result?.analysis?.calculated_metrics?.true_monthly_revenue || 0,
+          industry: selectedIndustry || 'general',
+          positions: (positions || []).map(p => ({
+            funder_name: p.funder_name,
+            weekly: parseFloat(p.payment_amount_current || p.payment_amount) || 0,
+            balance: parseFloat(p.estimated_remaining_balance) || 0,
+            specified_pct: p.specified_receivable_percentage || null,
+            frequency: p.frequency,
+            status: p.status,
+          })),
+          agreements: agreementResults || [],
+          crossRef: crossRefResult || null,
+        }}
+        isOpen={chatOpen}
+        onClose={() => setChatOpen(false)}
+      />
     </div>
   );
 }
