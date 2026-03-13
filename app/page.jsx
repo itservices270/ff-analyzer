@@ -2343,7 +2343,7 @@ function CrossReferenceTab({ crossRefResult, crossRefError, agreementResults, po
   </div>
 </div>
                 <div><div style={S.statLabel}>Actual Revenue</div><div style={{ fontSize: 13, color: '#00e5ff' }}>{fmt(c.actual_revenue)}</div></div>
-                <div><div style={S.statLabel}>Revenue Gap</div><div style={{ fontSize: 13, color: c.revenue_discrepancy_pct > 0 ? '#ef5350' : '#4caf50' }}>{c.revenue_discrepancy_pct > 0 ? '+' : ''}{fmtP(c.revenue_discrepancy_pct)} inflated</div></div>
+                <div><div style={S.statLabel}>Revenue Gap</div><div style={{ fontSize: 13, color: c.revenue_discrepancy_pct > 0 ? '#ef5350' : c.revenue_discrepancy_pct < 0 ? '#ffd54f' : '#4caf50' }}>{c.revenue_discrepancy_pct > 0 ? `+${fmtP(c.revenue_discrepancy_pct)} overstated` : c.revenue_discrepancy_pct < 0 ? `${fmtP(c.revenue_discrepancy_pct)} below actual` : 'Match'}</div></div>
                 <div><div style={S.statLabel}>Contract Withhold</div><div style={{ fontSize: 13, color: '#e8e8f0' }}>{fmtP(c.contracted_withhold_pct)}</div></div>
                 <div><div style={S.statLabel}>Actual Withhold</div><div style={{ fontSize: 13, color: c.actual_withhold_pct > c.contracted_withhold_pct ? '#ef5350' : '#e8e8f0' }}>{fmtP(c.actual_withhold_pct)}</div></div>
                 <div><div style={S.statLabel}>True Factor Rate</div><div style={{ fontSize: 13, color: c.true_factor_rate > 1.5 ? '#ef5350' : '#e8e8f0' }}>{c.true_factor_rate?.toFixed(2) || '—'}</div></div>

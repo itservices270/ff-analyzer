@@ -142,12 +142,14 @@ For each funder agreement:
 - Important: "Actual revenue" means TRUE revenue EXCLUDING MCA advance wires, transfers, NSF credits
 - Note: revenue should also account for EXISTING MCA burden at time of funding
 - IMPORTANT: The stated revenue from the agreement data may appear under the field name "stated_monthly_revenue" at the top level OR "financial_terms.stated_merchant_revenue" nested inside financial_terms. Check BOTH fields. If NEITHER field has a value (both are null, 0, or missing), output stated_revenue as null — do NOT output 0, because 0 implies the contract stated zero revenue, which is different from the contract not disclosing revenue at all.
-- IMPLIED REVENUE CALCULATION: If the agreement does NOT have an explicitly stated monthly revenue figure, but DOES have a specified/purchased percentage AND a weekly/daily remittance amount, calculate the implied revenue using the funder's own contract math:
-  implied_weekly_revenue = weekly_remittance / specified_percentage_as_decimal
-  implied_monthly_revenue = implied_weekly_revenue × 4.33
-  For example: 12% specified percentage with $3,975/wk remittance → $3,975 / 0.12 = $33,125/wk → $143,431/mo implied.
-  This is the revenue figure the funder's own underwriting model assumed. Output this as "stated_revenue" in the contract_vs_reality output, and add "revenue_source": "implied_from_specified_percentage" to distinguish it from an explicitly stated figure.
-  If the agreement has BOTH an explicit stated revenue AND a specified percentage, use the explicit stated revenue but ALSO calculate the implied figure and flag any discrepancy between them — if the funder stated one revenue but their percentage math implies a different one, that's an additional underwriting inconsistency to note in leverage_points.
+- IMPLIED REVENUE CALCULATION: If the agreement does NOT have an explicitly stated monthly revenue figure, but DOES have a specified/purchased percentage AND a weekly/daily remittance amount, calculate the funder's IMPLIED MONTHLY revenue assumption using their own contract math:
+  Step 1: implied_weekly_revenue = weekly_remittance / specified_percentage_as_decimal
+  Step 2: implied_MONTHLY_revenue = implied_weekly_revenue × 4.33
+  EXAMPLE: Rowan has 7.7% specified percentage with $10,500/wk remittance → $10,500 / 0.077 = $136,364/wk → $136,364 × 4.33 = $590,455/mo implied.
+  EXAMPLE: TMM has 49% specified percentage with $9,765/wk → $9,765 / 0.49 = $19,929/wk → $19,929 × 4.33 = $86,291/mo implied.
+  CRITICAL: The output "stated_revenue" field must ALWAYS be a MONTHLY figure. Never output the weekly implied figure. Always multiply by 4.33.
+  Output this as "stated_revenue" in the contract_vs_reality output, and set "revenue_source": "implied_from_specified_percentage".
+  If the agreement has BOTH an explicit stated revenue AND a specified percentage, use the explicit stated revenue but note any discrepancy in leverage_points.
 
 ### 2. AVAILABLE REVENUE AT TIME OF FUNDING — The Cascading Burden
 This is the critical calculation:
@@ -173,6 +175,8 @@ For each position:
   * What percentage of available revenue was already committed?
   * Did this funder fund despite the merchant being already over-leveraged?
 - Build a clear narrative: "When Funder X funded on [date], the merchant was already paying $X/week to Y positions, leaving only $Z available. Funder X added $W/week, pushing total burden to $V and available revenue to $U."
+- SELF-RENEWAL DETECTION: If a funder's agreement shows a prior_balance_amount being paid to THEMSELVES (prior_balance_is_self_renewal: true, or prior_balance_paid_to matches the funder's own name), the funder HAD a prior position that was generating weekly debits. The existing_weekly_mca_at_funding for this funder should INCLUDE the prior position's payment amount that was active before the renewal. Check the bank statement data for debits to this funder in the months before the new agreement date to determine the prior payment amount. A self-renewal does NOT mean the merchant had zero existing MCA burden — it means this funder is replacing their own prior position.
+- For the narrative: Note that this was a self-renewal and the funder had full knowledge of the merchant's existing debt structure since they were already an active creditor.
 
 ### 5. CONTRACT vs REALITY TABLE — Per Funder
 For each funder, produce a side-by-side comparison:
@@ -183,6 +187,9 @@ For each funder, produce a side-by-side comparison:
 | Payment Amount | $contracted | $actual | +/-$ |
 | Available Revenue | assumed $X | actual $Y | -XX% |
 
+CRITICAL — CONTRACTED PAYMENT SOURCE: For the \`contracted_payment\` field in contract_vs_reality, ALWAYS use the payment amount directly from the agreement data fields: \`weekly_payment\`, \`daily_payment\`, or \`financial_terms.specified_weekly_payment\` / \`financial_terms.specified_daily_payment\`. Do NOT calculate the payment by dividing purchased_amount by estimated term — that produces a different number than what the contract actually specifies. The agreement data already has the extracted payment amount. Use it as-is.
+Similarly, for \`position_chronology.weekly_payment\`, use the agreement's extracted weekly_payment field directly. If only a daily payment is available, multiply by 5 (business days) to get weekly.
+
 ### 6. FUNDER NEGLIGENCE SCORECARD
 Rate each funder's underwriting practices:
 - Did they verify revenue? (If stated revenue doesn't match, probably not)
@@ -191,6 +198,9 @@ Rate each funder's underwriting practices:
 - Is their factor rate above market? (>1.45 is high, >1.55 is predatory)
 - Did they deduct excessive fees? (>3% of purchase price is high)
 - Did they include unenforceable clauses? (COJ in NY, etc.)
+
+### CRITICAL: ONE ENTRY PER AGREEMENT
+The \`contract_vs_reality\` array MUST have exactly one entry for EACH agreement provided in the input data. If there are 4 agreements, there must be 4 entries in \`contract_vs_reality\`. Do NOT merge multiple agreements from the same funder into one entry — if The Merchant Marketplace has Position A and Position C, they each get their own separate entry with their own balance, payment, dates, and analysis. Same for \`position_chronology\` — one entry per agreement/position. The number of entries in \`contract_vs_reality\` must EQUAL the number of agreements provided.
 
 ## OUTPUT FORMAT — Return ONLY valid JSON:
 
@@ -235,7 +245,8 @@ Rate each funder's underwriting practices:
     "implied_revenue_from_pct": null,
     "actual_revenue": 0,
     "revenue_discrepancy_pct": 0,
-    "revenue_inflated": true,
+    "revenue_inflated": false,
+    "revenue_understated": false,
 
     "contracted_withhold_pct": 0,
     "actual_withhold_pct": 0,
@@ -315,7 +326,12 @@ Rate each funder's underwriting practices:
 }
 
 RULES:
-1. Revenue discrepancy = (stated - actual) / stated × 100. Positive = funder overstated.
+1. Revenue discrepancy calculation:
+   - If stated_revenue is not null: revenue_discrepancy_pct = ((stated_revenue - actual_revenue) / actual_revenue) × 100
+   - POSITIVE value = funder OVERSTATED revenue (stated was higher than actual) → set revenue_inflated: true, revenue_understated: false
+   - NEGATIVE value = funder UNDERSTATED revenue (stated was lower than actual) → set revenue_inflated: false, revenue_understated: true
+   - Use actual_revenue as the denominator, not stated_revenue, because actual is the ground truth.
+   - If stated_revenue is null (not disclosed), set revenue_discrepancy_pct to 0, revenue_inflated to false, revenue_understated to false.
 2. Available revenue = actual_revenue - existing_mca_monthly_payments at time of funding.
 3. True withhold % = this_funder_monthly_payment / available_revenue_at_funding × 100.
 4. Underwriting grades: A = proper due diligence, B = minor issues, C = significant gaps, D = negligent, F = predatory.
@@ -324,7 +340,8 @@ RULES:
 7. Factor rate >1.45 = above market, >1.55 = predatory assessment.
 8. Total fees >5% of purchase price = excessive.
 9. ALWAYS calculate available revenue at time of EACH funding — this is the key number.
-10. The cascading burden narrative should read like a story a funder's collections team can follow.`;
+10. The cascading burden narrative should read like a story a funder's collections team can follow.
+11. NEVER calculate contracted_payment or weekly_payment by dividing purchased_amount by estimated_term. ALWAYS read the payment amount directly from the agreement data fields (weekly_payment, daily_payment, financial_terms.specified_weekly_payment, financial_terms.specified_daily_payment). The extracted agreement data is the source of truth for payment amounts.`;
 
 export async function POST(request) {
   try {
