@@ -6,6 +6,68 @@ const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
 
 const AGREEMENT_PROMPT = `You are an expert MCA (Merchant Cash Advance) contract analyst. Extract ALL terms from this Future Receivables Sale and Purchase Agreement with maximum precision.
 
+=== MCA AGREEMENT FIELD GLOSSARY — READ CAREFULLY ===
+
+These fields have SPECIFIC meanings in MCA contracts. Many fields appear near each other on the same page and are easily confused. READ THE LABEL NEXT TO EACH NUMBER, not just the number itself.
+
+PURCHASE PRICE (also called "Advance Amount", "Funding Amount"):
+- The total amount the funder commits to the deal BEFORE any deductions
+- This is the GROSS funding amount, NOT what the merchant receives
+- Typically the largest round number on page 1 (e.g., $300,000, $450,000)
+- CRITICAL: This is NOT the Net Amount Funded / Net to Seller
+
+PURCHASED AMOUNT (also called "Sold Amount", "Payback Amount", "Total Remittance"):
+- The total amount the merchant must repay = Purchase Price × Factor Rate
+- Always LARGER than Purchase Price
+- Example: $300,000 Purchase × 1.33 factor = $399,000 Purchased Amount
+
+FACTOR RATE:
+- Purchased Amount ÷ Purchase Price
+- Always between 1.10 and 1.60 for typical MCAs
+- If your calculated factor is outside this range, you likely swapped Purchase Price and Purchased Amount
+
+PERIODIC AMOUNT / WEEKLY PAYMENT / DAILY PAYMENT (also called "Initial Installment", "Estimated Weekly Amount"):
+- The recurring payment amount debited from merchant's account
+- For weekly MCAs: typically $5,000–$20,000 range
+- READ THIS DIRECTLY from the field labeled "Periodic Amount" or "Weekly Installment"
+- CRITICAL: Do NOT confuse with Origination Fee. The Periodic Amount is the RECURRING payment. The Origination Fee is a ONE-TIME deduction.
+- Sanity check: Purchased Amount ÷ Periodic Amount should give 20-60 weeks of payments
+
+ORIGINATION FEE (also called "Underwriting Fee", "Processing Fee"):
+- A one-time fee deducted from Purchase Price before funding
+- Typically 2-10% of Purchase Price
+- Usually found in Rider 1 or a fee schedule, NOT in the main terms grid
+- CRITICAL: This is NOT the weekly/daily payment amount
+- Sanity check: Origination Fee is usually much smaller than Purchase Price
+
+NET AMOUNT FUNDED TO SELLER (also called "Net to Merchant", "Net Proceeds", "Amount Deposited"):
+- What the merchant actually receives after all deductions
+- = Purchase Price − Origination Fee − Prior Balance Payoff − Other Fees
+- This is always LESS than Purchase Price
+- CRITICAL: Do NOT put this in the purchase_price field
+
+PRIOR BALANCE (Rider 2):
+- Amount paid to a prior funder (often the same funder if self-renewal)
+- Deducted from Purchase Price before merchant receives funds
+- If present, note WHO is being paid off (same funder = self-renewal, different funder = buyout)
+
+SPECIFIED PERCENTAGE:
+- The contractual percentage of revenue the funder claims
+- Found in the main agreement terms, usually near the Purchased Amount
+- Range: 5% to 49%+ — higher values indicate more aggressive terms
+- Used to calculate implied revenue: Periodic Amount × frequency ÷ Specified %
+
+=== FIELD VALIDATION RULES ===
+
+After extracting all fields, verify:
+1. purchase_price > net_amount_funded (always — fees are deducted)
+2. purchased_amount > purchase_price (always — factor rate > 1.0)
+3. purchased_amount / purchase_price should be between 1.10 and 1.60
+4. weekly_payment × estimated_weeks ≈ purchased_amount (within 10%)
+5. origination_fee / purchase_price should be between 0.02 and 0.10 (2-10%)
+6. If origination_fee > weekly_payment, something is likely swapped — double-check
+7. If purchase_price < net_amount_funded, they are swapped — fix it
+
 CRITICAL RULES — READ BEFORE EXTRACTING:
 
 RULE 1 — MULTI-AGREEMENT DETECTION:
@@ -51,18 +113,19 @@ Return ONLY valid JSON, no markdown, no preamble. Use null for any field not fou
   "effective_date": "MM/DD/YYYY",
   "funding_date": "YYYY-MM-DD — the date funds were disbursed, if different from effective_date",
   "governing_law_state": "state name",
-  "purchase_price": 0.00,
-  "purchased_amount": 0.00,
-  "factor_rate": 0.00,
-  "weekly_payment": 0.00,
+  "purchase_price": "GROSS funding amount BEFORE deductions — the largest number, NOT net to merchant",
+  "purchased_amount": "Total payback obligation = purchase_price × factor_rate — LARGER than purchase_price",
+  "factor_rate": "purchased_amount ÷ purchase_price — must be between 1.10 and 1.60",
+  "weekly_payment": "Recurring periodic amount — READ from 'Periodic Amount' field, NOT origination fee",
   "daily_payment": 0.00,
   "payment_frequency": "weekly|daily|biweekly",
-  "specified_percentage": 0.00,
-  "origination_fee": 0.00,
+  "specified_percentage": "Contractual % of revenue claimed by funder — read directly from contract",
+  "origination_fee": "One-time fee — usually 2-10% of purchase_price, found in Rider 1",
+  "origination_fee_pct": "origination_fee ÷ purchase_price × 100",
   "prior_balance_amount": 0.00,
   "prior_balance_paid_to": "funder name or null",
   "prior_balance_is_self_renewal": false,
-  "net_to_seller": 0.00,
+  "net_to_seller": "What merchant actually received = purchase_price minus all deductions",
   "stated_monthly_revenue": 0.00,
   "reconciliation_right": false,
   "reconciliation_days": null,
@@ -243,6 +306,60 @@ function normalizeAndValidate(parsed) {
   }
 
   for (const ag of agreements) {
+    // === FIELD SWAP DETECTION ===
+
+    // Purchase price vs net_to_seller swap
+    const netField = ag.net_to_seller || ag.net_to_merchant;
+    if (ag.purchase_price && netField && ag.purchase_price < netField) {
+      console.warn(`[SWAP DETECTED] purchase_price (${ag.purchase_price}) < net (${netField}) — swapping`);
+      const temp = ag.purchase_price;
+      ag.purchase_price = netField;
+      if (ag.net_to_seller) ag.net_to_seller = temp;
+      if (ag.net_to_merchant) ag.net_to_merchant = temp;
+    }
+
+    // Weekly payment vs origination fee swap
+    if (ag.weekly_payment && ag.origination_fee && ag.purchased_amount) {
+      const weeksFromOrigFee = ag.purchased_amount / ag.origination_fee;
+      const weeksFromPayment = ag.purchased_amount / ag.weekly_payment;
+
+      if (weeksFromOrigFee >= 15 && weeksFromOrigFee <= 80 &&
+          (weeksFromPayment < 10 || weeksFromPayment > 100)) {
+        console.warn(`[SWAP DETECTED] origination_fee (${ag.origination_fee}) looks like weekly_payment — swapping`);
+        const temp = ag.weekly_payment;
+        ag.weekly_payment = ag.origination_fee;
+        ag.origination_fee = temp;
+        // Also fix financial_terms if present
+        if (ag.financial_terms) {
+          ag.financial_terms.specified_weekly_payment = ag.weekly_payment;
+          ag.financial_terms.origination_fee = ag.origination_fee;
+        }
+        if (ag.fee_analysis) {
+          ag.fee_analysis.origination_fee = ag.origination_fee;
+        }
+      }
+    }
+
+    // Calculate origination fee percentage
+    if (ag.origination_fee && ag.purchase_price && ag.purchase_price > 0) {
+      ag.origination_fee_pct = parseFloat(((ag.origination_fee / ag.purchase_price) * 100).toFixed(1));
+      if (ag.origination_fee_pct > 8) {
+        ag.extraction_notes = (ag.extraction_notes || '') + ` High origination fee (${ag.origination_fee_pct}% of purchase price).`;
+      }
+    }
+
+    // Validate and fix factor rate
+    if (ag.factor_rate && (ag.factor_rate < 1.05 || ag.factor_rate > 1.70)) {
+      if (ag.purchased_amount && ag.purchase_price && ag.purchase_price > 0) {
+        const calcFactor = parseFloat((ag.purchased_amount / ag.purchase_price).toFixed(4));
+        if (calcFactor >= 1.05 && calcFactor <= 1.70) {
+          console.warn(`[VALIDATION] factor_rate ${ag.factor_rate} outside range, recalculated to ${calcFactor}`);
+          ag.factor_rate = calcFactor;
+        }
+      }
+    }
+
+    // === EXISTING SANITY CHECKS ===
     if (ag.factor_rate === 1 || ag.factor_rate === 1.00) {
       ag._warning = 'Factor rate of 1.00 detected — likely extraction error. This agreement may contain multiple positions that were merged.';
       ag._needs_review = true;
