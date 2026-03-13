@@ -6,10 +6,47 @@ const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
 
 const AGREEMENT_PROMPT = `You are an expert MCA (Merchant Cash Advance) contract analyst. Extract ALL terms from this Future Receivables Sale and Purchase Agreement with maximum precision.
 
+CRITICAL RULES — READ BEFORE EXTRACTING:
+
+RULE 1 — MULTI-AGREEMENT DETECTION:
+A single PDF may contain MULTIPLE separate MCA agreements, especially from the same funder (self-renewals). Look for:
+- Multiple signature pages
+- Multiple "Purchase Price" or "Purchased Amount" sections with different dollar amounts
+- References to "prior balance" or "payoff" of an earlier agreement
+- Different dates on different sections of the document
+- An Exhibit A or Schedule A that references a different agreement than the main body
+
+If you detect multiple agreements in one PDF, return a JSON ARRAY of agreement objects, one per agreement found. Each agreement object has the full schema below. Label them with a "position_label" field like "Position 1", "Position 2", etc.
+
+If there is only one agreement, still return a single JSON object (NOT an array).
+
+RULE 2 — READ PAYMENT AMOUNTS, NEVER CALCULATE:
+The weekly_payment or daily_payment field MUST be read directly from the contract text. Look for phrases like:
+- "weekly installment of $X"
+- "weekly payment of $X"
+- "$X per week"
+- "daily payment of $X"
+- "$X per business day"
+Do NOT calculate payment from purchased_amount ÷ term. The contract states the payment amount explicitly. If you cannot find an explicit payment amount, set the field to null and add a note: "Payment amount not found in contract text."
+
+RULE 3 — PRIOR BALANCE PAYOFF:
+If the agreement references paying off a prior balance from the SAME funder (self-renewal), extract:
+- "prior_balance_payoff": the dollar amount being applied to the prior position
+- "is_self_renewal": true
+- "net_to_merchant": purchase_price minus prior_balance_payoff minus origination_fee minus all other fees
+The prior balance payoff is often listed on the funding instructions page, closing disclosure, or in an exhibit. It may say "payoff", "prior balance", "existing balance", "renewal payoff", or similar.
+
+RULE 4 — SPECIFIED PERCENTAGE:
+Read the specified percentage (also called "specified receivable percentage" or "specified daily/weekly percentage") directly from the contract. This is usually stated as a percentage like "49%" or "7.7%" or "11.5%". It represents the percentage of the merchant's receivables that the funder is entitled to. Do NOT confuse this with the factor rate or holdback percentage.
+
 Return ONLY valid JSON, no markdown, no preamble. Use null for any field not found.
 
 {
   "funder_name": "exact legal name of the buying/funding entity",
+  "position_label": "Position 1, Position 2, etc. — only needed if multiple agreements in one PDF",
+  "is_self_renewal": false,
+  "prior_balance_payoff": 0,
+  "net_to_merchant": 0,
   "seller_name": "merchant legal name",
   "effective_date": "MM/DD/YYYY",
   "funding_date": "YYYY-MM-DD — the date funds were disbursed, if different from effective_date",
@@ -194,6 +231,70 @@ IMPORTANT EXTRACTION RULES:
 
 14. Every fee matters. Even a $495 closing fee on a $50K advance is 1% — it adds up.`;
 
+// ─── Post-parse: normalize to array, validate, return ──────────────────────
+function normalizeAndValidate(parsed) {
+  let agreements;
+  if (Array.isArray(parsed)) {
+    agreements = parsed;
+  } else if (parsed.agreements && Array.isArray(parsed.agreements)) {
+    agreements = parsed.agreements;
+  } else {
+    agreements = [parsed];
+  }
+
+  for (const ag of agreements) {
+    if (ag.factor_rate === 1 || ag.factor_rate === 1.00) {
+      ag._warning = 'Factor rate of 1.00 detected — likely extraction error. This agreement may contain multiple positions that were merged.';
+      ag._needs_review = true;
+    }
+    if (ag.purchase_price && ag.purchased_amount && ag.purchase_price === ag.purchased_amount) {
+      ag._warning = (ag._warning || '') + ' Purchase price equals payback amount (factor 1.00) — likely extraction error.';
+      ag._needs_review = true;
+    }
+    if (ag.weekly_payment && ag.purchased_amount) {
+      const impliedWeeks = ag.purchased_amount / ag.weekly_payment;
+      if (impliedWeeks > 104) {
+        ag._warning = (ag._warning || '') + ' Implied term of ' + Math.round(impliedWeeks) + ' weeks seems too long for MCA.';
+        ag._needs_review = true;
+      }
+    }
+  }
+
+  return agreements;
+}
+
+// Parse JSON that might be an object or array — handles LLM output quirks
+function parseAgreementJSON(cleaned) {
+  // Try direct parse first
+  try {
+    return JSON.parse(cleaned);
+  } catch { /* fall through */ }
+
+  // Try to find array
+  if (cleaned.indexOf('[') >= 0 && cleaned.indexOf('[') < cleaned.indexOf('{')) {
+    let depth = 0, start = -1, end = -1;
+    for (let i = 0; i < cleaned.length; i++) {
+      if (cleaned[i] === '[') { if (depth === 0) start = i; depth++; }
+      else if (cleaned[i] === ']') { depth--; if (depth === 0 && start >= 0) { end = i + 1; break; } }
+    }
+    if (start >= 0 && end > start) {
+      try { return JSON.parse(cleaned.slice(start, end)); } catch { /* fall through */ }
+    }
+  }
+
+  // Try to find object
+  let depth = 0, start = -1, end = -1;
+  for (let i = 0; i < cleaned.length; i++) {
+    if (cleaned[i] === '{') { if (depth === 0) start = i; depth++; }
+    else if (cleaned[i] === '}') { depth--; if (depth === 0 && start >= 0) { end = i + 1; break; } }
+  }
+  if (start >= 0 && end > start) {
+    return JSON.parse(cleaned.slice(start, end));
+  }
+
+  return null;
+}
+
 export async function POST(request) {
   try {
     const contentType = request.headers.get('content-type') || '';
@@ -227,19 +328,15 @@ export async function POST(request) {
         });
         const raw = response.content[0]?.text || '';
         const cleaned = raw.replace(/```json\n?/g, '').replace(/```\n?/g, '').trim();
-        let analysis;
-        try {
-          analysis = JSON.parse(cleaned);
-        } catch {
-          let depth = 0, start = -1, end = -1;
-          for (let i = 0; i < cleaned.length; i++) {
-            if (cleaned[i] === '{') { if (depth === 0) start = i; depth++; }
-            else if (cleaned[i] === '}') { depth--; if (depth === 0 && start >= 0) { end = i + 1; break; } }
-          }
-          if (start < 0 || end <= start) return Response.json({ error: 'No JSON in response' }, { status: 500 });
-          analysis = JSON.parse(cleaned.slice(start, end));
-        }
-        return Response.json({ analysis, fileName });
+        const parsed = parseAgreementJSON(cleaned);
+        if (!parsed) return Response.json({ error: 'No JSON in response' }, { status: 500 });
+        const agreements = normalizeAndValidate(parsed);
+        return Response.json({
+          success: true,
+          analysis: agreements.length === 1 ? agreements[0] : agreements,
+          agreement_count: agreements.length,
+          file_name: fileName,
+        });
       }
 
       const file = formData.get('pdf');
@@ -277,35 +374,25 @@ export async function POST(request) {
     const rawText = response.content.filter(b => b.type === 'text').map(b => b.text).join('');
     const cleaned = rawText.replace(/```json\n?/g, '').replace(/```\n?/g, '').trim();
 
-    let analysis;
+    let parsed;
     try {
-      analysis = JSON.parse(cleaned);
+      parsed = parseAgreementJSON(cleaned);
     } catch {
-      let depth = 0, start = -1, end = -1;
-      for (let i = 0; i < cleaned.length; i++) {
-        if (cleaned[i] === '{') { if (depth === 0) start = i; depth++; }
-        else if (cleaned[i] === '}') { depth--; if (depth === 0 && start >= 0) { end = i + 1; break; } }
-      }
-      if (start >= 0 && end > start) {
-        try {
-          analysis = JSON.parse(cleaned.slice(start, end));
-        } catch {
-          return Response.json({
-            error: 'Agreement analysis returned malformed data. Try re-analyzing or switching models.',
-            debug: cleaned.slice(0, 500)
-          }, { status: 500 });
-        }
-      } else {
-        return Response.json({
-          error: 'Agreement analysis did not return structured data.',
-          debug: cleaned.slice(0, 500)
-        }, { status: 500 });
-      }
+      parsed = null;
     }
+    if (!parsed) {
+      return Response.json({
+        error: 'Agreement analysis returned malformed data. Try re-analyzing or switching models.',
+        debug: cleaned.slice(0, 500)
+      }, { status: 500 });
+    }
+
+    const agreements = normalizeAndValidate(parsed);
 
     return Response.json({
       success: true,
-      analysis,
+      analysis: agreements.length === 1 ? agreements[0] : agreements,
+      agreement_count: agreements.length,
       file_name: fileName || 'unknown',
       model_used: selectedModel
     });
