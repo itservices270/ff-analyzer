@@ -1,8 +1,9 @@
 import Anthropic from '@anthropic-ai/sdk';
+import { buildIndustryPromptBlock } from '../../data/industry-profiles.js';
 export const maxDuration = 180;
 const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
 
-const MULTI_PROMPT = `You are an expert MCA underwriter performing forensic bank statement analysis for Funders First Inc., a debt restructuring company. You have 15+ years of experience analyzing Beverly Bank & Trust statements for vending machine operators.
+const MULTI_PROMPT = `You are an expert MCA underwriter performing forensic bank statement analysis for Funders First Inc., a debt restructuring company. You have 15+ years of experience analyzing bank statements for MCA debt restructuring cases across all industries.
 
 ## REVENUE CLASSIFICATION — VENDING BUSINESSES (CRITICAL — GET THIS RIGHT)
 
@@ -104,8 +105,8 @@ If you see debits from the same payee at DIFFERENT amounts on the SAME dates or 
 • List details in nsf_events array
 
 ## DSR CALCULATION — MANDATORY FORMULA:
-• monthly_gross_profit = monthly_true_revenue × 0.60 (assumes 40% COGS for vending businesses)
-• cogs_rate = 0.40 (default for vending)
+• monthly_gross_profit = monthly_true_revenue × (1 - cogs_rate). The cogs_rate is specified in the INDUSTRY CONTEXT section below. If no industry context is provided, use 0.40 as default.
+• cogs_rate = see INDUSTRY CONTEXT section below (default: 0.40 if not specified)
 • dsr_percent = (total_mca_monthly / monthly_gross_profit) × 100
 • DO NOT divide MCA by gross revenue — that produces an artificially low DSR
 • Example: $209,000 MCA / ($571,000 × 0.60 = $342,600 gross profit) = 61.0% DSR
@@ -374,7 +375,7 @@ If MORE THAN ONE debit from the same funder occurs within a 7-day window at DIFF
 
 export async function POST(request) {
   try {
-    const { statements, model } = await request.json();
+    const { statements, model, industry } = await request.json();
     if (!statements || statements.length === 0) {
       return Response.json({ error: 'No statements provided' }, { status: 400 });
     }
@@ -394,7 +395,8 @@ export async function POST(request) {
       promptAddendum = `\n\nWARNING: The following months have missing or unreadable text: ${missingMonths}. Set months_missing to include these, and set revenue_confidence to "partial". Calculate averages using only the readable months.`;
     }
 
-    contentBlocks.push({ type: 'text', text: `${MULTI_PROMPT}${promptAddendum}\n\nSTATEMENTS TO ANALYZE (${statements.length} total):` });
+    const industryBlock = industry ? buildIndustryPromptBlock(industry) : '';
+    contentBlocks.push({ type: 'text', text: `${MULTI_PROMPT}${industryBlock}${promptAddendum}\n\nSTATEMENTS TO ANALYZE (${statements.length} total):` });
 
     for (let i = 0; i < statements.length; i++) {
       const s = statements[i];

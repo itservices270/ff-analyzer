@@ -1,5 +1,6 @@
 'use client';
 import React, { useState, useCallback, useRef, useMemo } from 'react';
+import { INDUSTRY_PROFILES, buildIndustryPromptBlock } from './data/industry-profiles';
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 const fmt = (n) => '$' + (parseFloat(n) || 0).toLocaleString('en-US', { minimumFractionDigits: 0, maximumFractionDigits: 0 });
@@ -3887,6 +3888,7 @@ export default function FFAnalyzer() {
   const [showRevenueReview, setShowRevenueReview] = useState(false);
   const [reviewDismissed, setReviewDismissed] = useState(false);
   const [enrolledPositions, setEnrolledPositions] = useState(null); // null = all enrolled (default)
+  const [selectedIndustry, setSelectedIndustry] = useState('general');
   const inputRef = useRef(null);
 
   const TABS = ['📊 Revenue', '📈 Trend', '🏦 MCA Positions', '⚠️ Risk', '📋 Agreements', '🔄 Cross-Ref', '🤝 Negotiation', '🎯 Confidence', '⬇️ Export'];
@@ -4085,7 +4087,7 @@ export default function FFAnalyzer() {
       const res = await fetch('/api/cross-reference', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ bankAnalysis: result.analysis, agreementAnalyses: agreementResults.filter(a => a.analysis).map(a => a.analysis), model })
+        body: JSON.stringify({ bankAnalysis: result.analysis, agreementAnalyses: agreementResults.filter(a => a.analysis).map(a => a.analysis), model, industry: selectedIndustry })
       });
       let data;
       try {
@@ -4201,8 +4203,8 @@ export default function FFAnalyzer() {
       }));
       const endpoint = statements.length === 1 ? '/api/analyze' : '/api/analyze-multi';
       const body = statements.length === 1
-        ? { text: statements[0].text, fileName: ready[0].file.name, model }
-        : { statements, model };
+        ? { text: statements[0].text, fileName: ready[0].file.name, model, industry: selectedIndustry }
+        : { statements, model, industry: selectedIndustry };
 
       const res = await fetch(endpoint, {
         method: 'POST',
@@ -4266,8 +4268,8 @@ export default function FFAnalyzer() {
       }));
       const endpoint = statements.length === 1 ? '/api/analyze' : '/api/analyze-multi';
       const body = statements.length === 1
-        ? { text: statements[0].text, fileName: ready[0].file.name, model }
-        : { statements, model };
+        ? { text: statements[0].text, fileName: ready[0].file.name, model, industry: selectedIndustry }
+        : { statements, model, industry: selectedIndustry };
 
       const res = await fetch(endpoint, {
         method: 'POST',
@@ -4448,6 +4450,15 @@ export default function FFAnalyzer() {
                   🔍 Analyze {readyCount} Statement{readyCount !== 1 ? 's' : ''}
                 </button>
                 <button style={S.btn('secondary')} onClick={reset}>✕ Clear All</button>
+                <select
+                  value={selectedIndustry}
+                  onChange={e => setSelectedIndustry(e.target.value)}
+                  style={{ padding: '8px 12px', borderRadius: 6, border: '1px solid rgba(0,229,255,0.3)', background: 'rgba(0,0,0,0.3)', color: '#e8e8f0', fontSize: 12, fontFamily: 'inherit' }}
+                >
+                  {Object.entries(INDUSTRY_PROFILES).map(([key, p]) => (
+                    <option key={key} value={key}>{p.label}</option>
+                  ))}
+                </select>
                 <div style={{ display: 'flex', alignItems: 'center', gap: 8, background: 'rgba(255,255,255,0.06)', border: '1px solid rgba(255,255,255,0.12)', borderRadius: 8, padding: '8px 14px' }}>
                   <span style={{ fontSize: 12, color: 'rgba(232,232,240,0.5)' }}>Model:</span>
                   <button onClick={() => setModel('opus')} style={{ fontSize: 12, padding: '3px 10px', borderRadius: 6, border: 'none', cursor: 'pointer', fontFamily: 'inherit', background: model === 'opus' ? 'rgba(0,229,255,0.2)' : 'transparent', color: model === 'opus' ? '#00e5ff' : 'rgba(232,232,240,0.45)' }}>Opus</button>

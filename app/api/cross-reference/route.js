@@ -1,4 +1,5 @@
 import Anthropic from '@anthropic-ai/sdk';
+import { buildIndustryPromptBlock } from '../../data/industry-profiles.js';
 
 export const maxDuration = 150;
 
@@ -346,7 +347,7 @@ RULES:
 export async function POST(request) {
   try {
     const body = await request.json();
-    const { bankAnalysis, agreementAnalyses, model } = body;
+    const { bankAnalysis, agreementAnalyses, model, industry } = body;
 
     if (!bankAnalysis) {
       return Response.json({ error: 'Bank statement analysis required for cross-reference.' }, { status: 400 });
@@ -363,9 +364,10 @@ export async function POST(request) {
     const trimmedBank = trimBankAnalysis(bankAnalysis);
     const trimmedAgreements = agreementAnalyses.map(a => trimAgreement(a));
 
+    const industryContext = industry ? buildIndustryPromptBlock(industry) : '';
     const contextPayload = `## BANK STATEMENT ANALYSIS (source of truth for actual numbers):
 ${JSON.stringify(trimmedBank, null, 2)}
-
+${industryContext ? `\n## INDUSTRY CONTEXT:\n${industryContext}\n` : ''}
 ## MCA AGREEMENT ANALYSES (${trimmedAgreements.length} agreements):
 ${trimmedAgreements.map((a, i) => `### Agreement ${i + 1}: ${a.funder_name || 'Unknown'}\n${JSON.stringify(a, null, 2)}`).join('\n\n')}`;
 
