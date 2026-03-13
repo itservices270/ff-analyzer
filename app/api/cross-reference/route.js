@@ -142,6 +142,12 @@ For each funder agreement:
 - Important: "Actual revenue" means TRUE revenue EXCLUDING MCA advance wires, transfers, NSF credits
 - Note: revenue should also account for EXISTING MCA burden at time of funding
 - IMPORTANT: The stated revenue from the agreement data may appear under the field name "stated_monthly_revenue" at the top level OR "financial_terms.stated_merchant_revenue" nested inside financial_terms. Check BOTH fields. If NEITHER field has a value (both are null, 0, or missing), output stated_revenue as null — do NOT output 0, because 0 implies the contract stated zero revenue, which is different from the contract not disclosing revenue at all.
+- IMPLIED REVENUE CALCULATION: If the agreement does NOT have an explicitly stated monthly revenue figure, but DOES have a specified/purchased percentage AND a weekly/daily remittance amount, calculate the implied revenue using the funder's own contract math:
+  implied_weekly_revenue = weekly_remittance / specified_percentage_as_decimal
+  implied_monthly_revenue = implied_weekly_revenue × 4.33
+  For example: 12% specified percentage with $3,975/wk remittance → $3,975 / 0.12 = $33,125/wk → $143,431/mo implied.
+  This is the revenue figure the funder's own underwriting model assumed. Output this as "stated_revenue" in the contract_vs_reality output, and add "revenue_source": "implied_from_specified_percentage" to distinguish it from an explicitly stated figure.
+  If the agreement has BOTH an explicit stated revenue AND a specified percentage, use the explicit stated revenue but ALSO calculate the implied figure and flag any discrepancy between them — if the funder stated one revenue but their percentage math implies a different one, that's an additional underwriting inconsistency to note in leverage_points.
 
 ### 2. AVAILABLE REVENUE AT TIME OF FUNDING — The Cascading Burden
 This is the critical calculation:
@@ -225,6 +231,8 @@ Rate each funder's underwriting practices:
     "agreement_date": "",
 
     "stated_revenue": null,
+    "revenue_source": "explicit|implied_from_specified_percentage|not_disclosed",
+    "implied_revenue_from_pct": null,
     "actual_revenue": 0,
     "revenue_discrepancy_pct": 0,
     "revenue_inflated": true,

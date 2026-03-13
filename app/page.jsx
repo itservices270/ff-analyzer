@@ -2333,7 +2333,15 @@ function CrossReferenceTab({ crossRefResult, crossRefError, agreementResults, po
                 <span style={S.tag(c.underwriting_grade === 'A' || c.underwriting_grade === 'B' ? 'green' : c.underwriting_grade === 'C' ? 'amber' : 'red')}>Grade: {c.underwriting_grade || '—'}</span>
               </div>
               <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(150px, 1fr))', gap: 10, marginBottom: 10 }}>
-                <div><div style={S.statLabel}>Stated Revenue</div><div style={{ fontSize: 13, color: '#ffd54f' }}>{c.stated_revenue ? fmt(c.stated_revenue) : 'Not Disclosed'}</div></div>
+                <div>
+  <div style={S.statLabel}>{c.revenue_source === 'implied_from_specified_percentage' ? 'Implied Revenue' : 'Stated Revenue'}</div>
+  <div style={{ fontSize: 13, color: '#ffd54f' }}>
+    {c.stated_revenue ? fmt(c.stated_revenue) : 'Not Disclosed'}
+    {c.revenue_source === 'implied_from_specified_percentage' && (
+      <span style={{ fontSize: 10, color: 'rgba(255,213,79,0.5)', marginLeft: 6 }}>(from specified %)</span>
+    )}
+  </div>
+</div>
                 <div><div style={S.statLabel}>Actual Revenue</div><div style={{ fontSize: 13, color: '#00e5ff' }}>{fmt(c.actual_revenue)}</div></div>
                 <div><div style={S.statLabel}>Revenue Gap</div><div style={{ fontSize: 13, color: c.revenue_discrepancy_pct > 0 ? '#ef5350' : '#4caf50' }}>{c.revenue_discrepancy_pct > 0 ? '+' : ''}{fmtP(c.revenue_discrepancy_pct)} inflated</div></div>
                 <div><div style={S.statLabel}>Contract Withhold</div><div style={{ fontSize: 13, color: '#e8e8f0' }}>{fmtP(c.contracted_withhold_pct)}</div></div>
