@@ -344,6 +344,127 @@ RULES:
 10. The cascading burden narrative should read like a story a funder's collections team can follow.
 11. NEVER calculate contracted_payment or weekly_payment by dividing purchased_amount by estimated_term. ALWAYS read the payment amount directly from the agreement data fields (weekly_payment, daily_payment, financial_terms.specified_weekly_payment, financial_terms.specified_daily_payment). The extracted agreement data is the source of truth for payment amounts.`;
 
+// ─── Post-Processing: Override LLM numbers with agreement source data ──────
+function postProcessCrossRef(analysis, agreementAnalyses) {
+  if (!analysis || !agreementAnalyses || agreementAnalyses.length === 0) return analysis;
+
+  const agLookup = [];
+  for (const agWrapper of agreementAnalyses) {
+    const ag = agWrapper.analysis || agWrapper;
+    if (!ag.funder_name) continue;
+
+    const weeklyPayment = ag.weekly_payment
+      || ag.financial_terms?.specified_weekly_payment
+      || (ag.daily_payment ? ag.daily_payment * 5 : null)
+      || (ag.financial_terms?.specified_daily_payment ? ag.financial_terms.specified_daily_payment * 5 : null);
+
+    const specifiedPct = ag.specified_percentage
+      || ag.financial_terms?.specified_receivable_percentage
+      || null;
+
+    let impliedMonthlyRevenue = null;
+    if (specifiedPct && specifiedPct > 0 && weeklyPayment && weeklyPayment > 0) {
+      const pctDecimal = specifiedPct > 1 ? specifiedPct / 100 : specifiedPct;
+      const impliedWeekly = weeklyPayment / pctDecimal;
+      impliedMonthlyRevenue = Math.round(impliedWeekly * 4.33);
+    }
+
+    agLookup.push({
+      funder_name: ag.funder_name,
+      normalized: ag.funder_name.toLowerCase().replace(/[^a-z0-9]/g, ''),
+      purchase_price: ag.purchase_price || ag.financial_terms?.purchase_price || null,
+      purchased_amount: ag.purchased_amount || ag.financial_terms?.purchased_amount || null,
+      factor_rate: ag.factor_rate || ag.financial_terms?.factor_rate || null,
+      weekly_payment: weeklyPayment,
+      origination_fee: ag.origination_fee || ag.fee_analysis?.origination_fee || null,
+      net_to_seller: ag.net_to_seller || ag.fee_analysis?.net_proceeds_to_merchant || null,
+      specified_pct: specifiedPct,
+      implied_monthly_revenue: impliedMonthlyRevenue,
+      stated_monthly_revenue: ag.stated_monthly_revenue || ag.financial_terms?.stated_merchant_revenue || null,
+      effective_date: ag.effective_date || ag.funding_date || null,
+    });
+  }
+
+  function matchAgreement(funderName) {
+    if (!funderName) return null;
+    const norm = funderName.toLowerCase().replace(/[^a-z0-9]/g, '');
+
+    let match = agLookup.find(a => a.normalized === norm);
+    if (match) return match;
+
+    if (norm.length >= 6) {
+      match = agLookup.find(a => a.normalized.includes(norm.slice(0, 8)) || norm.includes(a.normalized.slice(0, 8)));
+      if (match) return match;
+    }
+
+    const firstWord = norm.replace(/[0-9]/g, '').slice(0, 6);
+    if (firstWord.length >= 4) {
+      match = agLookup.find(a => a.normalized.startsWith(firstWord));
+      if (match) return match;
+    }
+
+    return null;
+  }
+
+  // Override contract_vs_reality
+  if (analysis.contract_vs_reality && Array.isArray(analysis.contract_vs_reality)) {
+    for (const cvr of analysis.contract_vs_reality) {
+      const ag = matchAgreement(cvr.funder_name);
+      if (!ag) continue;
+
+      if (ag.weekly_payment) cvr.contracted_payment = ag.weekly_payment;
+      if (ag.factor_rate) cvr.contracted_factor_rate = ag.factor_rate;
+      if (ag.origination_fee) cvr.total_fees_charged = ag.origination_fee;
+      if (ag.net_to_seller) cvr.net_proceeds = ag.net_to_seller;
+
+      if (ag.stated_monthly_revenue && ag.stated_monthly_revenue > 0) {
+        cvr.stated_revenue = ag.stated_monthly_revenue;
+        cvr.revenue_source = 'explicit';
+      } else if (ag.implied_monthly_revenue && ag.implied_monthly_revenue > 0) {
+        cvr.stated_revenue = ag.implied_monthly_revenue;
+        cvr.revenue_source = 'implied_from_specified_percentage';
+        cvr.implied_revenue_from_pct = ag.implied_monthly_revenue;
+      }
+
+      if (cvr.stated_revenue && cvr.stated_revenue > 0 && cvr.actual_revenue && cvr.actual_revenue > 0) {
+        cvr.revenue_discrepancy_pct = parseFloat((((cvr.stated_revenue - cvr.actual_revenue) / cvr.actual_revenue) * 100).toFixed(1));
+        cvr.revenue_inflated = cvr.revenue_discrepancy_pct > 0;
+        cvr.revenue_understated = cvr.revenue_discrepancy_pct < 0;
+      }
+
+      if (ag.purchased_amount && ag.net_to_seller && ag.net_to_seller > 0) {
+        cvr.true_factor_rate = parseFloat((ag.purchased_amount / ag.net_to_seller).toFixed(2));
+      }
+    }
+  }
+
+  // Override position_chronology
+  if (analysis.position_chronology && Array.isArray(analysis.position_chronology)) {
+    for (const pos of analysis.position_chronology) {
+      const ag = matchAgreement(pos.funder_name);
+      if (!ag) continue;
+
+      if (ag.weekly_payment) {
+        pos.weekly_payment = ag.weekly_payment;
+        pos.monthly_payment = Math.round(ag.weekly_payment * 4.33);
+      }
+      if (ag.purchase_price) pos.purchase_price = ag.purchase_price;
+      if (ag.net_to_seller) pos.net_proceeds = ag.net_to_seller;
+    }
+  }
+
+  // Override restructuring_recommendation per-funder
+  if (analysis.restructuring_recommendation?.per_funder_recommendation) {
+    for (const rec of analysis.restructuring_recommendation.per_funder_recommendation) {
+      const ag = matchAgreement(rec.funder);
+      if (!ag || !ag.weekly_payment) continue;
+      rec.current_weekly = ag.weekly_payment;
+    }
+  }
+
+  return analysis;
+}
+
 export async function POST(request) {
   try {
     const body = await request.json();
@@ -433,9 +554,12 @@ ${trimmedAgreements.map((a, i) => `### Agreement ${i + 1}: ${a.funder_name || 'U
       }
     }
 
+    // Post-process: override LLM numbers with agreement source data
+    const processedAnalysis = postProcessCrossRef(analysis, agreementAnalyses.map(a => a.analysis || a));
+
     return Response.json({
       success: true,
-      analysis,
+      analysis: processedAnalysis,
       agreements_count: agreementAnalyses.length,
       model_used: selectedModel
     });
