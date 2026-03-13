@@ -1361,8 +1361,20 @@ function NegotiationTab({ a, positions, excludedIds, otherExcludedIds, depositOv
           for (const dp of dedupEnrolled) {
             const dpKey = normalizeFunderKey(dp.funder_name);
             if (matchKey.length >= 6 && dpKey.length >= 6 && (matchKey.includes(dpKey.slice(0, 6)) || dpKey.includes(matchKey.slice(0, 6)))) {
-              dp._totalWeekly += toWeeklyEquiv(p.payment_amount_current || p.payment_amount || 0, p.frequency);
+              const advWeekly = toWeeklyEquiv(p.payment_amount_current || p.payment_amount || 0, p.frequency);
+              const advAgMatch = matchAgreementToPosition(p.funder_name, agreementResults);
+              const advBalance = advAgMatch?.analysis?.financial_terms?.purchased_amount
+                ? Math.round(advAgMatch.analysis.financial_terms.purchased_amount)
+                : Math.round(advWeekly * 52);
+              dp._totalWeekly += advWeekly;
+              dp._balance += advBalance;
               dp._advCount++;
+              dp._advances.push({
+                label: p.funder_name,
+                balance: advBalance,
+                weekly: advWeekly,
+                agreementDate: advAgMatch?.analysis?.effective_date || advAgMatch?.analysis?.funding_date || null,
+              });
               found = true;
               break;
             }
@@ -1371,12 +1383,19 @@ function NegotiationTab({ a, positions, excludedIds, otherExcludedIds, depositOv
             const agMatch = matchAgreementToPosition(p.funder_name, agreementResults);
             const agBalance = agMatch?.analysis?.financial_terms?.purchased_amount;
             const weekly = toWeeklyEquiv(p.payment_amount_current || p.payment_amount || 0, p.frequency);
+            const bal = agBalance ? Math.round(agBalance) : Math.round(weekly * 52);
             dedupEnrolled.push({
               ...p,
               funder_name: p.funder_name.replace(/\s*\(Advance\s*\d+\)/i, '').replace(/\s*\(Position\s*[A-Z]\)/i, '').trim(),
               _totalWeekly: weekly,
               _advCount: 1,
-              _balance: agBalance ? Math.round(agBalance) : Math.round(weekly * 52),
+              _balance: bal,
+              _advances: [{
+                label: p.funder_name,
+                balance: bal,
+                weekly: weekly,
+                agreementDate: agMatch?.analysis?.effective_date || agMatch?.analysis?.funding_date || null,
+              }],
             });
           }
         });
@@ -1805,7 +1824,11 @@ function NegotiationEmailEngine({ fTiers, revenue, a, totalWeeklyBurden, enrolle
     const overpullDelta = contractWeekly > 0 ? ft.originalWeekly - contractWeekly : 0;
     const overpullNote = overpullDelta > contractWeekly * 0.01 ? `\nNote: Recent debits of ${f$(ft.originalWeekly)} exceed your contractual installment.` : '';
 
-    const proposalBlock = `YOUR POSITION:\nYour Current Weekly Payment:    ${currentLabel}\nProposed Weekly Payment:        ${f$(tier.weeklyPayment)}\nWeekly Reduction:               ${f$(tier.reductionDollars)} less per week\nPayment Reduction:              ${tier.reductionPct.toFixed(1)}%\nProposed Term:                  ${tier.proposedTermWeeks} weeks\nTotal Repayment:                ${f$(ft.balance)} — 100% of your balance\nPayments Begin:                 Within 72 hours of agreement${overpullNote}`;
+    const positionBreakdown = ft._advances && ft._advances.length > 1
+      ? `YOUR POSITIONS WITH ${ft.name.toUpperCase()}:\nWe have identified ${ft._advances.length} active advances with your organization:\n${ft._advances.map((adv, i) => `  Advance ${i + 1}: Balance ${f$(adv.balance)} · ${f$(adv.weekly)}/wk${adv.agreementDate ? ` (originated ${adv.agreementDate})` : ''}`).join('\n')}\n\nCOMBINED POSITION:\n`
+      : '';
+
+    const proposalBlock = `${positionBreakdown}YOUR POSITION${ft._advCount > 1 ? ' (COMBINED)' : ''}:\nYour Current Weekly Payment:    ${currentLabel}\nProposed Weekly Payment:        ${f$(tier.weeklyPayment)}\nWeekly Reduction:               ${f$(tier.reductionDollars)} less per week\nPayment Reduction:              ${tier.reductionPct.toFixed(1)}%\nProposed Term:                  ${tier.proposedTermWeeks} weeks\nTotal Repayment:                ${f$(ft.balance)} — 100% of your balance\nPayments Begin:                 Within 72 hours of agreement${overpullNote}`;
 
     const defaultRecovery = Math.round(ft.balance * 0.35);
     const defaultNet = Math.round(defaultRecovery * 0.7);
@@ -1834,7 +1857,7 @@ function NegotiationEmailEngine({ fTiers, revenue, a, totalWeeklyBurden, enrolle
       {/* Term Comparison Table */}
       {fTiers.length > 0 && (
         <div style={{ background: 'rgba(0,0,0,0.25)', borderRadius: 10, padding: 16, marginBottom: 20, overflowX: 'auto' }}>
-          <div style={{ fontSize: 11, color: 'rgba(232,232,240,0.45)', marginBottom: 8, textTransform: 'uppercase', letterSpacing: 0.5 }}>Term Comparison — Enrolled Funders</div>
+          <div style={{ fontSize: 11, color: 'rgba(232,232,240,0.45)', marginBottom: 8, textTransform: 'uppercase', letterSpacing: 0.5 }}>Term Comparison — {fTiers.length} Funder{fTiers.length !== 1 ? 's' : ''} ({fTiers.reduce((s, ft) => s + (ft._advCount || 1), 0)} positions)</div>
           <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 12 }}>
             <thead>
               <tr style={{ borderBottom: '1px solid rgba(255,255,255,0.1)' }}>
@@ -1875,8 +1898,20 @@ function NegotiationEmailEngine({ fTiers, revenue, a, totalWeeklyBurden, enrolle
           return (
             <div>
               <div style={{ background: 'rgba(0,0,0,0.2)', borderRadius: 8, padding: 14, marginBottom: 16, fontSize: 12, color: 'rgba(232,232,240,0.7)', lineHeight: 1.8 }}>
-                <div style={{ fontSize: 16, color: '#00e5ff', fontWeight: 700, marginBottom: 6 }}>{selFt.name}</div>
-                <div>Balance: <strong style={{ color: '#e8e8f0' }}>{fmt(selFt.balance)}</strong> · Original: <strong style={{ color: '#ef9a9a' }}>{fmt(selFt.originalWeekly)}/wk</strong> · Allocation: <strong style={{ color: '#00e5ff' }}>{fmtD(selFt.allocation)}/wk</strong></div>
+                <div style={{ fontSize: 16, color: '#00e5ff', fontWeight: 700, marginBottom: 6 }}>{selFt.name}{selFt._advCount > 1 ? ` (${selFt._advCount} advances)` : ''}</div>
+                {selFt._advances && selFt._advances.length > 1 && (
+                  <div style={{ background: 'rgba(255,255,255,0.03)', borderRadius: 6, padding: 10, marginBottom: 8, border: '1px solid rgba(255,255,255,0.06)' }}>
+                    {selFt._advances.map((adv, ai) => (
+                      <div key={ai} style={{ fontSize: 11, color: 'rgba(232,232,240,0.6)', lineHeight: 1.8, display: 'flex', gap: 12 }}>
+                        <span style={{ color: '#ffd54f', minWidth: 80 }}>Advance {ai + 1}:</span>
+                        <span>Balance: <strong style={{ color: '#e8e8f0' }}>{fmt(adv.balance)}</strong></span>
+                        <span>Weekly: <strong style={{ color: '#ef9a9a' }}>{fmtD(adv.weekly)}/wk</strong></span>
+                        {adv.agreementDate && <span style={{ color: 'rgba(232,232,240,0.35)' }}>({adv.agreementDate})</span>}
+                      </div>
+                    ))}
+                  </div>
+                )}
+                <div>Combined Balance: <strong style={{ color: '#e8e8f0' }}>{fmt(selFt.balance)}</strong> · Combined Weekly: <strong style={{ color: '#ef9a9a' }}>{fmt(selFt.originalWeekly)}/wk</strong> · Allocation: <strong style={{ color: '#00e5ff' }}>{fmtD(selFt.allocation)}/wk</strong></div>
                 <div>Total Repayment (all tiers): <strong style={{ color: '#4caf50' }}>{fmt(selFt.balance)}</strong> (100%)</div>
               </div>
 
@@ -2298,7 +2333,7 @@ function CrossReferenceTab({ crossRefResult, crossRefError, agreementResults, po
                 <span style={S.tag(c.underwriting_grade === 'A' || c.underwriting_grade === 'B' ? 'green' : c.underwriting_grade === 'C' ? 'amber' : 'red')}>Grade: {c.underwriting_grade || '—'}</span>
               </div>
               <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(150px, 1fr))', gap: 10, marginBottom: 10 }}>
-                <div><div style={S.statLabel}>Stated Revenue</div><div style={{ fontSize: 13, color: '#ffd54f' }}>{fmt(c.stated_revenue)}</div></div>
+                <div><div style={S.statLabel}>Stated Revenue</div><div style={{ fontSize: 13, color: '#ffd54f' }}>{c.stated_revenue ? fmt(c.stated_revenue) : 'Not Disclosed'}</div></div>
                 <div><div style={S.statLabel}>Actual Revenue</div><div style={{ fontSize: 13, color: '#00e5ff' }}>{fmt(c.actual_revenue)}</div></div>
                 <div><div style={S.statLabel}>Revenue Gap</div><div style={{ fontSize: 13, color: c.revenue_discrepancy_pct > 0 ? '#ef5350' : '#4caf50' }}>{c.revenue_discrepancy_pct > 0 ? '+' : ''}{fmtP(c.revenue_discrepancy_pct)} inflated</div></div>
                 <div><div style={S.statLabel}>Contract Withhold</div><div style={{ fontSize: 13, color: '#e8e8f0' }}>{fmtP(c.contracted_withhold_pct)}</div></div>
@@ -3647,7 +3682,19 @@ ${signature}`;
       <div style={S.grid2}>
         <div style={S.stat}><div style={S.statLabel}>Source File</div><div style={{ fontSize: 13, color: '#e8e8f0', wordBreak: 'break-all' }}>{fileName}</div></div>
         <div style={S.stat}><div style={S.statLabel}>Analyzed</div><div style={{ fontSize: 13, color: '#e8e8f0' }}>{new Date().toLocaleString()}</div></div>
-        <div style={S.stat}><div style={S.statLabel}>Statement Period</div><div style={{ fontSize: 13, color: '#e8e8f0' }}>{a.statement_month}</div></div>
+        <div style={S.stat}><div style={S.statLabel}>Statement Period</div><div style={{ fontSize: 13, color: '#e8e8f0' }}>{
+  a.statement_month
+    ? a.statement_month
+    : a.statement_periods && a.statement_periods.length > 0
+      ? a.statement_periods.length === 1
+        ? a.statement_periods[0].month
+        : `${a.statement_periods[0].month} — ${a.statement_periods[a.statement_periods.length - 1].month}`
+      : a.monthly_breakdown && a.monthly_breakdown.length > 0
+        ? a.monthly_breakdown.length === 1
+          ? a.monthly_breakdown[0].month
+          : `${a.monthly_breakdown[0].month} — ${a.monthly_breakdown[a.monthly_breakdown.length - 1].month}`
+        : '—'
+}</div></div>
         <div style={S.stat}><div style={S.statLabel}>Transaction Count</div><div style={{ fontSize: 13, color: '#e8e8f0' }}>{(a.raw_transaction_summary?.total_credit_transactions || 0) + (a.raw_transaction_summary?.total_debit_transactions || 0)} total</div></div>
       </div>
     </div>

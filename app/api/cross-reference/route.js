@@ -141,6 +141,7 @@ For each funder agreement:
 - If stated revenue is HIGHER than actual, the funder's underwriting was inflated
 - Important: "Actual revenue" means TRUE revenue EXCLUDING MCA advance wires, transfers, NSF credits
 - Note: revenue should also account for EXISTING MCA burden at time of funding
+- IMPORTANT: The stated revenue from the agreement data may appear under the field name "stated_monthly_revenue" at the top level OR "financial_terms.stated_merchant_revenue" nested inside financial_terms. Check BOTH fields. If NEITHER field has a value (both are null, 0, or missing), output stated_revenue as null — do NOT output 0, because 0 implies the contract stated zero revenue, which is different from the contract not disclosing revenue at all.
 
 ### 2. AVAILABLE REVENUE AT TIME OF FUNDING — The Cascading Burden
 This is the critical calculation:
@@ -223,7 +224,7 @@ Rate each funder's underwriting practices:
     "funder_name": "",
     "agreement_date": "",
 
-    "stated_revenue": 0,
+    "stated_revenue": null,
     "actual_revenue": 0,
     "revenue_discrepancy_pct": 0,
     "revenue_inflated": true,
