@@ -1,5 +1,5 @@
 'use client';
-import React, { useState, useCallback, useRef, useMemo } from 'react';
+import React, { useState, useEffect, useCallback, useRef, useMemo } from 'react';
 import { INDUSTRY_PROFILES, buildIndustryPromptBlock } from './data/industry-profiles';
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
@@ -3871,6 +3871,354 @@ function TrendTab({ a, agreementResults }) {
   );
 }
 
+// ─── Funder Intelligence Tab ─────────────────────────────────────────────────
+const fiBtn = { padding: '8px 14px', borderRadius: 6, fontSize: 12, cursor: 'pointer', fontFamily: 'inherit', border: 'none' };
+const fiBtnSm = { padding: '2px 8px', borderRadius: 4, fontSize: 10, cursor: 'pointer', fontFamily: 'inherit', border: '1px solid rgba(255,255,255,0.1)', background: 'transparent' };
+const fiStat = { background: 'rgba(255,255,255,0.04)', borderRadius: 8, padding: 16, border: '1px solid rgba(255,255,255,0.06)', textAlign: 'center' };
+const fiInput = { width: '100%', padding: '6px 10px', borderRadius: 6, border: '1px solid rgba(255,255,255,0.12)', background: 'rgba(0,0,0,0.3)', color: '#e8e8f0', fontSize: 12, fontFamily: 'inherit', boxSizing: 'border-box' };
+const fiSelect = { ...fiInput, appearance: 'auto' };
+
+function FunderIntelTab({ positions, agreementResults }) {
+  const [funders, setFunders] = useState([]);
+  const [outcomes, setOutcomes] = useState([]);
+  const [editingId, setEditingId] = useState(null);
+  const [editForm, setEditForm] = useState({});
+  const [showAddForm, setShowAddForm] = useState(false);
+  const [activeSection, setActiveSection] = useState('directory');
+
+  useEffect(() => {
+    import('./data/funder-intel.js').then(mod => {
+      setFunders(mod.getAllFunders());
+      setOutcomes(mod.getAllOutcomes());
+    });
+  }, []);
+
+  const refreshData = async () => {
+    const mod = await import('./data/funder-intel.js');
+    setFunders(mod.getAllFunders());
+    setOutcomes(mod.getAllOutcomes());
+  };
+
+  const handleSave = async (funder) => {
+    const mod = await import('./data/funder-intel.js');
+    mod.saveFunder(funder);
+    await refreshData();
+    setEditingId(null);
+    setEditForm({});
+    setShowAddForm(false);
+  };
+
+  const handleDelete = async (id) => {
+    if (!confirm('Delete this funder intel record?')) return;
+    const mod = await import('./data/funder-intel.js');
+    mod.deleteFunder(id);
+    await refreshData();
+  };
+
+  const autoPopulate = async () => {
+    const mod = await import('./data/funder-intel.js');
+    const allPositions = positions || [];
+    const allAgreements = agreementResults || [];
+    let added = 0;
+
+    allPositions.forEach(p => {
+      if (!p.funder_name) return;
+      const existing = mod.findFunderByName(p.funder_name);
+      if (!existing) {
+        const agMatch = allAgreements.find(a => {
+          const agName = (a.analysis?.funder_name || '').toLowerCase();
+          const posName = p.funder_name.toLowerCase();
+          return agName.includes(posName.slice(0, 6)) || posName.includes(agName.slice(0, 6));
+        });
+        const ag = agMatch?.analysis;
+
+        mod.saveFunder({
+          name: p.funder_name,
+          has_reconciliation: ag?.reconciliation_right || null,
+          reconciliation_days: ag?.reconciliation_days || null,
+          has_anti_stacking: ag?.anti_stacking_clause || null,
+          has_coj: ag?.coj_clause || null,
+          governing_law: ag?.governing_law_state || '',
+          notes: `Auto-populated from deal analysis on ${new Date().toLocaleDateString()}`,
+        });
+        added++;
+      }
+    });
+
+    await refreshData();
+    if (added === 0) alert('All funders from current deal are already in the database.');
+  };
+
+  // ── Insights calculations ──
+  const resolvedOutcomes = outcomes.filter(o => o.days_to_resolution > 0);
+  const avgResponseTime = resolvedOutcomes.length > 0
+    ? (resolvedOutcomes.reduce((s, o) => s + o.days_to_resolution, 0) / resolvedOutcomes.length).toFixed(1)
+    : '—';
+  const acceptanceRate = outcomes.length > 0
+    ? ((outcomes.filter(o => o.accepted === true).length / outcomes.length) * 100).toFixed(0)
+    : '—';
+  const acceptedWithReduction = outcomes.filter(o => o.accepted && o.accepted_reduction_pct > 0);
+  const avgReduction = acceptedWithReduction.length > 0
+    ? (acceptedWithReduction.reduce((s, o) => s + o.accepted_reduction_pct, 0) / acceptedWithReduction.length).toFixed(1)
+    : '—';
+
+  const sectionBtns = [
+    { key: 'directory', label: `Funder Directory (${funders.length})`, icon: '📇' },
+    { key: 'outcomes', label: `Deal Outcomes (${outcomes.length})`, icon: '📊' },
+    { key: 'insights', label: 'Intelligence Insights', icon: '🧠' },
+  ];
+
+  // ── Edit form fields ──
+  const renderEditForm = (form, setForm, onSave, onCancel) => (
+    <div style={{ background: 'rgba(0,0,0,0.4)', borderRadius: 10, padding: 16, marginBottom: 12, border: '1px solid rgba(0,229,255,0.2)' }}>
+      <div style={{ fontSize: 13, color: '#00e5ff', fontWeight: 600, marginBottom: 12 }}>{form.id ? 'Edit Funder' : 'Add New Funder'}</div>
+      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10 }}>
+        <div>
+          <label style={{ fontSize: 10, color: 'rgba(232,232,240,0.5)', display: 'block', marginBottom: 3 }}>Funder Name *</label>
+          <input style={fiInput} value={form.name || ''} onChange={e => setForm(f => ({ ...f, name: e.target.value }))} placeholder="e.g. Mint Funding, Inc." />
+        </div>
+        <div>
+          <label style={{ fontSize: 10, color: 'rgba(232,232,240,0.5)', display: 'block', marginBottom: 3 }}>Collections Email</label>
+          <input style={fiInput} value={form.collections_email || ''} onChange={e => setForm(f => ({ ...f, collections_email: e.target.value }))} placeholder="collections@..." />
+        </div>
+        <div>
+          <label style={{ fontSize: 10, color: 'rgba(232,232,240,0.5)', display: 'block', marginBottom: 3 }}>Collections Phone</label>
+          <input style={fiInput} value={form.collections_phone || ''} onChange={e => setForm(f => ({ ...f, collections_phone: e.target.value }))} placeholder="(555) 123-4567" />
+        </div>
+        <div>
+          <label style={{ fontSize: 10, color: 'rgba(232,232,240,0.5)', display: 'block', marginBottom: 3 }}>Servicing Email</label>
+          <input style={fiInput} value={form.servicing_email || ''} onChange={e => setForm(f => ({ ...f, servicing_email: e.target.value }))} placeholder="servicing@..." />
+        </div>
+        <div>
+          <label style={{ fontSize: 10, color: 'rgba(232,232,240,0.5)', display: 'block', marginBottom: 3 }}>General Email</label>
+          <input style={fiInput} value={form.general_email || ''} onChange={e => setForm(f => ({ ...f, general_email: e.target.value }))} placeholder="info@..." />
+        </div>
+        <div>
+          <label style={{ fontSize: 10, color: 'rgba(232,232,240,0.5)', display: 'block', marginBottom: 3 }}>General Phone</label>
+          <input style={fiInput} value={form.general_phone || ''} onChange={e => setForm(f => ({ ...f, general_phone: e.target.value }))} placeholder="(555) 123-4567" />
+        </div>
+        <div style={{ gridColumn: '1 / -1' }}>
+          <label style={{ fontSize: 10, color: 'rgba(232,232,240,0.5)', display: 'block', marginBottom: 3 }}>Physical Address</label>
+          <input style={fiInput} value={form.physical_address || ''} onChange={e => setForm(f => ({ ...f, physical_address: e.target.value }))} placeholder="123 Main St, City, State ZIP" />
+        </div>
+        <div>
+          <label style={{ fontSize: 10, color: 'rgba(232,232,240,0.5)', display: 'block', marginBottom: 3 }}>Aggression Level</label>
+          <select style={fiSelect} value={form.aggression_level || ''} onChange={e => setForm(f => ({ ...f, aggression_level: e.target.value }))}>
+            <option value="">— Select —</option>
+            <option value="cooperative">Cooperative</option>
+            <option value="moderate">Moderate</option>
+            <option value="aggressive">Aggressive</option>
+            <option value="hostile">Hostile</option>
+          </select>
+        </div>
+        <div>
+          <label style={{ fontSize: 10, color: 'rgba(232,232,240,0.5)', display: 'block', marginBottom: 3 }}>Typical Settlement Tier</label>
+          <select style={fiSelect} value={form.typical_settlement_tier || ''} onChange={e => setForm(f => ({ ...f, typical_settlement_tier: e.target.value }))}>
+            <option value="">— Select —</option>
+            <option value="email1">Email 1 (Opening 80%)</option>
+            <option value="email2">Email 2 (Revised 90%)</option>
+            <option value="email3">Email 3 (Final 100%)</option>
+            <option value="never">Never settles</option>
+          </select>
+        </div>
+        <div>
+          <label style={{ fontSize: 10, color: 'rgba(232,232,240,0.5)', display: 'block', marginBottom: 3 }}>Avg Response Time (days)</label>
+          <input style={fiInput} type="number" value={form.response_time_days || ''} onChange={e => setForm(f => ({ ...f, response_time_days: parseInt(e.target.value) || null }))} />
+        </div>
+        <div>
+          <label style={{ fontSize: 10, color: 'rgba(232,232,240,0.5)', display: 'block', marginBottom: 3 }}>Typical Reduction Accepted</label>
+          <input style={fiInput} value={form.typical_reduction_accepted || ''} onChange={e => setForm(f => ({ ...f, typical_reduction_accepted: e.target.value }))} placeholder="e.g. 40-50%" />
+        </div>
+        <div>
+          <label style={{ fontSize: 10, color: 'rgba(232,232,240,0.5)', display: 'block', marginBottom: 3 }}>Governing Law</label>
+          <input style={fiInput} value={form.governing_law || ''} onChange={e => setForm(f => ({ ...f, governing_law: e.target.value }))} placeholder="e.g. NY, CT" />
+        </div>
+        <div>
+          <label style={{ fontSize: 10, color: 'rgba(232,232,240,0.5)', display: 'block', marginBottom: 3 }}>Collections Firm</label>
+          <input style={fiInput} value={form.collections_firm || ''} onChange={e => setForm(f => ({ ...f, collections_firm: e.target.value }))} placeholder="In-house or firm name" />
+        </div>
+        <div>
+          <label style={{ fontSize: 10, color: 'rgba(232,232,240,0.5)', display: 'block', marginBottom: 3 }}>Reconciliation</label>
+          <select style={fiSelect} value={form.has_reconciliation === null ? '' : form.has_reconciliation ? 'yes' : 'no'} onChange={e => setForm(f => ({ ...f, has_reconciliation: e.target.value === '' ? null : e.target.value === 'yes' }))}>
+            <option value="">Unknown</option>
+            <option value="yes">Yes</option>
+            <option value="no">No</option>
+          </select>
+        </div>
+        <div>
+          <label style={{ fontSize: 10, color: 'rgba(232,232,240,0.5)', display: 'block', marginBottom: 3 }}>Anti-Stacking</label>
+          <select style={fiSelect} value={form.has_anti_stacking === null ? '' : form.has_anti_stacking ? 'yes' : 'no'} onChange={e => setForm(f => ({ ...f, has_anti_stacking: e.target.value === '' ? null : e.target.value === 'yes' }))}>
+            <option value="">Unknown</option>
+            <option value="yes">Yes</option>
+            <option value="no">No</option>
+          </select>
+        </div>
+        <div>
+          <label style={{ fontSize: 10, color: 'rgba(232,232,240,0.5)', display: 'block', marginBottom: 3 }}>COJ (Confession of Judgment)</label>
+          <select style={fiSelect} value={form.has_coj === null ? '' : form.has_coj ? 'yes' : 'no'} onChange={e => setForm(f => ({ ...f, has_coj: e.target.value === '' ? null : e.target.value === 'yes' }))}>
+            <option value="">Unknown</option>
+            <option value="yes">Yes</option>
+            <option value="no">No</option>
+          </select>
+        </div>
+        <div>
+          <label style={{ fontSize: 10, color: 'rgba(232,232,240,0.5)', display: 'block', marginBottom: 3 }}>Threatens COJ?</label>
+          <select style={fiSelect} value={form.threatens_coj === null ? '' : form.threatens_coj ? 'yes' : 'no'} onChange={e => setForm(f => ({ ...f, threatens_coj: e.target.value === '' ? null : e.target.value === 'yes' }))}>
+            <option value="">Unknown</option>
+            <option value="yes">Yes</option>
+            <option value="no">No</option>
+          </select>
+        </div>
+        <div style={{ gridColumn: '1 / -1' }}>
+          <label style={{ fontSize: 10, color: 'rgba(232,232,240,0.5)', display: 'block', marginBottom: 3 }}>Notes</label>
+          <textarea style={{ ...fiInput, minHeight: 60, resize: 'vertical' }} value={form.notes || ''} onChange={e => setForm(f => ({ ...f, notes: e.target.value }))} placeholder="Intelligence notes, negotiation history, behavior observations..." />
+        </div>
+      </div>
+      <div style={{ display: 'flex', gap: 8, marginTop: 12 }}>
+        <button onClick={() => onSave(form)} disabled={!form.name} style={{ ...fiBtn, background: form.name ? 'rgba(0,229,255,0.2)' : 'rgba(255,255,255,0.05)', color: form.name ? '#00e5ff' : 'rgba(232,232,240,0.3)', border: '1px solid rgba(0,229,255,0.3)' }}>Save</button>
+        <button onClick={onCancel} style={{ ...fiBtn, background: 'rgba(255,255,255,0.05)', color: 'rgba(232,232,240,0.5)', border: '1px solid rgba(255,255,255,0.1)' }}>Cancel</button>
+      </div>
+    </div>
+  );
+
+  return (
+    <div>
+      <div style={{ display: 'flex', gap: 8, marginBottom: 16, flexWrap: 'wrap' }}>
+        {sectionBtns.map(s => (
+          <button key={s.key} onClick={() => setActiveSection(s.key)}
+            style={{ padding: '8px 16px', borderRadius: 6, border: activeSection === s.key ? '1px solid rgba(0,229,255,0.5)' : '1px solid rgba(255,255,255,0.1)', background: activeSection === s.key ? 'rgba(0,229,255,0.1)' : 'rgba(255,255,255,0.03)', color: activeSection === s.key ? '#00e5ff' : 'rgba(232,232,240,0.6)', fontSize: 12, cursor: 'pointer', fontFamily: 'inherit' }}>
+            {s.icon} {s.label}
+          </button>
+        ))}
+      </div>
+
+      {activeSection === 'directory' && (
+        <>
+          <div style={{ display: 'flex', gap: 8, marginBottom: 16 }}>
+            <button onClick={() => { setShowAddForm(true); setEditForm({ name: '' }); }} style={{ ...fiBtn, background: 'rgba(0,229,255,0.15)', color: '#00e5ff', border: '1px solid rgba(0,229,255,0.3)' }}>+ Add Funder</button>
+            <button onClick={autoPopulate} style={{ ...fiBtn, background: 'rgba(255,213,79,0.1)', color: '#ffd54f', border: '1px solid rgba(255,213,79,0.3)' }}>Auto-populate from Current Deal</button>
+          </div>
+
+          {showAddForm && renderEditForm(editForm, setEditForm, handleSave, () => { setShowAddForm(false); setEditForm({}); })}
+
+          {funders.length === 0 && !showAddForm ? (
+            <div style={{ textAlign: 'center', padding: 40, color: 'rgba(232,232,240,0.4)' }}>
+              <div style={{ fontSize: 40, marginBottom: 12 }}>📇</div>
+              <div style={{ fontSize: 15 }}>No funders in database yet</div>
+              <div style={{ fontSize: 12, marginTop: 8 }}>Click "Auto-populate" to import funders from your current analysis, or add them manually.</div>
+            </div>
+          ) : (
+            funders.map(f => (
+              <div key={f.id}>
+                {editingId === f.id ? (
+                  renderEditForm(editForm, setEditForm, handleSave, () => { setEditingId(null); setEditForm({}); })
+                ) : (
+                  <div style={{ background: 'rgba(255,255,255,0.04)', borderRadius: 10, padding: 16, marginBottom: 12, border: '1px solid rgba(255,255,255,0.06)' }}>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
+                      <div style={{ fontSize: 15, color: '#00e5ff', fontWeight: 700 }}>{f.name}</div>
+                      <div style={{ display: 'flex', gap: 6 }}>
+                        {f.aggression_level && (
+                          <span style={{ fontSize: 10, padding: '2px 8px', borderRadius: 4, background: f.aggression_level === 'cooperative' ? 'rgba(76,175,80,0.2)' : f.aggression_level === 'hostile' ? 'rgba(239,83,80,0.2)' : 'rgba(255,152,0,0.2)', color: f.aggression_level === 'cooperative' ? '#4caf50' : f.aggression_level === 'hostile' ? '#ef5350' : '#ff9800' }}>
+                            {f.aggression_level}
+                          </span>
+                        )}
+                        <button onClick={() => { setEditingId(f.id); setEditForm({ ...f }); }} style={{ ...fiBtnSm, color: '#00e5ff' }}>Edit</button>
+                        <button onClick={() => handleDelete(f.id)} style={{ ...fiBtnSm, color: '#ef5350' }}>×</button>
+                      </div>
+                    </div>
+
+                    <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(180px, 1fr))', gap: 8, fontSize: 11, color: 'rgba(232,232,240,0.6)' }}>
+                      {f.collections_email && <div>📧 {f.collections_email}</div>}
+                      {f.collections_phone && <div>📞 {f.collections_phone}</div>}
+                      {f.governing_law && <div>⚖️ {f.governing_law} law</div>}
+                      {f.has_reconciliation !== null && <div>{f.has_reconciliation ? '✅' : '❌'} Reconciliation{f.reconciliation_days ? ` (${f.reconciliation_days}d)` : ''}</div>}
+                      {f.has_anti_stacking !== null && <div>{f.has_anti_stacking ? '⚠️' : '✅'} Anti-stacking{f.stacking_penalty ? `: ${f.stacking_penalty}` : ''}</div>}
+                      {f.has_coj !== null && <div>{f.has_coj ? '🔴' : '✅'} COJ{f.coj_enforceable === false ? ' (unenforceable)' : ''}</div>}
+                      {f.typical_settlement_tier && <div>🎯 Settles at: {f.typical_settlement_tier}</div>}
+                      {f.typical_reduction_accepted && <div>📉 Accepts: {f.typical_reduction_accepted} reduction</div>}
+                      {f.response_time_days && <div>⏱️ Responds in ~{f.response_time_days}d</div>}
+                      {f.deals_count > 0 && <div>📁 {f.deals_count} deals</div>}
+                    </div>
+
+                    {f.notes && <div style={{ fontSize: 11, color: 'rgba(232,232,240,0.4)', marginTop: 8, fontStyle: 'italic' }}>{f.notes}</div>}
+                  </div>
+                )}
+              </div>
+            ))
+          )}
+        </>
+      )}
+
+      {activeSection === 'outcomes' && (
+        <>
+          {outcomes.length === 0 ? (
+            <div style={{ textAlign: 'center', padding: 40, color: 'rgba(232,232,240,0.4)' }}>
+              <div style={{ fontSize: 40, marginBottom: 12 }}>📊</div>
+              <div style={{ fontSize: 15 }}>No outcomes recorded yet</div>
+              <div style={{ fontSize: 12, marginTop: 8 }}>Outcomes are saved from the Negotiation tab when a funder accepts, counters, or rejects a proposal.</div>
+            </div>
+          ) : (
+            outcomes.map(o => (
+              <div key={o.id} style={{ background: 'rgba(255,255,255,0.04)', borderRadius: 10, padding: 16, marginBottom: 12, border: `1px solid ${o.accepted ? 'rgba(76,175,80,0.3)' : o.accepted === false ? 'rgba(239,83,80,0.2)' : 'rgba(255,255,255,0.06)'}` }}>
+                <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 8 }}>
+                  <div>
+                    <div style={{ fontSize: 14, color: '#e8e8f0', fontWeight: 600 }}>{o.funder_name}</div>
+                    <div style={{ fontSize: 11, color: 'rgba(232,232,240,0.4)' }}>{o.deal_name} · {o.first_contact_date || 'No date'}</div>
+                  </div>
+                  <span style={{ fontSize: 10, padding: '2px 8px', borderRadius: 4, background: o.accepted ? 'rgba(76,175,80,0.2)' : o.accepted === false ? 'rgba(239,83,80,0.2)' : 'rgba(255,152,0,0.2)', color: o.accepted ? '#4caf50' : o.accepted === false ? '#ef5350' : '#ff9800' }}>
+                    {o.accepted ? 'Accepted' : o.accepted === false ? 'Rejected' : 'Pending'}
+                  </span>
+                </div>
+                <div style={{ fontSize: 11, color: 'rgba(232,232,240,0.6)', display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 4 }}>
+                  <div>Proposed: ${o.proposed_weekly?.toLocaleString()}/wk ({o.proposed_reduction_pct}% reduction)</div>
+                  {o.accepted && <div>Accepted: ${o.accepted_weekly?.toLocaleString()}/wk ({o.accepted_reduction_pct}% reduction)</div>}
+                  {o.days_to_resolution > 0 && <div>Resolved in {o.days_to_resolution} days</div>}
+                </div>
+                {o.resolution_notes && <div style={{ fontSize: 11, color: 'rgba(232,232,240,0.4)', marginTop: 6 }}>{o.resolution_notes}</div>}
+              </div>
+            ))
+          )}
+        </>
+      )}
+
+      {activeSection === 'insights' && (
+        <>
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(180px, 1fr))', gap: 12, marginBottom: 20 }}>
+            <div style={fiStat}><div style={{ fontSize: 10, color: 'rgba(232,232,240,0.4)', marginBottom: 4 }}>FUNDERS TRACKED</div><div style={{ fontSize: 24, color: '#00e5ff' }}>{funders.length}</div></div>
+            <div style={fiStat}><div style={{ fontSize: 10, color: 'rgba(232,232,240,0.4)', marginBottom: 4 }}>DEALS RECORDED</div><div style={{ fontSize: 24, color: '#ffd54f' }}>{outcomes.length}</div></div>
+            <div style={fiStat}><div style={{ fontSize: 10, color: 'rgba(232,232,240,0.4)', marginBottom: 4 }}>ACCEPTANCE RATE</div><div style={{ fontSize: 24, color: '#4caf50' }}>{acceptanceRate}%</div></div>
+            <div style={fiStat}><div style={{ fontSize: 10, color: 'rgba(232,232,240,0.4)', marginBottom: 4 }}>AVG REDUCTION ACCEPTED</div><div style={{ fontSize: 24, color: '#ff9800' }}>{avgReduction}%</div></div>
+            <div style={fiStat}><div style={{ fontSize: 10, color: 'rgba(232,232,240,0.4)', marginBottom: 4 }}>AVG DAYS TO RESOLUTION</div><div style={{ fontSize: 24, color: '#e8e8f0' }}>{avgResponseTime}</div></div>
+          </div>
+
+          <div style={{ fontSize: 11, color: 'rgba(232,232,240,0.45)', marginBottom: 8, textTransform: 'uppercase', letterSpacing: 0.5 }}>Funder Behavior Patterns</div>
+          {funders.filter(f => f.aggression_level).length === 0 ? (
+            <div style={{ fontSize: 12, color: 'rgba(232,232,240,0.3)', padding: 20, textAlign: 'center' }}>
+              Update funder records with behavior data (aggression level, settlement patterns) to see insights here.
+            </div>
+          ) : (
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(250px, 1fr))', gap: 12 }}>
+              {['cooperative', 'moderate', 'aggressive', 'hostile'].map(level => {
+                const count = funders.filter(f => f.aggression_level === level).length;
+                if (count === 0) return null;
+                const colors = { cooperative: '#4caf50', moderate: '#ffd54f', aggressive: '#ff9800', hostile: '#ef5350' };
+                return (
+                  <div key={level} style={{ background: `${colors[level]}08`, border: `1px solid ${colors[level]}33`, borderRadius: 8, padding: 12 }}>
+                    <div style={{ fontSize: 12, color: colors[level], fontWeight: 600, marginBottom: 6 }}>{level.charAt(0).toUpperCase() + level.slice(1)} ({count})</div>
+                    {funders.filter(f => f.aggression_level === level).map(f => (
+                      <div key={f.id} style={{ fontSize: 11, color: 'rgba(232,232,240,0.6)', lineHeight: 1.6 }}>• {f.name}{f.typical_settlement_tier ? ` — settles at ${f.typical_settlement_tier}` : ''}</div>
+                    ))}
+                  </div>
+                );
+              })}
+            </div>
+          )}
+        </>
+      )}
+    </div>
+  );
+}
+
 export default function FFAnalyzer() {
   // ─── Upload state ───────────────────────────────────────────────────────────
   const [uploadedFiles, setUploadedFiles] = useState([]); // [{id, file, text, accountLabel, month, bankName, acctNum, status, error}]
@@ -3891,7 +4239,7 @@ export default function FFAnalyzer() {
   const [selectedIndustry, setSelectedIndustry] = useState('general');
   const inputRef = useRef(null);
 
-  const TABS = ['📊 Revenue', '📈 Trend', '🏦 MCA Positions', '⚠️ Risk', '📋 Agreements', '🔄 Cross-Ref', '🤝 Negotiation', '🎯 Confidence', '⬇️ Export'];
+  const TABS = ['📊 Revenue', '📈 Trend', '🏦 MCA Positions', '⚠️ Risk', '📋 Agreements', '🔄 Cross-Ref', '🤝 Negotiation', '📇 Funder Intel', '🎯 Confidence', '⬇️ Export'];
 
   // ─── Agreement state ─────────────────────────────────────────
   const [uploadedAgreements, setUploadedAgreements] = useState([]);
@@ -4679,8 +5027,9 @@ export default function FFAnalyzer() {
             {activeTab === 4 && <AgreementsTab agreementResults={agreementResults} />}
             {activeTab === 5 && <CrossReferenceTab crossRefResult={crossRefResult} crossRefError={crossRefError} agreementResults={agreementResults} positions={positions} a={result.analysis} />}
             {activeTab === 6 && <NegotiationTab a={result.analysis} positions={positions} excludedIds={excludedIds} otherExcludedIds={otherExcludedIds} depositOverrides={depositOverrides} agreementResults={agreementResults} enrolledPositions={enrolledPositions} />}
-            {activeTab === 7 && <ConfidenceTab a={result.analysis} positions={positions} excludedIds={excludedIds} depositOverrides={depositOverrides} agreementResults={agreementResults} />}
-            {activeTab === 8 && <ExportTab a={result.analysis} fileName={result.file_name || 'analysis'} positions={positions} excludedIds={excludedIds} otherExcludedIds={otherExcludedIds} depositOverrides={depositOverrides} agreementResults={agreementResults} enrolledPositions={enrolledPositions} />}
+            {activeTab === 7 && <FunderIntelTab positions={positions} agreementResults={agreementResults} />}
+            {activeTab === 8 && <ConfidenceTab a={result.analysis} positions={positions} excludedIds={excludedIds} depositOverrides={depositOverrides} agreementResults={agreementResults} />}
+            {activeTab === 9 && <ExportTab a={result.analysis} fileName={result.file_name || 'analysis'} positions={positions} excludedIds={excludedIds} otherExcludedIds={otherExcludedIds} depositOverrides={depositOverrides} agreementResults={agreementResults} enrolledPositions={enrolledPositions} />}
           </div>
         </div>
       )}
