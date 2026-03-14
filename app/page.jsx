@@ -2196,6 +2196,58 @@ function CrossReferenceTab({ crossRefResult, crossRefError, agreementResults, po
   const modelUsed = crossRefResult.model_used || '';
 
   const gradeColor = (g) => g === 'A' ? '#4caf50' : g === 'B' ? '#81c784' : g === 'C' ? '#ffd54f' : g === 'D' ? '#ff9800' : '#ef5350';
+  const [showLegend, setShowLegend] = useState(false);
+
+  const legendPill = (color, label) => <span style={{ ...S.tag(color), fontSize: 10, whiteSpace: 'nowrap' }}>{label}</span>;
+  const legendGrade = (grade, color) => <span style={{ display: 'inline-block', width: 28, height: 28, lineHeight: '28px', textAlign: 'center', borderRadius: 6, fontWeight: 700, fontSize: 16, color, background: `${color}18`, border: `1px solid ${color}44` }}>{grade}</span>;
+
+  const legendGroups = [
+    {
+      title: 'Payment Compliance Tags',
+      items: [
+        { badge: legendPill('green', '✓ MATCH'), desc: 'Actual payments match the contract amount. Funder is pulling what they agreed to.' },
+        { badge: legendPill('amber', '⚠ UNDERPULL'), desc: 'Actual payments are LESS than contracted. Favorable for merchant — funder has been accepting less than agreed.' },
+        { badge: legendPill('red', '⚠ OVERPULL'), desc: 'Actual payments EXCEED the contract amount. Potential funder breach — strong negotiation leverage.' },
+        { badge: <span style={{ ...S.tag('red'), fontSize: 10, background: 'rgba(255,145,0,0.15)', color: '#ff9100', border: '1px solid rgba(255,145,0,0.3)' }}>⚠ ESCALATION</span>, desc: 'Payment amount has INCREASED over time. May indicate unilateral funder action.' },
+        { badge: legendPill('grey', '— NO AGREEMENT'), desc: 'No contract uploaded for this position. Payment estimated from bank statement patterns.' },
+      ]
+    },
+    {
+      title: 'Contract vs Reality Grades',
+      items: [
+        { badge: legendGrade('A', '#4caf50'), desc: 'Clean deal. Revenue assumptions match reality, factor rate within market norms.' },
+        { badge: legendGrade('B', '#81c784'), desc: 'Minor discrepancies. Revenue slightly overstated or factor rate slightly elevated.' },
+        { badge: legendGrade('C', '#ffd54f'), desc: 'Moderate issues. Revenue gap, funded into known stack, or anti-stacking violation.' },
+        { badge: legendGrade('D', '#ff9800'), desc: 'Significant issues. Large revenue gap, self-renewal with inflated factor, underwriting failures.' },
+        { badge: legendGrade('F', '#ef5350'), desc: 'Predatory. Extreme true factor rate (>2.5x), massive fee extraction, or 49%+ specified % with known stack.' },
+      ]
+    },
+    {
+      title: 'Contract vs Reality Metrics',
+      items: [
+        { badge: <span style={{ fontSize: 10, fontWeight: 600, color: '#ffd54f', textTransform: 'uppercase', letterSpacing: 0.5 }}>IMPLIED REVENUE</span>, desc: 'Monthly revenue the funder assumed, calculated from weekly_payment ÷ specified_percentage × 4.33.' },
+        { badge: <span style={{ fontSize: 10, fontWeight: 600, color: '#ffd54f', textTransform: 'uppercase', letterSpacing: 0.5 }}>STATED REVENUE</span>, desc: 'Revenue figure explicitly written in the contract. Different from Implied.' },
+        { badge: <span style={{ fontSize: 10, fontWeight: 600, color: '#00e5ff', textTransform: 'uppercase', letterSpacing: 0.5 }}>ACTUAL REVENUE</span>, desc: 'Bank-verified monthly revenue from statement analysis. The ground truth.' },
+        { badge: <span style={{ fontSize: 10, fontWeight: 600, color: '#ef5350', textTransform: 'uppercase', letterSpacing: 0.5 }}>REVENUE GAP</span>, desc: '"Overstated" = funder assumed more revenue than exists. "Below actual" = funder understated.' },
+        { badge: <span style={{ fontSize: 10, fontWeight: 600, color: '#e8e8f0', textTransform: 'uppercase', letterSpacing: 0.5 }}>TRUE FACTOR RATE</span>, desc: 'Effective factor based on net proceeds (purchased_amount ÷ net_funded). Self-renewals inflate this dramatically. Industry norm: 1.20-1.50. Above 2.0 = predatory.' },
+      ]
+    },
+    {
+      title: 'Funder Scorecard Tags',
+      items: [
+        { badge: legendPill('green', '✓ Rev Verified'), desc: 'Funder verified actual revenue before funding. Implied revenue within 15% of actual.' },
+        { badge: legendPill('red', '✕ Rev Verified'), desc: 'Funder did NOT verify revenue. Implied revenue gap exceeds 15%.' },
+        { badge: legendPill('green', '✓ Stack Checked'), desc: 'Funder accounted for existing MCA stack before funding.' },
+        { badge: legendPill('red', '✕ Stack Checked'), desc: 'Funder ignored existing stack. Funded without accounting for existing burden.' },
+        { badge: legendPill('red', 'Anti-Stack Hypocrite'), desc: 'Contract has anti-stacking clause, yet funder funded INTO a known stack.' },
+        { badge: legendPill('red', 'Predatory'), desc: 'True factor rate >2.5x, origination fee >8%, or fee extraction >50% of purchase price.' },
+        { badge: legendPill('green', 'Market'), desc: 'Terms within normal MCA market ranges. Factor 1.15-1.55, origination 2-6%.' },
+        { badge: legendPill('gold', 'Self-Renewal'), desc: 'Funder paid off their OWN prior position. Proves knowledge of merchant condition.' },
+        { badge: legendPill('green', 'COJ Void'), desc: 'Confession of Judgment clause is unenforceable (NY FAIR Act, state prohibition, etc.).' },
+        { badge: legendPill('green', '✓ Reconciliation'), desc: 'Contract has reconciliation clause allowing payment modification based on actual revenue.' },
+      ]
+    },
+  ];
 
   return (
     <div>
@@ -2217,6 +2269,69 @@ function CrossReferenceTab({ crossRefResult, crossRefError, agreementResults, po
             <div style={S.stat}><div style={S.statLabel}>Months Analyzed</div><div style={S.statValue('#e8e8f0')}>{revenueReality.months_analyzed || '—'}</div></div>
           </div>
           {revenueReality.revenue_methodology && <div style={{ fontSize: 12, color: 'rgba(232,232,240,0.5)', marginTop: 10, lineHeight: 1.6 }}>{revenueReality.revenue_methodology}</div>}
+        </div>
+      )}
+
+      {/* Analysis Legend */}
+      <div style={{ margin: '0 0 20px', display: 'flex', justifyContent: 'flex-end' }}>
+        <button
+          onClick={() => setShowLegend(!showLegend)}
+          style={{
+            background: 'rgba(255,255,255,0.05)',
+            border: '1px solid rgba(255,255,255,0.15)',
+            borderRadius: 8,
+            padding: '8px 16px',
+            color: 'rgba(232,232,240,0.7)',
+            cursor: 'pointer',
+            fontSize: 14,
+            transition: 'all 0.2s'
+          }}
+        >
+          {showLegend ? 'Hide Legend' : 'Analysis Legend'}
+        </button>
+      </div>
+      {showLegend && (
+        <div style={{
+          background: 'rgba(255,255,255,0.03)',
+          border: '1px solid rgba(255,255,255,0.1)',
+          borderRadius: 12,
+          padding: 24,
+          marginBottom: 24,
+        }}>
+          {legendGroups.map((group, gi) => (
+            <div key={gi} style={{ marginBottom: gi < legendGroups.length - 1 ? 24 : 0 }}>
+              <div style={{ fontSize: 13, fontWeight: 600, color: '#00e5ff', letterSpacing: 0.5, textTransform: 'uppercase', marginBottom: 12, paddingBottom: 6, borderBottom: '1px solid rgba(0,229,255,0.15)' }}>{group.title}</div>
+              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(340px, 1fr))', gap: '10px 24px' }}>
+                {group.items.map((item, ii) => (
+                  <div key={ii} style={{ display: 'flex', alignItems: 'flex-start', gap: 10, padding: '6px 0' }}>
+                    <div style={{ flexShrink: 0, minWidth: 110, display: 'flex', justifyContent: 'center' }}>{item.badge}</div>
+                    <div style={{ fontSize: 12, color: 'rgba(232,232,240,0.6)', lineHeight: 1.5 }}>{item.desc}</div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          ))}
+          <div style={{ marginTop: 20, borderTop: '1px solid rgba(255,255,255,0.08)', paddingTop: 16 }}>
+            <div style={{ fontSize: 13, fontWeight: 600, color: '#00e5ff', letterSpacing: 0.5, textTransform: 'uppercase', marginBottom: 12 }}>Restructuring Recommendation</div>
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(340px, 1fr))', gap: '10px 24px' }}>
+              <div style={{ display: 'flex', alignItems: 'flex-start', gap: 10, padding: '6px 0' }}>
+                <div style={{ flexShrink: 0, minWidth: 110, textAlign: 'center' }}><span style={{ fontSize: 10, fontWeight: 600, color: '#ef9a9a', textTransform: 'uppercase', letterSpacing: 0.5 }}>CURRENT WEEKLY</span></div>
+                <div style={{ fontSize: 12, color: 'rgba(232,232,240,0.6)', lineHeight: 1.5 }}>Sum of all active MCA payments per week from bank statements.</div>
+              </div>
+              <div style={{ display: 'flex', alignItems: 'flex-start', gap: 10, padding: '6px 0' }}>
+                <div style={{ flexShrink: 0, minWidth: 110, textAlign: 'center' }}><span style={{ fontSize: 10, fontWeight: 600, color: '#4caf50', textTransform: 'uppercase', letterSpacing: 0.5 }}>SUSTAINABLE</span></div>
+                <div style={{ fontSize: 12, color: 'rgba(232,232,240,0.6)', lineHeight: 1.5 }}>Payment level the merchant can afford based on gross profit and industry DSR (25-35%).</div>
+              </div>
+              <div style={{ display: 'flex', alignItems: 'flex-start', gap: 10, padding: '6px 0' }}>
+                <div style={{ flexShrink: 0, minWidth: 110, textAlign: 'center' }}><span style={{ fontSize: 10, fontWeight: 600, color: '#00e5ff', textTransform: 'uppercase', letterSpacing: 0.5 }}>REDUCTION</span></div>
+                <div style={{ fontSize: 12, color: 'rgba(232,232,240,0.6)', lineHeight: 1.5 }}>Percentage decrease from current to sustainable. Higher = more urgent restructuring case.</div>
+              </div>
+              <div style={{ display: 'flex', alignItems: 'flex-start', gap: 10, padding: '6px 0' }}>
+                <div style={{ flexShrink: 0, minWidth: 110, textAlign: 'center' }}><span style={{ fontSize: 10, fontWeight: 600, color: '#e8e8f0', textTransform: 'uppercase', letterSpacing: 0.5 }}>PER-FUNDER</span></div>
+                <div style={{ fontSize: 12, color: 'rgba(232,232,240,0.6)', lineHeight: 1.5 }}><span style={{ color: '#ef9a9a', textDecoration: 'line-through' }}>current</span> → <span style={{ color: '#4caf50' }}>proposed</span> (term). Proportional to each funder's share. All receive 100% of remaining balance.</div>
+              </div>
+            </div>
+          </div>
         </div>
       )}
 

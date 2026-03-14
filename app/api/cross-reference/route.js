@@ -201,6 +201,24 @@ Rate each funder's underwriting practices:
 - Did they deduct excessive fees? (>3% of purchase price is high)
 - Did they include unenforceable clauses? (COJ in NY, etc.)
 
+=== FUNDER SCORECARD TAG DEFINITIONS ===
+
+Generate the following tags for each funder scorecard. Use EXACTLY these tag names:
+
+ALWAYS EVALUATE (include pass ✓ or fail ✗):
+- REV VERIFIED: ✓ if implied/stated revenue is within 15% of actual. ✗ if gap > 15%.
+- STACK CHECKED: ✓ if existing MCA burden at funding was $0 OR funder accounted for it in terms. ✗ if funder ignored existing burden.
+
+CONDITIONAL (include only if applicable):
+- ANTI-STACK HYPOCRITE: Include if funder has anti-stacking clause AND funded into a known stack (set anti_stacking_hypocrite: true).
+- PREDATORY: Include if true_factor_rate > 2.5 OR origination_fee_pct > 8% OR fee extraction > 50% of purchase price. Set factor_rate_assessment: "predatory".
+- MARKET: Include if terms are within industry norms (factor 1.15-1.55, origination 2-6%, true factor < 2.0). Set factor_rate_assessment: "market". Mutually exclusive with PREDATORY.
+- SELF-RENEWAL: Include if funder paid off their own prior position (prior_balance_is_self_renewal: true).
+- COJ VOID: Include if COJ clause exists but is unenforceable (NY FAIR Act, state prohibition, etc.). Set has_unenforceable_clauses: true.
+- RECONCILIATION: Include if contract has reconciliation/adjustment clause. Set has_reconciliation_rights: true.
+
+Each scorecard should have 2 required tags (REV VERIFIED, STACK CHECKED) plus 1-4 conditional tags.
+
 ### CRITICAL: ONE ENTRY PER AGREEMENT
 The \`contract_vs_reality\` array MUST have exactly one entry for EACH agreement provided in the input data. If there are 4 agreements, there must be 4 entries in \`contract_vs_reality\`. Do NOT merge multiple agreements from the same funder into one entry — if The Merchant Marketplace has Position A and Position C, they each get their own separate entry with their own balance, payment, dates, and analysis. Same for \`position_chronology\` — one entry per agreement/position. The number of entries in \`contract_vs_reality\` must EQUAL the number of agreements provided.
 
