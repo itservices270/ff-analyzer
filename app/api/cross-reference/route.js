@@ -77,6 +77,7 @@ function trimAgreement(ag) {
   if (!ag) return {};
   return {
     funder_name: ag.funder_name,
+    position_label: ag.position_label || null,
     seller_name: ag.seller_name,
     effective_date: ag.effective_date,
     funding_date: ag.funding_date,
@@ -202,6 +203,21 @@ Rate each funder's underwriting practices:
 
 ### CRITICAL: ONE ENTRY PER AGREEMENT
 The \`contract_vs_reality\` array MUST have exactly one entry for EACH agreement provided in the input data. If there are 4 agreements, there must be 4 entries in \`contract_vs_reality\`. Do NOT merge multiple agreements from the same funder into one entry — if The Merchant Marketplace has Position A and Position C, they each get their own separate entry with their own balance, payment, dates, and analysis. Same for \`position_chronology\` — one entry per agreement/position. The number of entries in \`contract_vs_reality\` must EQUAL the number of agreements provided.
+
+### MULTI-POSITION SAME-FUNDER RULES
+When multiple agreements come from the SAME funder (e.g., TMM Position A, TMM Position B, TMM Position C), each one is a SEPARATE deal with its own terms:
+1. **Payment compliance**: Each position has its OWN contracted payment amount. Do NOT apply the same payment to all positions from one funder. Use each agreement's individual weekly_payment or daily_payment field.
+2. **Contract vs reality**: Each position gets its OWN entry with its own purchase_price, purchased_amount, factor_rate, net_proceeds, contracted_payment, and dates. Never copy values from one position to another.
+3. **Restructuring recommendation**: Each position gets its OWN per_funder_recommendation entry with its own current_weekly, remaining_balance, and recommended terms. Use the position_label (e.g., "Position A") in the funder field to distinguish them.
+4. **Funding chronology**: Each position has its OWN funding date and place in the timeline. A funder's Position C funded months after their Position A — they are separate stacking events.
+5. **Funder scorecards**: When a funder has multiple positions, create ONE scorecard entry but note all positions and their combined burden.
+6. **Funder name in output**: When a funder has multiple positions, use the format "Funder Name (Position X)" in contract_vs_reality, position_chronology, and per_funder_recommendation entries to distinguish them. Use the position_label field from the agreement data if available.
+
+### SELF-RENEWAL EXISTING MCA ESTIMATION
+When a funder's agreement shows prior_balance_is_self_renewal: true, this means the funder was ALREADY collecting weekly payments from the merchant before this new agreement. The existing_weekly_mca_at_funding for this position MUST include the prior position's payment burden. To estimate the prior payment:
+- First check bank statement MCA positions for debits to this funder with dates BEFORE the new agreement's effective_date
+- If bank data is not available for the prior period, estimate: prior_weekly_payment ≈ prior_balance_amount ÷ 25 (average remaining weeks on a typical MCA)
+- NEVER show existing_weekly_mca_at_funding as $0 when prior_balance_is_self_renewal is true — the merchant was paying this funder before the renewal
 
 ## OUTPUT FORMAT — Return ONLY valid JSON:
 
@@ -371,6 +387,7 @@ function postProcessCrossRef(analysis, agreementAnalyses) {
 
     agLookup.push({
       funder_name: ag.funder_name,
+      position_label: ag.position_label || null,
       normalized: ag.funder_name.toLowerCase().replace(/[^a-z0-9]/g, ''),
       purchase_price: ag.purchase_price || ag.financial_terms?.purchase_price || null,
       purchased_amount: ag.purchased_amount || ag.financial_terms?.purchased_amount || null,
@@ -382,25 +399,67 @@ function postProcessCrossRef(analysis, agreementAnalyses) {
       implied_monthly_revenue: impliedMonthlyRevenue,
       stated_monthly_revenue: ag.stated_monthly_revenue || ag.financial_terms?.stated_merchant_revenue || null,
       effective_date: ag.effective_date || ag.funding_date || null,
+      prior_balance_amount: ag.prior_balance_amount || null,
+      prior_balance_is_self_renewal: ag.prior_balance_is_self_renewal || false,
     });
   }
 
-  function matchAgreement(funderName) {
+  // Count how many agreements exist per normalized funder name
+  const funderCounts = {};
+  for (const ag of agLookup) {
+    funderCounts[ag.normalized] = (funderCounts[ag.normalized] || 0) + 1;
+  }
+
+  function matchAgreement(funderName, contextPayment) {
     if (!funderName) return null;
     const norm = funderName.toLowerCase().replace(/[^a-z0-9]/g, '');
 
-    let match = agLookup.find(a => a.normalized === norm);
-    if (match) return match;
+    // Extract position label from funder name if present, e.g. "TMM (Position A)" or "TMM Position A"
+    const posMatch = funderName.match(/position\s*([a-z0-9])/i);
+    const posLabel = posMatch ? posMatch[1].toUpperCase() : null;
 
+    // Step 1: Try exact normalized match — if only one agreement for this funder, return it
+    const exactMatches = agLookup.filter(a => a.normalized === norm);
+    if (exactMatches.length === 1) return exactMatches[0];
+    if (exactMatches.length > 1 && posLabel) {
+      const posHit = exactMatches.find(a => a.position_label && a.position_label.toUpperCase().includes(posLabel));
+      if (posHit) return posHit;
+    }
+    if (exactMatches.length > 1 && contextPayment && contextPayment > 0) {
+      const payHit = exactMatches.find(a => a.weekly_payment && Math.abs(a.weekly_payment - contextPayment) < contextPayment * 0.05);
+      if (payHit) return payHit;
+    }
+    if (exactMatches.length > 1) return exactMatches[0]; // fallback to first if no disambiguator
+
+    // Step 2: Substring match (for partial names)
     if (norm.length >= 6) {
-      match = agLookup.find(a => a.normalized.includes(norm.slice(0, 8)) || norm.includes(a.normalized.slice(0, 8)));
-      if (match) return match;
+      const subMatches = agLookup.filter(a => a.normalized.includes(norm.slice(0, 8)) || norm.includes(a.normalized.slice(0, 8)));
+      if (subMatches.length === 1) return subMatches[0];
+      if (subMatches.length > 1 && posLabel) {
+        const posHit = subMatches.find(a => a.position_label && a.position_label.toUpperCase().includes(posLabel));
+        if (posHit) return posHit;
+      }
+      if (subMatches.length > 1 && contextPayment && contextPayment > 0) {
+        const payHit = subMatches.find(a => a.weekly_payment && Math.abs(a.weekly_payment - contextPayment) < contextPayment * 0.05);
+        if (payHit) return payHit;
+      }
+      if (subMatches.length > 0) return subMatches[0];
     }
 
+    // Step 3: First-word match
     const firstWord = norm.replace(/[0-9]/g, '').slice(0, 6);
     if (firstWord.length >= 4) {
-      match = agLookup.find(a => a.normalized.startsWith(firstWord));
-      if (match) return match;
+      const fwMatches = agLookup.filter(a => a.normalized.startsWith(firstWord));
+      if (fwMatches.length === 1) return fwMatches[0];
+      if (fwMatches.length > 1 && posLabel) {
+        const posHit = fwMatches.find(a => a.position_label && a.position_label.toUpperCase().includes(posLabel));
+        if (posHit) return posHit;
+      }
+      if (fwMatches.length > 1 && contextPayment && contextPayment > 0) {
+        const payHit = fwMatches.find(a => a.weekly_payment && Math.abs(a.weekly_payment - contextPayment) < contextPayment * 0.05);
+        if (payHit) return payHit;
+      }
+      if (fwMatches.length > 0) return fwMatches[0];
     }
 
     return null;
@@ -409,7 +468,7 @@ function postProcessCrossRef(analysis, agreementAnalyses) {
   // Override contract_vs_reality
   if (analysis.contract_vs_reality && Array.isArray(analysis.contract_vs_reality)) {
     for (const cvr of analysis.contract_vs_reality) {
-      const ag = matchAgreement(cvr.funder_name);
+      const ag = matchAgreement(cvr.funder_name, cvr.contracted_payment);
       if (!ag) continue;
 
       if (ag.weekly_payment) cvr.contracted_payment = ag.weekly_payment;
@@ -441,7 +500,7 @@ function postProcessCrossRef(analysis, agreementAnalyses) {
   // Override position_chronology
   if (analysis.position_chronology && Array.isArray(analysis.position_chronology)) {
     for (const pos of analysis.position_chronology) {
-      const ag = matchAgreement(pos.funder_name);
+      const ag = matchAgreement(pos.funder_name, pos.weekly_payment);
       if (!ag) continue;
 
       if (ag.weekly_payment) {
@@ -456,9 +515,27 @@ function postProcessCrossRef(analysis, agreementAnalyses) {
   // Override restructuring_recommendation per-funder
   if (analysis.restructuring_recommendation?.per_funder_recommendation) {
     for (const rec of analysis.restructuring_recommendation.per_funder_recommendation) {
-      const ag = matchAgreement(rec.funder);
+      const ag = matchAgreement(rec.funder, rec.current_weekly);
       if (!ag || !ag.weekly_payment) continue;
       rec.current_weekly = ag.weekly_payment;
+    }
+  }
+
+  // Self-renewal existing MCA fix: estimate prior payment from prior_balance_amount
+  if (analysis.position_chronology && Array.isArray(analysis.position_chronology)) {
+    for (const pos of analysis.position_chronology) {
+      const ag = matchAgreement(pos.funder_name, pos.weekly_payment);
+      if (!ag || !ag.prior_balance_is_self_renewal || !ag.prior_balance_amount) continue;
+
+      // If existing_weekly_mca_at_funding is 0 or missing, estimate from prior balance
+      const existingWeekly = pos.existing_weekly_mca_at_funding || 0;
+      if (existingWeekly === 0) {
+        const estimatedPriorWeekly = Math.round(ag.prior_balance_amount / 25);
+        pos.existing_weekly_mca_at_funding = estimatedPriorWeekly;
+        pos.existing_monthly_mca_at_funding = Math.round(estimatedPriorWeekly * 4.33);
+        pos.self_renewal_prior_estimated = true;
+        pos.self_renewal_note = `Self-renewal: prior ${ag.funder_name} position had ~$${estimatedPriorWeekly.toLocaleString()}/wk remaining balance of $${ag.prior_balance_amount.toLocaleString()} (estimated ÷25 weeks)`;
+      }
     }
   }
 
