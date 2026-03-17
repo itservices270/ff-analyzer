@@ -99,23 +99,20 @@ export async function POST(request) {
     });
 
     const rawText = response.content.filter(b => b.type === 'text').map(b => b.text).join('');
-    const cleaned = rawText.replace(/```json\n?/g, '').replace(/```\n?/g, '').trim();
+    let jsonText = rawText.replace(/```json\n?/g, '').replace(/```\n?/g, '').trim();
+
+    const firstBrace = jsonText.indexOf('{');
+    const lastBrace = jsonText.lastIndexOf('}');
+    if (firstBrace === -1 || lastBrace === -1) {
+      return Response.json({ error: 'Scan did not return structured data.', debug: jsonText.slice(0, 500) }, { status: 500 });
+    }
+    jsonText = jsonText.slice(firstBrace, lastBrace + 1);
 
     let analysis;
     try {
-      analysis = JSON.parse(cleaned);
+      analysis = JSON.parse(jsonText);
     } catch {
-      let depth = 0, start = -1, end = -1;
-      for (let i = 0; i < cleaned.length; i++) {
-        if (cleaned[i] === '{') { if (depth === 0) start = i; depth++; }
-        else if (cleaned[i] === '}') { depth--; if (depth === 0 && start >= 0) { end = i + 1; break; } }
-      }
-      if (start >= 0 && end > start) {
-        try { analysis = JSON.parse(cleaned.slice(start, end)); }
-        catch { return Response.json({ error: 'Scan returned malformed data. Try again.', debug: cleaned.slice(0, 500) }, { status: 500 }); }
-      } else {
-        return Response.json({ error: 'Scan did not return structured data.', debug: cleaned.slice(0, 500) }, { status: 500 });
-      }
+      return Response.json({ error: 'Scan returned malformed data.', debug: jsonText.slice(0, 500) }, { status: 500 });
     }
 
     return Response.json({

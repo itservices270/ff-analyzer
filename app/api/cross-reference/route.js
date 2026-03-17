@@ -837,34 +837,23 @@ ${trimmedAgreements.map((a, i) => `### Agreement ${i + 1}: ${a.funder_name || 'U
     }
 
     const rawText = response.content.filter(b => b.type === 'text').map(b => b.text).join('');
-    const cleaned = rawText.replace(/```json\n?/g, '').replace(/```\n?/g, '').trim();
+    let jsonText = rawText.replace(/```json\n?/g, '').replace(/```\n?/g, '').trim();
+
+    // Strip preamble before first { and trailing text after last }
+    const firstBrace = jsonText.indexOf('{');
+    const lastBrace = jsonText.lastIndexOf('}');
+    if (firstBrace === -1 || lastBrace === -1) {
+      console.error('Cross-ref no JSON found. Raw (first 500):', jsonText.slice(0, 500));
+      return Response.json({ error: 'Cross-reference did not return structured data.', debug: jsonText.slice(0, 500) }, { status: 500 });
+    }
+    jsonText = jsonText.slice(firstBrace, lastBrace + 1);
 
     let analysis;
     try {
-      analysis = JSON.parse(cleaned);
-    } catch {
-      let depth = 0, start = -1, end = -1;
-      for (let i = 0; i < cleaned.length; i++) {
-        if (cleaned[i] === '{') { if (depth === 0) start = i; depth++; }
-        else if (cleaned[i] === '}') { depth--; if (depth === 0 && start >= 0) { end = i + 1; break; } }
-      }
-      if (start >= 0 && end > start) {
-        try {
-          analysis = JSON.parse(cleaned.slice(start, end));
-        } catch (parseErr) {
-          console.error('Cross-ref JSON parse failed:', parseErr.message, 'Raw (first 500):', cleaned.slice(0, 500));
-          return Response.json({
-            error: 'Cross-reference analysis returned malformed data. Try re-analyzing.',
-            debug: cleaned.slice(0, 500)
-          }, { status: 500 });
-        }
-      } else {
-        console.error('Cross-ref no JSON found in response. Raw (first 500):', cleaned.slice(0, 500));
-        return Response.json({
-          error: 'Cross-reference did not return structured data.',
-          debug: cleaned.slice(0, 500)
-        }, { status: 500 });
-      }
+      analysis = JSON.parse(jsonText);
+    } catch (parseErr) {
+      console.error('Cross-ref JSON parse failed:', parseErr.message, 'Raw (first 500):', jsonText.slice(0, 500));
+      return Response.json({ error: 'Cross-reference returned malformed data.', debug: jsonText.slice(0, 500) }, { status: 500 });
     }
 
     // Post-process: override LLM numbers with agreement source data

@@ -4704,7 +4704,10 @@ export default function FFAnalyzer() {
       body: JSON.stringify(body),
     });
 
-    const isStreaming = res.headers.get('X-Stream-Mode') === 'opus';
+    // Detect streaming: check header OR content-type (header may be stripped by CDN/proxy)
+    const streamHeader = res.headers.get('X-Stream-Mode');
+    const contentType = res.headers.get('Content-Type') || '';
+    const isStreaming = streamHeader === 'opus' || (contentType.includes('text/plain') && !contentType.includes('json'));
 
     if (isStreaming) {
       setLoadingMsg('Opus streaming started… receiving data');
@@ -4713,7 +4716,20 @@ export default function FFAnalyzer() {
     }
 
     // Non-streaming (Sonnet or single statement)
-    const data = await res.json();
+    const text = await res.text();
+    let data;
+    try {
+      data = JSON.parse(text);
+    } catch {
+      // Response might have preamble — extract JSON
+      const start = text.indexOf('{');
+      const end = text.lastIndexOf('}');
+      if (start !== -1 && end !== -1 && end > start) {
+        data = JSON.parse(text.slice(start, end + 1));
+      } else {
+        throw new Error('No JSON in response: ' + text.slice(0, 300));
+      }
+    }
     if (!res.ok || data.error) {
       throw new Error(data.message || data.error || 'Analysis failed');
     }

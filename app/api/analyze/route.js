@@ -180,18 +180,21 @@ export async function POST(request) {
       .map(b => b.text)
       .join('');
 
-    const cleaned = rawText.replace(/```json\n?/g, '').replace(/```\n?/g, '').trim();
+    let jsonText = rawText.replace(/```json\n?/g, '').replace(/```\n?/g, '').trim();
+
+    // Strip preamble before first { and trailing text after last }
+    const firstBrace = jsonText.indexOf('{');
+    const lastBrace = jsonText.lastIndexOf('}');
+    if (firstBrace === -1 || lastBrace === -1) {
+      return Response.json({ error: 'No JSON in response. Raw: ' + jsonText.slice(0, 300) }, { status: 500 });
+    }
+    jsonText = jsonText.slice(firstBrace, lastBrace + 1);
 
     let analysis;
     try {
-      analysis = JSON.parse(cleaned);
+      analysis = JSON.parse(jsonText);
     } catch (e) {
-      const match = cleaned.match(/\{[\s\S]*\}/);
-      if (match) {
-        analysis = JSON.parse(match[0]);
-      } else {
-        return Response.json({ error: 'Analysis parsing failed. Raw response: ' + cleaned.slice(0, 300) }, { status: 500 });
-      }
+      return Response.json({ error: 'JSON parse failed. Raw: ' + jsonText.slice(0, 300) }, { status: 500 });
     }
 
     return Response.json({ success: true, analysis, file_name: fileName, model_used: selectedModel });
