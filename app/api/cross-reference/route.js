@@ -379,7 +379,7 @@ RULES:
 11. NEVER calculate contracted_payment or weekly_payment by dividing purchased_amount by estimated_term. ALWAYS read the payment amount directly from the agreement data fields (weekly_payment, daily_payment, financial_terms.specified_weekly_payment, financial_terms.specified_daily_payment). The extracted agreement data is the source of truth for payment amounts.`;
 
 // ─── Post-Processing: Override LLM numbers with agreement source data ──────
-function postProcessCrossRef(analysis, agreementAnalyses) {
+function postProcessCrossRef(analysis, agreementAnalyses, bankAnalysis) {
   if (!analysis || !agreementAnalyses || agreementAnalyses.length === 0) return analysis;
 
   const agLookup = [];
@@ -422,105 +422,181 @@ function postProcessCrossRef(analysis, agreementAnalyses) {
     });
   }
 
-  // Count how many agreements exist per normalized funder name
-  const funderCounts = {};
-  for (const ag of agLookup) {
-    funderCounts[ag.normalized] = (funderCounts[ag.normalized] || 0) + 1;
+  // Helper: check if two funder names refer to the same funder
+  function isSameFunder(name1, name2) {
+    if (!name1 || !name2) return false;
+    const n1 = name1.toLowerCase().replace(/[^a-z0-9]/g, '');
+    const n2 = name2.toLowerCase().replace(/[^a-z0-9]/g, '');
+    if (n1 === n2) return true;
+    // Strip position labels before comparing
+    const strip1 = n1.replace(/position[a-z0-9]/g, '');
+    const strip2 = n2.replace(/position[a-z0-9]/g, '');
+    if (strip1 === strip2) return true;
+    // Substring match (8+ chars)
+    if (strip1.length >= 8 && strip2.length >= 8) {
+      return strip1.includes(strip2.slice(0, 8)) || strip2.includes(strip1.slice(0, 8));
+    }
+    // First-word match (6+ chars)
+    const fw1 = strip1.replace(/[0-9]/g, '').slice(0, 6);
+    const fw2 = strip2.replace(/[0-9]/g, '').slice(0, 6);
+    return fw1.length >= 4 && fw1 === fw2;
   }
 
-  function matchAgreement(funderName, contextPayment) {
-    if (!funderName) return null;
-    const norm = funderName.toLowerCase().replace(/[^a-z0-9]/g, '');
+  // Exclusive matching: each agreement can only be matched once per section
+  function exclusiveMatch(items, getKey, getPayment) {
+    const result = new Map(); // item index -> agLookup index
+    const usedAg = new Set();
 
-    // Extract position label from funder name if present, e.g. "TMM (Position A)" or "TMM Position A"
-    const posMatch = funderName.match(/position\s*([a-z0-9])/i);
-    const posLabel = posMatch ? posMatch[1].toUpperCase() : null;
+    // Pass 1: position label match
+    for (let i = 0; i < items.length; i++) {
+      const name = getKey(items[i]);
+      if (!name) continue;
+      const posMatch = name.match(/position\s*([a-z0-9])/i);
+      if (!posMatch) continue;
+      const posLabel = posMatch[1].toUpperCase();
 
-    // Step 1: Try exact normalized match — if only one agreement for this funder, return it
-    const exactMatches = agLookup.filter(a => a.normalized === norm);
-    if (exactMatches.length === 1) return exactMatches[0];
-    if (exactMatches.length > 1 && posLabel) {
-      const posHit = exactMatches.find(a => a.position_label && a.position_label.toUpperCase().includes(posLabel));
-      if (posHit) return posHit;
-    }
-    if (exactMatches.length > 1 && contextPayment && contextPayment > 0) {
-      const payHit = exactMatches.find(a => a.weekly_payment && Math.abs(a.weekly_payment - contextPayment) < contextPayment * 0.05);
-      if (payHit) return payHit;
-    }
-    if (exactMatches.length > 1) return exactMatches[0]; // fallback to first if no disambiguator
-
-    // Step 2: Substring match (for partial names)
-    if (norm.length >= 6) {
-      const subMatches = agLookup.filter(a => a.normalized.includes(norm.slice(0, 8)) || norm.includes(a.normalized.slice(0, 8)));
-      if (subMatches.length === 1) return subMatches[0];
-      if (subMatches.length > 1 && posLabel) {
-        const posHit = subMatches.find(a => a.position_label && a.position_label.toUpperCase().includes(posLabel));
-        if (posHit) return posHit;
+      for (let j = 0; j < agLookup.length; j++) {
+        if (usedAg.has(j)) continue;
+        if (!isSameFunder(name, agLookup[j].funder_name)) continue;
+        if (agLookup[j].position_label && agLookup[j].position_label.toUpperCase().includes(posLabel)) {
+          result.set(i, j);
+          usedAg.add(j);
+          break;
+        }
       }
-      if (subMatches.length > 1 && contextPayment && contextPayment > 0) {
-        const payHit = subMatches.find(a => a.weekly_payment && Math.abs(a.weekly_payment - contextPayment) < contextPayment * 0.05);
-        if (payHit) return payHit;
-      }
-      if (subMatches.length > 0) return subMatches[0];
     }
 
-    // Step 3: First-word match
-    const firstWord = norm.replace(/[0-9]/g, '').slice(0, 6);
-    if (firstWord.length >= 4) {
-      const fwMatches = agLookup.filter(a => a.normalized.startsWith(firstWord));
-      if (fwMatches.length === 1) return fwMatches[0];
-      if (fwMatches.length > 1 && posLabel) {
-        const posHit = fwMatches.find(a => a.position_label && a.position_label.toUpperCase().includes(posLabel));
-        if (posHit) return posHit;
+    // Pass 2: payment proximity match (within 10%)
+    for (let i = 0; i < items.length; i++) {
+      if (result.has(i)) continue;
+      const name = getKey(items[i]);
+      if (!name) continue;
+      const payment = getPayment(items[i]);
+
+      for (let j = 0; j < agLookup.length; j++) {
+        if (usedAg.has(j)) continue;
+        if (!isSameFunder(name, agLookup[j].funder_name)) continue;
+        if (payment > 0 && agLookup[j].weekly_payment && Math.abs(agLookup[j].weekly_payment - payment) < payment * 0.10) {
+          result.set(i, j);
+          usedAg.add(j);
+          break;
+        }
       }
-      if (fwMatches.length > 1 && contextPayment && contextPayment > 0) {
-        const payHit = fwMatches.find(a => a.weekly_payment && Math.abs(a.weekly_payment - contextPayment) < contextPayment * 0.05);
-        if (payHit) return payHit;
-      }
-      if (fwMatches.length > 0) return fwMatches[0];
     }
 
-    return null;
+    // Pass 3: fallback — next available same-funder agreement
+    for (let i = 0; i < items.length; i++) {
+      if (result.has(i)) continue;
+      const name = getKey(items[i]);
+      if (!name) continue;
+
+      for (let j = 0; j < agLookup.length; j++) {
+        if (usedAg.has(j)) continue;
+        if (isSameFunder(name, agLookup[j].funder_name)) {
+          result.set(i, j);
+          usedAg.add(j);
+          break;
+        }
+      }
+    }
+
+    return { matched: result, usedAg };
   }
 
-  // Override contract_vs_reality
+  // Helper: build display name for a position
+  function displayName(ag) {
+    const label = ag.position_label || '';
+    return label ? `${ag.funder_name} (${label})` : ag.funder_name;
+  }
+
+  // Helper: apply agreement overrides to a contract_vs_reality entry
+  function applyCvrOverrides(cvr, ag) {
+    if (ag.weekly_payment) cvr.contracted_payment = ag.weekly_payment;
+    if (ag.factor_rate) cvr.contracted_factor_rate = ag.factor_rate;
+    if (ag.origination_fee) cvr.total_fees_charged = ag.origination_fee;
+    if (ag.net_to_seller) cvr.net_proceeds = ag.net_to_seller;
+
+    if (ag.stated_monthly_revenue && ag.stated_monthly_revenue > 0) {
+      cvr.stated_revenue = ag.stated_monthly_revenue;
+      cvr.revenue_source = 'explicit';
+    } else if (ag.implied_monthly_revenue && ag.implied_monthly_revenue > 0) {
+      cvr.stated_revenue = ag.implied_monthly_revenue;
+      cvr.revenue_source = 'implied_from_specified_percentage';
+      cvr.implied_revenue_from_pct = ag.implied_monthly_revenue;
+    }
+
+    if (cvr.stated_revenue && cvr.stated_revenue > 0 && cvr.actual_revenue && cvr.actual_revenue > 0) {
+      cvr.revenue_discrepancy_pct = parseFloat((((cvr.stated_revenue - cvr.actual_revenue) / cvr.actual_revenue) * 100).toFixed(1));
+      cvr.revenue_inflated = cvr.revenue_discrepancy_pct > 0;
+      cvr.revenue_understated = cvr.revenue_discrepancy_pct < 0;
+    }
+
+    if (ag.purchased_amount && ag.net_to_seller && ag.net_to_seller > 0) {
+      cvr.true_factor_rate = parseFloat((ag.purchased_amount / ag.net_to_seller).toFixed(2));
+    }
+  }
+
+  // ── Override contract_vs_reality with exclusive matching ──
   if (analysis.contract_vs_reality && Array.isArray(analysis.contract_vs_reality)) {
-    for (const cvr of analysis.contract_vs_reality) {
-      const ag = matchAgreement(cvr.funder_name, cvr.contracted_payment);
-      if (!ag) continue;
+    const { matched, usedAg } = exclusiveMatch(
+      analysis.contract_vs_reality,
+      cvr => cvr.funder_name,
+      cvr => cvr.contracted_payment
+    );
 
-      if (ag.weekly_payment) cvr.contracted_payment = ag.weekly_payment;
-      if (ag.factor_rate) cvr.contracted_factor_rate = ag.factor_rate;
-      if (ag.origination_fee) cvr.total_fees_charged = ag.origination_fee;
-      if (ag.net_to_seller) cvr.net_proceeds = ag.net_to_seller;
+    for (const [i, j] of matched) {
+      applyCvrOverrides(analysis.contract_vs_reality[i], agLookup[j]);
+    }
 
-      if (ag.stated_monthly_revenue && ag.stated_monthly_revenue > 0) {
-        cvr.stated_revenue = ag.stated_monthly_revenue;
-        cvr.revenue_source = 'explicit';
-      } else if (ag.implied_monthly_revenue && ag.implied_monthly_revenue > 0) {
-        cvr.stated_revenue = ag.implied_monthly_revenue;
-        cvr.revenue_source = 'implied_from_specified_percentage';
-        cvr.implied_revenue_from_pct = ag.implied_monthly_revenue;
-      }
-
-      if (cvr.stated_revenue && cvr.stated_revenue > 0 && cvr.actual_revenue && cvr.actual_revenue > 0) {
-        cvr.revenue_discrepancy_pct = parseFloat((((cvr.stated_revenue - cvr.actual_revenue) / cvr.actual_revenue) * 100).toFixed(1));
-        cvr.revenue_inflated = cvr.revenue_discrepancy_pct > 0;
-        cvr.revenue_understated = cvr.revenue_discrepancy_pct < 0;
-      }
-
-      if (ag.purchased_amount && ag.net_to_seller && ag.net_to_seller > 0) {
-        cvr.true_factor_rate = parseFloat((ag.purchased_amount / ag.net_to_seller).toFixed(2));
-      }
+    // Inject missing agreements that the LLM didn't produce entries for
+    for (let j = 0; j < agLookup.length; j++) {
+      if (usedAg.has(j)) continue;
+      const ag = agLookup[j];
+      const actualRevenue = analysis.revenue_reality?.actual_monthly_revenue || 0;
+      const newCvr = {
+        funder_name: displayName(ag),
+        agreement_date: ag.effective_date || '',
+        stated_revenue: null,
+        revenue_source: 'not_disclosed',
+        implied_revenue_from_pct: null,
+        actual_revenue: actualRevenue,
+        revenue_discrepancy_pct: 0,
+        revenue_inflated: false,
+        revenue_understated: false,
+        contracted_withhold_pct: 0,
+        actual_withhold_pct: 0,
+        withhold_discrepancy_points: 0,
+        contracted_payment: ag.weekly_payment || 0,
+        actual_payment: ag.weekly_payment || 0,
+        payment_match: true,
+        available_revenue_at_funding: 0,
+        true_withhold_of_available: 0,
+        contracted_factor_rate: ag.factor_rate || 0,
+        true_factor_rate: 0,
+        effective_apr: 0,
+        total_fees_charged: ag.origination_fee || 0,
+        net_proceeds: ag.net_to_seller || 0,
+        underwriting_grade: 'D',
+        underwriting_failures: ['Position missing from LLM analysis — injected from agreement data'],
+        leverage_points: [],
+        _injected: true,
+      };
+      applyCvrOverrides(newCvr, ag);
+      analysis.contract_vs_reality.push(newCvr);
     }
   }
 
-  // Override position_chronology
+  // ── Override position_chronology with exclusive matching ──
   if (analysis.position_chronology && Array.isArray(analysis.position_chronology)) {
-    for (const pos of analysis.position_chronology) {
-      const ag = matchAgreement(pos.funder_name, pos.weekly_payment);
-      if (!ag) continue;
+    const { matched, usedAg } = exclusiveMatch(
+      analysis.position_chronology,
+      pos => pos.funder_name,
+      pos => pos.weekly_payment
+    );
 
+    for (const [i, j] of matched) {
+      const pos = analysis.position_chronology[i];
+      const ag = agLookup[j];
       if (ag.weekly_payment) {
         pos.weekly_payment = ag.weekly_payment;
         pos.monthly_payment = Math.round(ag.weekly_payment * 4.33);
@@ -528,31 +604,173 @@ function postProcessCrossRef(analysis, agreementAnalyses) {
       if (ag.purchase_price) pos.purchase_price = ag.purchase_price;
       if (ag.net_to_seller) pos.net_proceeds = ag.net_to_seller;
     }
+
+    // Inject missing agreements into chronology
+    for (let j = 0; j < agLookup.length; j++) {
+      if (usedAg.has(j)) continue;
+      const ag = agLookup[j];
+      const maxOrder = analysis.position_chronology.reduce((m, p) => Math.max(m, p.order || 0), 0);
+      analysis.position_chronology.push({
+        order: maxOrder + 1,
+        funder_name: displayName(ag),
+        funding_date: ag.effective_date || '',
+        purchase_price: ag.purchase_price || 0,
+        net_proceeds: ag.net_to_seller || 0,
+        weekly_payment: ag.weekly_payment || 0,
+        monthly_payment: ag.weekly_payment ? Math.round(ag.weekly_payment * 4.33) : 0,
+        existing_weekly_mca_at_funding: 0,
+        existing_monthly_mca_at_funding: 0,
+        actual_revenue_at_funding: analysis.revenue_reality?.actual_monthly_revenue || 0,
+        available_revenue_at_funding: 0,
+        available_revenue_after_this_position: 0,
+        cumulative_weekly_burden_after: 0,
+        cumulative_monthly_burden_after: 0,
+        pct_of_available_revenue_consumed: 0,
+        narrative: `Position injected from agreement data — not present in original LLM analysis.`,
+        _injected: true,
+      });
+    }
+
+    // Re-sort chronology by funding date
+    analysis.position_chronology.sort((a, b) => {
+      const da = a.funding_date ? new Date(a.funding_date) : new Date(0);
+      const db = b.funding_date ? new Date(b.funding_date) : new Date(0);
+      return da - db;
+    });
+    analysis.position_chronology.forEach((p, i) => { p.order = i + 1; });
   }
 
-  // Override restructuring_recommendation per-funder
+  // ── Override restructuring_recommendation per-funder with exclusive matching ──
   if (analysis.restructuring_recommendation?.per_funder_recommendation) {
-    for (const rec of analysis.restructuring_recommendation.per_funder_recommendation) {
-      const ag = matchAgreement(rec.funder, rec.current_weekly);
-      if (!ag || !ag.weekly_payment) continue;
-      rec.current_weekly = ag.weekly_payment;
+    const recs = analysis.restructuring_recommendation.per_funder_recommendation;
+    const { matched, usedAg } = exclusiveMatch(
+      recs,
+      rec => rec.funder,
+      rec => rec.current_weekly
+    );
+
+    for (const [i, j] of matched) {
+      if (agLookup[j].weekly_payment) {
+        recs[i].current_weekly = agLookup[j].weekly_payment;
+      }
+    }
+
+    // Inject missing agreements into restructuring recommendations
+    for (let j = 0; j < agLookup.length; j++) {
+      if (usedAg.has(j)) continue;
+      const ag = agLookup[j];
+      if (!ag.weekly_payment) continue;
+      recs.push({
+        funder: displayName(ag),
+        current_weekly: ag.weekly_payment,
+        recommended_weekly: Math.round(ag.weekly_payment * 0.5),
+        reduction_pct: 50,
+        remaining_balance: ag.purchased_amount || 0,
+        recommended_term_weeks: 52,
+        rationale: `Position injected from agreement data. Payment reduction estimated pending full analysis.`,
+        _injected: true,
+      });
+    }
+
+    // Recalculate totals
+    const totalCurrent = recs.reduce((s, r) => s + (r.current_weekly || 0), 0);
+    const totalRecommended = recs.reduce((s, r) => s + (r.recommended_weekly || 0), 0);
+    analysis.restructuring_recommendation.current_total_weekly = totalCurrent;
+    if (totalCurrent > 0 && totalRecommended > 0) {
+      analysis.restructuring_recommendation.recommended_reduction_pct =
+        parseFloat(((1 - totalRecommended / totalCurrent) * 100).toFixed(1));
     }
   }
 
-  // Self-renewal existing MCA fix: estimate prior payment from prior_balance_amount
+  // ── Compute existing MCA burden at each funding date from bank data ──
   if (analysis.position_chronology && Array.isArray(analysis.position_chronology)) {
+    const bankPositions = bankAnalysis?.mca_positions || [];
+
+    // Parse a date string into comparable value; returns null if unparseable
+    function parseDate(d) {
+      if (!d) return null;
+      const t = new Date(d);
+      return isNaN(t.getTime()) ? null : t;
+    }
+
+    // For each position in chronology, compute existing burden from bank data
     for (const pos of analysis.position_chronology) {
-      const ag = matchAgreement(pos.funder_name, pos.weekly_payment);
+      const fundingDate = parseDate(pos.funding_date);
+      if (!fundingDate) continue;
+
+      let computedWeeklyBurden = 0;
+      for (const bp of bankPositions) {
+        // Skip if this is the same funder/position
+        if (isSameFunder(bp.funder_name, pos.funder_name)) continue;
+
+        const firstSeen = parseDate(bp.first_payment_date);
+        const lastSeen = bp.last_payment_date === 'present' ? new Date() : parseDate(bp.last_payment_date);
+        if (!firstSeen) continue;
+
+        // Was this position active when pos funded?
+        if (firstSeen <= fundingDate && (!lastSeen || lastSeen >= fundingDate)) {
+          const weeklyAmt = bp.payment_amount_current || bp.payment_amount || 0;
+          if (bp.frequency === 'daily') {
+            computedWeeklyBurden += weeklyAmt * 5;
+          } else if (bp.frequency === 'monthly') {
+            computedWeeklyBurden += Math.round(weeklyAmt / 4.33);
+          } else {
+            // weekly or bi-weekly default to weekly
+            computedWeeklyBurden += weeklyAmt;
+          }
+        }
+      }
+
+      // Use computed burden if higher than what the LLM produced (catches $0 errors)
+      const existingWeekly = pos.existing_weekly_mca_at_funding || 0;
+      if (computedWeeklyBurden > existingWeekly) {
+        pos.existing_weekly_mca_at_funding = computedWeeklyBurden;
+        pos.existing_monthly_mca_at_funding = Math.round(computedWeeklyBurden * 4.33);
+        pos.burden_source = 'computed_from_bank_data';
+      }
+    }
+
+    // Self-renewal existing MCA fix: estimate prior payment from prior_balance_amount
+    for (const pos of analysis.position_chronology) {
+      // Find matching agreement using isSameFunder + position label
+      const posMatch = pos.funder_name?.match(/position\s*([a-z0-9])/i);
+      const posLabel = posMatch ? posMatch[1].toUpperCase() : null;
+      let ag = null;
+      for (const a of agLookup) {
+        if (!isSameFunder(pos.funder_name, a.funder_name)) continue;
+        if (posLabel && a.position_label && !a.position_label.toUpperCase().includes(posLabel)) continue;
+        ag = a;
+        break;
+      }
       if (!ag || !ag.prior_balance_is_self_renewal || !ag.prior_balance_amount) continue;
 
-      // If existing_weekly_mca_at_funding is 0 or missing, estimate from prior balance
       const existingWeekly = pos.existing_weekly_mca_at_funding || 0;
-      if (existingWeekly === 0) {
-        const estimatedPriorWeekly = Math.round(ag.prior_balance_amount / 25);
-        pos.existing_weekly_mca_at_funding = estimatedPriorWeekly;
-        pos.existing_monthly_mca_at_funding = Math.round(estimatedPriorWeekly * 4.33);
+      const estimatedPriorWeekly = Math.round(ag.prior_balance_amount / 25);
+
+      // Add self-renewal prior payment if not already accounted for
+      if (existingWeekly < estimatedPriorWeekly) {
+        // The existing burden from other funders + estimated prior self-payment
+        const otherBurden = existingWeekly;
+        pos.existing_weekly_mca_at_funding = otherBurden + estimatedPriorWeekly;
+        pos.existing_monthly_mca_at_funding = Math.round((otherBurden + estimatedPriorWeekly) * 4.33);
         pos.self_renewal_prior_estimated = true;
         pos.self_renewal_note = `Self-renewal: prior ${ag.funder_name} position had ~$${estimatedPriorWeekly.toLocaleString()}/wk remaining balance of $${ag.prior_balance_amount.toLocaleString()} (estimated ÷25 weeks)`;
+      }
+    }
+
+    // Recompute available_revenue fields and cumulative burden after corrections
+    let cumulativeWeekly = 0;
+    for (const pos of analysis.position_chronology) {
+      const actualRevenue = pos.actual_revenue_at_funding || analysis.revenue_reality?.actual_monthly_revenue || 0;
+      const existingMonthly = pos.existing_monthly_mca_at_funding || 0;
+      pos.available_revenue_at_funding = actualRevenue - existingMonthly;
+      const thisMonthly = pos.monthly_payment || Math.round((pos.weekly_payment || 0) * 4.33);
+      pos.available_revenue_after_this_position = pos.available_revenue_at_funding - thisMonthly;
+      cumulativeWeekly += pos.weekly_payment || 0;
+      pos.cumulative_weekly_burden_after = cumulativeWeekly;
+      pos.cumulative_monthly_burden_after = Math.round(cumulativeWeekly * 4.33);
+      if (pos.available_revenue_at_funding > 0) {
+        pos.pct_of_available_revenue_consumed = parseFloat(((thisMonthly / pos.available_revenue_at_funding) * 100).toFixed(1));
       }
     }
   }
@@ -650,7 +868,7 @@ ${trimmedAgreements.map((a, i) => `### Agreement ${i + 1}: ${a.funder_name || 'U
     }
 
     // Post-process: override LLM numbers with agreement source data
-    const processedAnalysis = postProcessCrossRef(analysis, agreementAnalyses.map(a => a.analysis || a));
+    const processedAnalysis = postProcessCrossRef(analysis, agreementAnalyses.map(a => a.analysis || a), bankAnalysis);
 
     return Response.json({
       success: true,
