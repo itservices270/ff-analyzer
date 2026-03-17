@@ -449,31 +449,61 @@ export async function POST(request) {
       }
     }
 
-    const response = await client.messages.create({
-      model: selectedModel,
-      max_tokens: 16000,
-      temperature: 0,
-      messages: [{ role: 'user', content: contentBlocks }]
-    });
+    // Helper: call Claude API and parse the JSON response
+    async function callAndParse() {
+      let response;
+      try {
+        response = await client.messages.create({
+          model: selectedModel,
+          max_tokens: 16000,
+          temperature: 0,
+          messages: [{ role: 'user', content: contentBlocks }]
+        });
+      } catch (apiErr) {
+        throw new Error(`Claude API call failed: ${apiErr.message || apiErr}`);
+      }
 
-    const rawText = response.content.filter(b => b.type === 'text').map(b => b.text).join('');
-    const cleaned = rawText.replace(/```json\n?/g, '').replace(/```\n?/g, '').trim();
+      const rawText = response.content.filter(b => b.type === 'text').map(b => b.text).join('');
+      const cleaned = rawText.replace(/```json\n?/g, '').replace(/```\n?/g, '').trim();
 
+      // Check for plain-text error responses before attempting parse
+      if (cleaned.startsWith('An error') || (!cleaned.startsWith('{') && !cleaned.startsWith('['))) {
+        throw new Error(`Model returned non-JSON response: ${cleaned.slice(0, 500)}`);
+      }
+
+      try {
+        return JSON.parse(cleaned);
+      } catch (e) {
+        // Robust balanced-brace JSON extraction
+        let depth = 0, start = -1, end = -1;
+        for (let i = 0; i < cleaned.length; i++) {
+          if (cleaned[i] === '{') { if (depth === 0) start = i; depth++; }
+          else if (cleaned[i] === '}') { depth--; if (depth === 0 && start >= 0) { end = i + 1; break; } }
+        }
+        if (start >= 0 && end > start) {
+          try { return JSON.parse(cleaned.slice(start, end)); }
+          catch { throw new Error(`JSON extraction failed. Raw: ${cleaned.slice(0, 500)}`); }
+        } else {
+          throw new Error(`No structured data in response. Raw: ${cleaned.slice(0, 500)}`);
+        }
+      }
+    }
+
+    // Attempt with one retry on non-JSON responses
     let analysis;
     try {
-      analysis = JSON.parse(cleaned);
-    } catch (e) {
-      // Robust balanced-brace JSON extraction
-      let depth = 0, start = -1, end = -1;
-      for (let i = 0; i < cleaned.length; i++) {
-        if (cleaned[i] === '{') { if (depth === 0) start = i; depth++; }
-        else if (cleaned[i] === '}') { depth--; if (depth === 0 && start >= 0) { end = i + 1; break; } }
-      }
-      if (start >= 0 && end > start) {
-        try { analysis = JSON.parse(cleaned.slice(start, end)); }
-        catch { return Response.json({ error: 'Analysis parsing failed. Raw: ' + cleaned.slice(0, 400) }, { status: 500 }); }
-      } else {
-        return Response.json({ error: 'Analysis did not return structured data.', debug: cleaned.slice(0, 400) }, { status: 500 });
+      analysis = await callAndParse();
+    } catch (firstErr) {
+      console.warn('First attempt failed, retrying in 3s:', firstErr.message);
+      await new Promise(resolve => setTimeout(resolve, 3000));
+      try {
+        analysis = await callAndParse();
+      } catch (retryErr) {
+        console.error('Retry also failed:', retryErr.message);
+        return Response.json(
+          { error: 'Analysis failed after retry', detail: retryErr.message },
+          { status: 500 }
+        );
       }
     }
 
