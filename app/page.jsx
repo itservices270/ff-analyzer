@@ -4671,27 +4671,27 @@ export default function FFAnalyzer() {
       }
     }
 
-    // Strip [DONE] marker
+    // Strip [DONE] marker and markdown fences
     let text = accumulated.replace(/\n?\[DONE\]$/, '').trim();
-    // Strip markdown fences
     text = text.replace(/```json\n?/g, '').replace(/```\n?/g, '').trim();
 
-    if (!text.startsWith('{') && !text.startsWith('[')) {
-      throw new Error(`Opus returned non-JSON: ${text.slice(0, 300)}`);
+    // Strip preamble before first { and trailing text after last }
+    const firstBrace = text.indexOf('{');
+    if (firstBrace === -1) {
+      throw new Error(`Opus returned no JSON object: ${text.slice(0, 300)}`);
+    }
+    if (firstBrace > 0) {
+      console.log(`[stream] Stripping ${firstBrace} chars of preamble`);
+      text = text.slice(firstBrace);
+    }
+    const lastBrace = text.lastIndexOf('}');
+    if (lastBrace !== -1) {
+      text = text.slice(0, lastBrace + 1);
     }
 
     try {
       return JSON.parse(text);
     } catch (e) {
-      // Balanced-brace extraction fallback
-      let depth = 0, start = -1, end = -1;
-      for (let i = 0; i < text.length; i++) {
-        if (text[i] === '{') { if (depth === 0) start = i; depth++; }
-        else if (text[i] === '}') { depth--; if (depth === 0 && start >= 0) { end = i + 1; break; } }
-      }
-      if (start >= 0 && end > start) {
-        return JSON.parse(text.slice(start, end));
-      }
       throw new Error(`JSON parse failed after streaming. Length: ${text.length}. Start: ${text.slice(0, 200)}`);
     }
   }

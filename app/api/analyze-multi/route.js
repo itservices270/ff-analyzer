@@ -33,7 +33,9 @@ ${tierSummary}
 `;
 }
 
-const MULTI_PROMPT = `You are an expert MCA underwriter performing forensic bank statement analysis for Funders First Inc., a debt restructuring company. You have 15+ years of experience analyzing bank statements for MCA debt restructuring cases across all industries.
+const MULTI_PROMPT = `RESPOND WITH VALID JSON ONLY. NO TEXT BEFORE OR AFTER THE JSON. START YOUR RESPONSE WITH { AND END WITH }. ANY TEXT OUTSIDE THE JSON OBJECT WILL BREAK THE APPLICATION.
+
+You are an expert MCA underwriter performing forensic bank statement analysis for Funders First Inc., a debt restructuring company. You have 15+ years of experience analyzing bank statements for MCA debt restructuring cases across all industries.
 
 ## REVENUE CLASSIFICATION — VENDING BUSINESSES (CRITICAL — GET THIS RIGHT)
 
@@ -435,29 +437,37 @@ If MORE THAN ONE debit from the same funder occurs within a 7-day window at DIFF
 - If only ONE payment was detected, set last_payment_date to "present" (indicating the position is still active)
 - payments_detected = total COUNT of ALL debits attributed to this position across all months
 - If a funder has double-pull debits (two different amounts in same week), count BOTH as separate payments
-- estimated_monthly_total should reflect the ACTUAL total debited in the most recent month (sum all debits for that month)`;
+- estimated_monthly_total should reflect the ACTUAL total debited in the most recent month (sum all debits for that month)
 
-// Parse raw text into a JSON analysis object, with brace-extraction fallback
+RESPOND WITH VALID JSON ONLY. NO TEXT BEFORE OR AFTER THE JSON. START YOUR RESPONSE WITH { AND END WITH }. ANY TEXT OUTSIDE THE JSON OBJECT WILL BREAK THE APPLICATION.`;
+
+// Parse raw text into a JSON analysis object.
+// Strips any preamble text before the first { and trailing text after the last }.
 function parseAnalysisJSON(rawText) {
-  const cleaned = rawText.replace(/```json\n?/g, '').replace(/```\n?/g, '').trim();
+  let text = rawText.replace(/```json\n?/g, '').replace(/```\n?/g, '').trim();
 
-  if (!cleaned.startsWith('{') && !cleaned.startsWith('[')) {
-    throw new Error(`Model returned non-JSON response: ${cleaned.slice(0, 500)}`);
+  // Strip everything before the first {
+  const firstBrace = text.indexOf('{');
+  if (firstBrace === -1) {
+    throw new Error(`No JSON object in response. Raw: ${text.slice(0, 500)}`);
+  }
+  if (firstBrace > 0) {
+    console.log(`[analyze-multi] Stripping ${firstBrace} chars of preamble before first {`);
+    text = text.slice(firstBrace);
   }
 
+  // Strip everything after the last }
+  const lastBrace = text.lastIndexOf('}');
+  if (lastBrace === -1) {
+    throw new Error(`No closing brace in response. Raw: ${text.slice(0, 500)}`);
+  }
+  text = text.slice(0, lastBrace + 1);
+
   try {
-    return JSON.parse(cleaned);
+    return JSON.parse(text);
   } catch (e) {
-    // Balanced-brace extraction fallback
-    let depth = 0, start = -1, end = -1;
-    for (let i = 0; i < cleaned.length; i++) {
-      if (cleaned[i] === '{') { if (depth === 0) start = i; depth++; }
-      else if (cleaned[i] === '}') { depth--; if (depth === 0 && start >= 0) { end = i + 1; break; } }
-    }
-    if (start >= 0 && end > start) {
-      return JSON.parse(cleaned.slice(start, end));
-    }
-    throw new Error(`JSON parse failed. Raw: ${cleaned.slice(0, 500)}`);
+    console.error(`[analyze-multi] JSON.parse failed after brace extraction: ${e.message}. First 300 chars: ${text.slice(0, 300)}`);
+    throw new Error(`JSON parse failed after extraction. Length: ${text.length}. Start: ${text.slice(0, 200)}`);
   }
 }
 
