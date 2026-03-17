@@ -1,7 +1,34 @@
 import Anthropic from '@anthropic-ai/sdk';
 import { buildIndustryPromptBlock } from '../../data/industry-profiles.js';
+import achDescriptors from '../../data/ach-descriptors.json' with { type: 'json' };
+import funderRiskTiers from '../../data/funder-risk-tiers.json' with { type: 'json' };
 export const maxDuration = 180;
 const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
+
+// Build a prompt block from the ACH descriptors + risk tiers JSON data
+function buildFunderIntelBlock() {
+  const mcaFunders = achDescriptors.descriptors.filter(d => d.category === 'mca_funder');
+  const nonMca = achDescriptors.descriptors.filter(d => ['fuel_card', 'factoring', 'loan', 'collections', 'settlement', 'restructuring'].includes(d.category));
+
+  const funderLines = mcaFunders.map(d => `• "${d.pattern}" → ${d.funder} (Tier ${d.tier})`).join('\n');
+  const nonMcaLines = nonMca.map(d => `• "${d.pattern}" → ${d.funder} [${d.category.toUpperCase()}] — NOT MCA`).join('\n');
+
+  const tierSummary = Object.entries(funderRiskTiers.tiers).map(([key, t]) => {
+    return `${key}-Tier: ${t.label} | Default rate: ${t.default_rate} | Recovery: ${t.default_recovery_cents.low}-${t.default_recovery_cents.high} cents/dollar | Negotiation: ${t.negotiation_difficulty}`;
+  }).join('\n');
+
+  return `\n## KNOWN MCA FUNDER ACH DESCRIPTORS (auto-loaded reference)
+When you see these patterns in bank statement debits, classify accordingly:
+
+${funderLines}
+
+## NON-MCA DESCRIPTORS — DO NOT CLASSIFY AS MCA POSITIONS:
+${nonMcaLines}
+
+## FUNDER RISK TIER REFERENCE:
+${tierSummary}
+`;
+}
 
 const MULTI_PROMPT = `You are an expert MCA underwriter performing forensic bank statement analysis for Funders First Inc., a debt restructuring company. You have 15+ years of experience analyzing bank statements for MCA debt restructuring cases across all industries.
 
@@ -430,7 +457,8 @@ export async function POST(request) {
     }
 
     const industryBlock = industry ? buildIndustryPromptBlock(industry) : '';
-    contentBlocks.push({ type: 'text', text: `${MULTI_PROMPT}${industryBlock}${promptAddendum}\n\nSTATEMENTS TO ANALYZE (${statements.length} total):` });
+    const funderIntelBlock = buildFunderIntelBlock();
+    contentBlocks.push({ type: 'text', text: `${MULTI_PROMPT}${industryBlock}${funderIntelBlock}${promptAddendum}\n\nSTATEMENTS TO ANALYZE (${statements.length} total):` });
 
     for (let i = 0; i < statements.length; i++) {
       const s = statements[i];

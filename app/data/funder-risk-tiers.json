@@ -1,0 +1,76 @@
+{
+  "tiers": {
+    "A": {
+      "label": "A-Tier (Institutional)",
+      "fico_requirement": "620+",
+      "position_preference": "1st position only",
+      "collections_approach": "In-house professional teams",
+      "negotiation_difficulty": "Easy",
+      "typical_response_time": "3-7 days",
+      "cooperative": true,
+      "default_rate": "5-8%",
+      "default_recovery_cents": { "low": 85, "mid": 90, "high": 92 },
+      "examples": ["OnDeck", "Credibly", "Kapitus", "National Funding", "CAN Capital", "Rapid Finance", "Snap Advance"]
+    },
+    "B": {
+      "label": "B-Tier (Professional Sub-Prime)",
+      "fico_requirement": "550+",
+      "position_preference": "2nd position preferred",
+      "collections_approach": "In-house or reputable outsourced",
+      "negotiation_difficulty": "Moderate",
+      "typical_response_time": "5-14 days",
+      "cooperative": "Sometimes",
+      "default_rate": "9-13%",
+      "default_recovery_cents": { "low": 75, "mid": 80, "high": 85 },
+      "examples": ["Forward Financing", "Fora Financial", "Fundkite", "Libertas", "Mulligan Funding", "Pearl Capital", "Biz2Credit", "Lendini"]
+    },
+    "C": {
+      "label": "C-Tier (Stack Funders)",
+      "fico_requirement": "500+ (some no minimum)",
+      "position_preference": "2nd-4th positions",
+      "collections_approach": "Mixed — may threaten COJ (often unenforceable)",
+      "negotiation_difficulty": "Moderate-Hard",
+      "typical_response_time": "7-21 days",
+      "cooperative": "Varies",
+      "default_rate": "15-25%",
+      "default_recovery_cents": { "low": 50, "mid": 60, "high": 70 },
+      "examples": ["TBF GRP", "The Merchant Marketplace", "Rowan Advance", "Fox Business Funding", "Mantis Funding", "Everest Business Funding", "Yellowstone Capital", "Mint Funding", "Westmount Capital"]
+    },
+    "D": {
+      "label": "D-Tier (Aggressive Stack Funders)",
+      "fico_requirement": "500 or no minimum",
+      "position_preference": "Any position",
+      "collections_approach": "Outsourced aggressive firms, fake legal notices common",
+      "negotiation_difficulty": "Hard",
+      "typical_response_time": "14-30 days (or silence)",
+      "cooperative": false,
+      "default_rate": "25-40%",
+      "default_recovery_cents": { "low": 30, "mid": 40, "high": 50 },
+      "examples": ["Bitty Advance", "Eminent Funding", "Radisson Funding"]
+    },
+    "E": {
+      "label": "E-Tier (Micro/Unrated)",
+      "fico_requirement": "None",
+      "position_preference": "Any — usually micro positions",
+      "collections_approach": "Unpredictable — may not have collections infrastructure",
+      "negotiation_difficulty": "Varies",
+      "typical_response_time": "Unpredictable",
+      "cooperative": "Unknown",
+      "default_rate": "30%+",
+      "default_recovery_cents": { "low": 20, "mid": 35, "high": 50 },
+      "examples": []
+    },
+    "F": {
+      "label": "F-Tier (Predatory / Scam)",
+      "fico_requirement": "None",
+      "position_preference": "Any — predatory terms regardless",
+      "collections_approach": "Criminal-adjacent — fake legal, impersonation, physical intimidation",
+      "negotiation_difficulty": "Extreme / Do not engage normally",
+      "typical_response_time": "Unpredictable",
+      "cooperative": false,
+      "default_rate": "40%+",
+      "default_recovery_cents": { "low": 10, "mid": 20, "high": 30 },
+      "examples": ["Coconut Funding", "Alpaca Funding", "Plato Funding", "Citrus Fund", "Waterfall Capital", "Timeless Funding"]
+    }
+  }
+}
