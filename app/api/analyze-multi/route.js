@@ -437,6 +437,30 @@ If MORE THAN ONE debit from the same funder occurs within a 7-day window at DIFF
 - If a funder has double-pull debits (two different amounts in same week), count BOTH as separate payments
 - estimated_monthly_total should reflect the ACTUAL total debited in the most recent month (sum all debits for that month)`;
 
+// Parse raw text into a JSON analysis object, with brace-extraction fallback
+function parseAnalysisJSON(rawText) {
+  const cleaned = rawText.replace(/```json\n?/g, '').replace(/```\n?/g, '').trim();
+
+  if (!cleaned.startsWith('{') && !cleaned.startsWith('[')) {
+    throw new Error(`Model returned non-JSON response: ${cleaned.slice(0, 500)}`);
+  }
+
+  try {
+    return JSON.parse(cleaned);
+  } catch (e) {
+    // Balanced-brace extraction fallback
+    let depth = 0, start = -1, end = -1;
+    for (let i = 0; i < cleaned.length; i++) {
+      if (cleaned[i] === '{') { if (depth === 0) start = i; depth++; }
+      else if (cleaned[i] === '}') { depth--; if (depth === 0 && start >= 0) { end = i + 1; break; } }
+    }
+    if (start >= 0 && end > start) {
+      return JSON.parse(cleaned.slice(start, end));
+    }
+    throw new Error(`JSON parse failed. Raw: ${cleaned.slice(0, 500)}`);
+  }
+}
+
 export async function POST(request) {
   try {
     const { statements, model, industry } = await request.json();
@@ -445,6 +469,7 @@ export async function POST(request) {
     }
 
     const selectedModel = model === 'sonnet' ? 'claude-sonnet-4-20250514' : 'claude-opus-4-20250514';
+    const useStreaming = model !== 'sonnet'; // Stream for Opus to bypass Vercel 60s timeout
 
     // Check for empty/scanned statements that need warning
     const emptyStatements = statements.filter(s => !s.text || s.text.length < 200);
@@ -475,115 +500,81 @@ export async function POST(request) {
         const truncText = s.text.length > maxPerStmt ? s.text.slice(0, maxPerStmt) + '\n[TRUNCATED]' : s.text;
         contentBlocks.push({ type: 'text', text: truncText });
       } else {
-        // Empty or near-empty statement
         contentBlocks.push({ type: 'text', text: `[STATEMENT COULD NOT BE READ - likely a scanned PDF. Include in months_missing.]` });
       }
     }
 
-    // Helper: call Claude API and parse the JSON response
-    async function callAndParse(attempt = 1) {
-      console.log(`[analyze-multi] Attempt ${attempt} | model: ${selectedModel} | statements: ${statements.length} | API key present: ${!!process.env.ANTHROPIC_API_KEY} | key prefix: ${(process.env.ANTHROPIC_API_KEY || '').slice(0, 7)}...`);
+    const apiParams = {
+      model: selectedModel,
+      max_tokens: 16000,
+      temperature: 0,
+      messages: [{ role: 'user', content: contentBlocks }]
+    };
 
-      let response;
-      try {
-        response = await client.messages.create({
-          model: selectedModel,
-          max_tokens: 16000,
-          temperature: 0,
-          messages: [{ role: 'user', content: contentBlocks }]
-        });
-      } catch (apiErr) {
-        // SDK-level error (auth, rate limit, network, overloaded, etc.)
-        const status = apiErr.status || apiErr.statusCode || 'unknown';
-        const errType = apiErr.constructor?.name || 'Error';
-        console.error(`[analyze-multi] SDK error on attempt ${attempt}: [${status}] ${errType}: ${apiErr.message}`);
-        if (apiErr.error) console.error(`[analyze-multi] SDK error body:`, JSON.stringify(apiErr.error).slice(0, 500));
-        throw new Error(`Anthropic API error (${status}): ${apiErr.message}`);
-      }
+    console.log(`[analyze-multi] model: ${selectedModel} | streaming: ${useStreaming} | statements: ${statements.length} | API key: ${(process.env.ANTHROPIC_API_KEY || '').slice(0, 7)}...`);
 
-      // Log response metadata
-      console.log(`[analyze-multi] Response received | stop_reason: ${response.stop_reason} | usage: input=${response.usage?.input_tokens} output=${response.usage?.output_tokens} | content blocks: ${response.content?.length}`);
-
-      // Extract text from response
-      const rawText = response.content.filter(b => b.type === 'text').map(b => b.text).join('');
-      console.log(`[analyze-multi] Raw response length: ${rawText.length} chars | first 200: ${rawText.slice(0, 200).replace(/\n/g, '\\n')}`);
-
-      // Check for empty responses
-      if (!rawText || rawText.trim().length === 0) {
-        throw new Error(`Empty response from model. stop_reason: ${response.stop_reason}`);
-      }
-
-      // Check response size — Vercel has a ~4.5MB response body limit
-      const responseSizeBytes = new TextEncoder().encode(rawText).length;
-      console.log(`[analyze-multi] Response size: ${(responseSizeBytes / 1024).toFixed(1)} KB`);
-      if (responseSizeBytes > 4 * 1024 * 1024) {
-        console.warn(`[analyze-multi] WARNING: Response is ${(responseSizeBytes / 1024 / 1024).toFixed(1)} MB — may hit Vercel size limit`);
-      }
-
-      const cleaned = rawText.replace(/```json\n?/g, '').replace(/```\n?/g, '').trim();
-
-      // Check for plain-text error responses BEFORE any JSON.parse attempt
-      if (!cleaned.startsWith('{') && !cleaned.startsWith('[')) {
-        console.error(`[analyze-multi] NON-JSON RESPONSE on attempt ${attempt}. Full text: ${cleaned.slice(0, 1000)}`);
-        throw new Error(`Model returned non-JSON response: ${cleaned.slice(0, 500)}`);
-      }
-
-      try {
-        return JSON.parse(cleaned);
-      } catch (e) {
-        console.warn(`[analyze-multi] Direct JSON.parse failed: ${e.message}. Trying brace extraction...`);
-        // Robust balanced-brace JSON extraction
-        let depth = 0, start = -1, end = -1;
-        for (let i = 0; i < cleaned.length; i++) {
-          if (cleaned[i] === '{') { if (depth === 0) start = i; depth++; }
-          else if (cleaned[i] === '}') { depth--; if (depth === 0 && start >= 0) { end = i + 1; break; } }
-        }
-        if (start >= 0 && end > start) {
+    // ─── STREAMING PATH (Opus) ─────────────────────────────────────────
+    // Streams text chunks back to the client so Vercel's timeout resets
+    // with each chunk. The client accumulates the full text and parses
+    // JSON only after the [DONE] marker.
+    if (useStreaming) {
+      const encoder = new TextEncoder();
+      const readableStream = new ReadableStream({
+        async start(controller) {
           try {
-            const extracted = JSON.parse(cleaned.slice(start, end));
-            console.log(`[analyze-multi] Brace extraction succeeded (chars ${start}-${end})`);
-            return extracted;
-          } catch (extractErr) {
-            console.error(`[analyze-multi] Brace extraction also failed. Raw around parse error: ${cleaned.slice(Math.max(0, start), Math.min(start + 500, cleaned.length))}`);
-            throw new Error(`JSON extraction failed. Raw: ${cleaned.slice(0, 500)}`);
+            const stream = client.messages.stream(apiParams);
+
+            stream.on('text', (text) => {
+              controller.enqueue(encoder.encode(text));
+            });
+
+            const finalMessage = await stream.finalMessage();
+
+            console.log(`[analyze-multi] Stream complete | stop_reason: ${finalMessage.stop_reason} | usage: input=${finalMessage.usage?.input_tokens} output=${finalMessage.usage?.output_tokens}`);
+
+            // Send end marker on its own line
+            controller.enqueue(encoder.encode('\n[DONE]'));
+            controller.close();
+          } catch (err) {
+            console.error(`[analyze-multi] Stream error: ${err.message}`);
+            // Send error as a parseable marker the client can detect
+            const errPayload = JSON.stringify({ error: true, message: err.message });
+            controller.enqueue(encoder.encode(`\n[ERROR]${errPayload}`));
+            controller.close();
           }
-        } else {
-          throw new Error(`No JSON object found in response. Raw: ${cleaned.slice(0, 500)}`);
         }
-      }
+      });
+
+      return new Response(readableStream, {
+        headers: {
+          'Content-Type': 'text/plain; charset=utf-8',
+          'X-Stream-Mode': 'opus',
+          'Cache-Control': 'no-cache',
+        },
+      });
     }
 
-    // Attempt with one automatic retry (5s delay) on failure
-    let analysis;
+    // ─── NON-STREAMING PATH (Sonnet) ───────────────────────────────────
+    let response;
     try {
-      analysis = await callAndParse(1);
-    } catch (firstErr) {
-      console.warn(`[analyze-multi] First attempt failed: ${firstErr.message}`);
-      console.warn(`[analyze-multi] Retrying in 5 seconds...`);
-      await new Promise(resolve => setTimeout(resolve, 5000));
-      try {
-        analysis = await callAndParse(2);
-      } catch (retryErr) {
-        console.error(`[analyze-multi] Retry also failed: ${retryErr.message}`);
-        return Response.json(
-          {
-            error: true,
-            message: retryErr.message,
-            detail: `Model: ${selectedModel} | Statements: ${statements.length} | Both attempts failed`,
-            firstAttemptError: firstErr.message,
-          },
-          { status: 500 }
-        );
-      }
+      response = await client.messages.create(apiParams);
+    } catch (apiErr) {
+      const status = apiErr.status || apiErr.statusCode || 'unknown';
+      console.error(`[analyze-multi] SDK error: [${status}] ${apiErr.message}`);
+      throw new Error(`Anthropic API error (${status}): ${apiErr.message}`);
     }
+
+    console.log(`[analyze-multi] Response | stop_reason: ${response.stop_reason} | usage: input=${response.usage?.input_tokens} output=${response.usage?.output_tokens}`);
+
+    const rawText = response.content.filter(b => b.type === 'text').map(b => b.text).join('');
+    const analysis = parseAnalysisJSON(rawText);
 
     return Response.json({ success: true, analysis, statement_count: statements.length });
   } catch (err) {
-    console.error(`[analyze-multi] Outer catch: ${err.message}`, err.stack);
+    console.error(`[analyze-multi] Error: ${err.message}`);
     return Response.json({
       error: true,
       message: err.message || 'Analysis failed',
-      stack: process.env.NODE_ENV === 'development' ? err.stack : undefined,
     }, { status: 500 });
   }
 }

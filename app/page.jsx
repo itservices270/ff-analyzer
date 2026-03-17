@@ -4638,6 +4638,88 @@ export default function FFAnalyzer() {
   const updateLabel = (id, val) => setUploadedFiles(prev => prev.map(f => f.id === id ? { ...f, accountLabel: val } : f));
   const updateMonth = (id, val) => setUploadedFiles(prev => prev.map(f => f.id === id ? { ...f, month: val } : f));
 
+  // ─── Streaming fetch helper for Opus ──────────────────────────────────────────
+  // Reads a streamed text response, accumulates it, parses JSON at the end.
+  // Updates loadingMsg with a live byte counter so the user sees progress.
+  async function fetchStreaming(res) {
+    const reader = res.body.getReader();
+    const decoder = new TextDecoder();
+    let accumulated = '';
+    let chunks = 0;
+
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      const chunk = decoder.decode(value, { stream: true });
+      accumulated += chunk;
+      chunks++;
+      if (chunks % 5 === 0) {
+        setLoadingMsg(`Receiving Opus data… ${(accumulated.length / 1024).toFixed(0)} KB`);
+      }
+    }
+
+    // Check for error marker
+    const errorIdx = accumulated.indexOf('\n[ERROR]');
+    if (errorIdx !== -1) {
+      const errJson = accumulated.slice(errorIdx + 8);
+      try {
+        const errObj = JSON.parse(errJson);
+        throw new Error(errObj.message || 'Stream error');
+      } catch (e) {
+        if (e.message !== 'Stream error') throw e;
+        throw new Error(errJson.slice(0, 500));
+      }
+    }
+
+    // Strip [DONE] marker
+    let text = accumulated.replace(/\n?\[DONE\]$/, '').trim();
+    // Strip markdown fences
+    text = text.replace(/```json\n?/g, '').replace(/```\n?/g, '').trim();
+
+    if (!text.startsWith('{') && !text.startsWith('[')) {
+      throw new Error(`Opus returned non-JSON: ${text.slice(0, 300)}`);
+    }
+
+    try {
+      return JSON.parse(text);
+    } catch (e) {
+      // Balanced-brace extraction fallback
+      let depth = 0, start = -1, end = -1;
+      for (let i = 0; i < text.length; i++) {
+        if (text[i] === '{') { if (depth === 0) start = i; depth++; }
+        else if (text[i] === '}') { depth--; if (depth === 0 && start >= 0) { end = i + 1; break; } }
+      }
+      if (start >= 0 && end > start) {
+        return JSON.parse(text.slice(start, end));
+      }
+      throw new Error(`JSON parse failed after streaming. Length: ${text.length}. Start: ${text.slice(0, 200)}`);
+    }
+  }
+
+  // ─── Core fetch: handles both streaming (Opus) and regular (Sonnet) ─────────
+  async function fetchAnalysis(endpoint, body) {
+    const res = await fetch(endpoint, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+
+    const isStreaming = res.headers.get('X-Stream-Mode') === 'opus';
+
+    if (isStreaming) {
+      setLoadingMsg('Opus streaming started… receiving data');
+      const analysis = await fetchStreaming(res);
+      return { success: true, analysis, statement_count: body.statements?.length || 1 };
+    }
+
+    // Non-streaming (Sonnet or single statement)
+    const data = await res.json();
+    if (!res.ok || data.error) {
+      throw new Error(data.message || data.error || 'Analysis failed');
+    }
+    return data;
+  }
+
   // ─── Analyze ─────────────────────────────────────────────────────────────────
   const analyze = async () => {
     const ready = uploadedFiles.filter(f => f.status === 'ready' && (f.text || (f.images && f.images.length > 0)));
@@ -4671,14 +4753,8 @@ export default function FFAnalyzer() {
         ? { text: statements[0].text, fileName: ready[0].file.name, model, industry: selectedIndustry }
         : { statements, model, industry: selectedIndustry };
 
-      const res = await fetch(endpoint, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(body),
-      });
-      const data = await res.json();
+      const data = await fetchAnalysis(endpoint, body);
       clearInterval(interval);
-      if (!res.ok || data.error) { setError(data.error || 'Analysis failed'); setLoading(false); return; }
       setResult(data);
       setPositions((data.analysis.mca_positions || []).map((p, i) => {
         const pa = parseFloat(p.payment_amount_current || p.payment_amount) || 0;
@@ -4736,13 +4812,7 @@ export default function FFAnalyzer() {
         ? { text: statements[0].text, fileName: ready[0].file.name, model, industry: selectedIndustry }
         : { statements, model, industry: selectedIndustry };
 
-      const res = await fetch(endpoint, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(body),
-      });
-      const data = await res.json();
-      if (!res.ok || data.error) { setError(data.error || 'Re-analysis failed'); setLoading(false); return; }
+      const data = await fetchAnalysis(endpoint, body);
       setResult(data);
 
       // Merge new positions with preserved manual ones
