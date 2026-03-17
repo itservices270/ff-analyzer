@@ -3,7 +3,10 @@ import { buildIndustryPromptBlock } from '../../data/industry-profiles.js';
 import achDescriptors from '../../data/ach-descriptors.json' with { type: 'json' };
 import funderRiskTiers from '../../data/funder-risk-tiers.json' with { type: 'json' };
 export const maxDuration = 180;
-const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
+const client = new Anthropic({
+  apiKey: process.env.ANTHROPIC_API_KEY,
+  maxRetries: 2,
+});
 
 // Build a prompt block from the ACH descriptors + risk tiers JSON data
 function buildFunderIntelBlock() {
@@ -478,7 +481,9 @@ export async function POST(request) {
     }
 
     // Helper: call Claude API and parse the JSON response
-    async function callAndParse() {
+    async function callAndParse(attempt = 1) {
+      console.log(`[analyze-multi] Attempt ${attempt} | model: ${selectedModel} | statements: ${statements.length} | API key present: ${!!process.env.ANTHROPIC_API_KEY} | key prefix: ${(process.env.ANTHROPIC_API_KEY || '').slice(0, 7)}...`);
+
       let response;
       try {
         response = await client.messages.create({
@@ -488,20 +493,45 @@ export async function POST(request) {
           messages: [{ role: 'user', content: contentBlocks }]
         });
       } catch (apiErr) {
-        throw new Error(`Claude API call failed: ${apiErr.message || apiErr}`);
+        // SDK-level error (auth, rate limit, network, overloaded, etc.)
+        const status = apiErr.status || apiErr.statusCode || 'unknown';
+        const errType = apiErr.constructor?.name || 'Error';
+        console.error(`[analyze-multi] SDK error on attempt ${attempt}: [${status}] ${errType}: ${apiErr.message}`);
+        if (apiErr.error) console.error(`[analyze-multi] SDK error body:`, JSON.stringify(apiErr.error).slice(0, 500));
+        throw new Error(`Anthropic API error (${status}): ${apiErr.message}`);
       }
 
+      // Log response metadata
+      console.log(`[analyze-multi] Response received | stop_reason: ${response.stop_reason} | usage: input=${response.usage?.input_tokens} output=${response.usage?.output_tokens} | content blocks: ${response.content?.length}`);
+
+      // Extract text from response
       const rawText = response.content.filter(b => b.type === 'text').map(b => b.text).join('');
+      console.log(`[analyze-multi] Raw response length: ${rawText.length} chars | first 200: ${rawText.slice(0, 200).replace(/\n/g, '\\n')}`);
+
+      // Check for empty responses
+      if (!rawText || rawText.trim().length === 0) {
+        throw new Error(`Empty response from model. stop_reason: ${response.stop_reason}`);
+      }
+
+      // Check response size — Vercel has a ~4.5MB response body limit
+      const responseSizeBytes = new TextEncoder().encode(rawText).length;
+      console.log(`[analyze-multi] Response size: ${(responseSizeBytes / 1024).toFixed(1)} KB`);
+      if (responseSizeBytes > 4 * 1024 * 1024) {
+        console.warn(`[analyze-multi] WARNING: Response is ${(responseSizeBytes / 1024 / 1024).toFixed(1)} MB — may hit Vercel size limit`);
+      }
+
       const cleaned = rawText.replace(/```json\n?/g, '').replace(/```\n?/g, '').trim();
 
-      // Check for plain-text error responses before attempting parse
-      if (cleaned.startsWith('An error') || (!cleaned.startsWith('{') && !cleaned.startsWith('['))) {
+      // Check for plain-text error responses BEFORE any JSON.parse attempt
+      if (!cleaned.startsWith('{') && !cleaned.startsWith('[')) {
+        console.error(`[analyze-multi] NON-JSON RESPONSE on attempt ${attempt}. Full text: ${cleaned.slice(0, 1000)}`);
         throw new Error(`Model returned non-JSON response: ${cleaned.slice(0, 500)}`);
       }
 
       try {
         return JSON.parse(cleaned);
       } catch (e) {
+        console.warn(`[analyze-multi] Direct JSON.parse failed: ${e.message}. Trying brace extraction...`);
         // Robust balanced-brace JSON extraction
         let depth = 0, start = -1, end = -1;
         for (let i = 0; i < cleaned.length; i++) {
@@ -509,27 +539,39 @@ export async function POST(request) {
           else if (cleaned[i] === '}') { depth--; if (depth === 0 && start >= 0) { end = i + 1; break; } }
         }
         if (start >= 0 && end > start) {
-          try { return JSON.parse(cleaned.slice(start, end)); }
-          catch { throw new Error(`JSON extraction failed. Raw: ${cleaned.slice(0, 500)}`); }
+          try {
+            const extracted = JSON.parse(cleaned.slice(start, end));
+            console.log(`[analyze-multi] Brace extraction succeeded (chars ${start}-${end})`);
+            return extracted;
+          } catch (extractErr) {
+            console.error(`[analyze-multi] Brace extraction also failed. Raw around parse error: ${cleaned.slice(Math.max(0, start), Math.min(start + 500, cleaned.length))}`);
+            throw new Error(`JSON extraction failed. Raw: ${cleaned.slice(0, 500)}`);
+          }
         } else {
-          throw new Error(`No structured data in response. Raw: ${cleaned.slice(0, 500)}`);
+          throw new Error(`No JSON object found in response. Raw: ${cleaned.slice(0, 500)}`);
         }
       }
     }
 
-    // Attempt with one retry on non-JSON responses
+    // Attempt with one automatic retry (5s delay) on failure
     let analysis;
     try {
-      analysis = await callAndParse();
+      analysis = await callAndParse(1);
     } catch (firstErr) {
-      console.warn('First attempt failed, retrying in 3s:', firstErr.message);
-      await new Promise(resolve => setTimeout(resolve, 3000));
+      console.warn(`[analyze-multi] First attempt failed: ${firstErr.message}`);
+      console.warn(`[analyze-multi] Retrying in 5 seconds...`);
+      await new Promise(resolve => setTimeout(resolve, 5000));
       try {
-        analysis = await callAndParse();
+        analysis = await callAndParse(2);
       } catch (retryErr) {
-        console.error('Retry also failed:', retryErr.message);
+        console.error(`[analyze-multi] Retry also failed: ${retryErr.message}`);
         return Response.json(
-          { error: 'Analysis failed after retry', detail: retryErr.message },
+          {
+            error: true,
+            message: retryErr.message,
+            detail: `Model: ${selectedModel} | Statements: ${statements.length} | Both attempts failed`,
+            firstAttemptError: firstErr.message,
+          },
           { status: 500 }
         );
       }
@@ -537,7 +579,11 @@ export async function POST(request) {
 
     return Response.json({ success: true, analysis, statement_count: statements.length });
   } catch (err) {
-    console.error('Multi-analyze error:', err);
-    return Response.json({ error: err.message || 'Analysis failed' }, { status: 500 });
+    console.error(`[analyze-multi] Outer catch: ${err.message}`, err.stack);
+    return Response.json({
+      error: true,
+      message: err.message || 'Analysis failed',
+      stack: process.env.NODE_ENV === 'development' ? err.stack : undefined,
+    }, { status: 500 });
   }
 }
