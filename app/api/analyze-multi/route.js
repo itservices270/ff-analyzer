@@ -91,6 +91,30 @@ ACH credits from payment processors (Cantaloupe, Square, etc.) should be classif
 
 Do NOT report ach_credits as $0 if there are electronic deposits on the statements that don't fall into card processing, cash deposits, or MCA wires. If deposits exist on the statement that are not card processing and not MCA wires, they are likely ACH credits — count them.
 
+## ACH CREDITS AND VENDOR CREDITS — DO NOT REPORT AS $0:
+
+ACH CREDITS (ach_credits field in revenue and monthly_breakdown):
+Customer ACH payments are electronic deposits that are NOT card processing and NOT MCA wires. They include:
+- Route collection payments from customers
+- B2B customer payments via ACH
+- Insurance reimbursements
+- Government payments
+- Any electronic credit that is NOT from a known payment processor (Cantaloupe, Square, etc.) and NOT from a known MCA funder
+Sum ALL of these as ach_credits. If the bank statement shows electronic deposits besides card processing and MCA wires, ach_credits CANNOT be $0.
+
+VENDOR CREDITS (vendor_credits field in revenue and monthly_breakdown):
+Vendor rebates and credits from suppliers. For vending businesses, look for:
+- "FERRARA CANDY" / "FERRARA CANDY CO" → candy vendor rebate
+- "ADVANTECH CORP" / "ADVANTECH CORP PAYMENT" → equipment vendor rebate
+- "Unified Strategi" → vendor rebate
+- Any credit from a product supplier or equipment vendor
+Sum ALL vendor rebates as vendor_credits. If ANY of the above descriptors appear on the statements, vendor_credits CANNOT be $0.
+
+CROSS-CHECK: After building revenue breakdown, verify:
+- If card_processing > 0 but ach_credits = 0 → likely missed customer ACH deposits, re-examine
+- If vendor names (Ferrara, Advantech, Unified) appear on statement but vendor_credits = 0 → extraction error, re-examine
+- Sum of (card_processing + cash_deposits + ach_credits + vendor_credits) should approximate net_verified_revenue
+
 CONFIDENCE SCORING — EVERY revenue_source MUST have a "confidence" field (0-100):
 • 95-100: Known processor exact match (Cantaloupe, Square, LE-USA TECHNOL, Three Square MAR) or obvious MCA wire with funder name match
 • 80-94: Strong match with slightly ambiguous descriptor (e.g., cash deposit with clear business pattern, known staffing transfer)
@@ -105,6 +129,12 @@ CRITICAL REVENUE CALCULATION METHOD:
 4. Do NOT start from zero and sum only recognized items — you will miss cash deposits
 
 ## MCA POSITION DETECTION
+
+MINIMUM THRESHOLD RULES — APPLY BEFORE CREATING ANY MCA POSITION:
+1. MINIMUM PAYMENT: Only classify as MCA if the recurring debit is >= $500/week ($100/day, $2,165/month). Smaller recurring debits are operating expenses (insurance, subscriptions, services), NOT MCA positions.
+2. MINIMUM OCCURRENCES: A debit must appear at least 3 times across all statements to be classified as MCA. One-time or twice-only debits are NOT MCA positions — they are likely vendor payments, tax payments, or one-off expenses.
+3. REGULARITY: MCA payments follow a strict daily or weekly pattern. Irregular debits at varying intervals are NOT MCA.
+4. TMM OVERCHARGES: If a Merchant Marketplace debit appears at an amount HIGHER than the expected position amount (e.g., $12,000 when expected is $11,693), do NOT create a separate position. Instead, flag it as double_pull: true on the existing TMM position and add the overpull dates/amounts to double_pull_dates and double_pull_amounts arrays.
 
 CRITICAL RULE — SAME FUNDER, MULTIPLE POSITIONS:
 If you see debits from the same payee at DIFFERENT amounts on the SAME dates or same week, those are SEPARATE positions ONLY IF the payment amounts differ by more than $500. If two debits from the same funder have the SAME amount (within $500), they are the SAME position — do NOT create duplicates.
@@ -178,6 +208,15 @@ For Beverly Bank & Trust specifically: The statement includes daily balance info
 Output the ADB as "avg_daily_balance" in balance_summary AND populate "adb_by_month" with per-month ADB values.
 
 DO NOT return 0 for ADB unless the account truly had a $0 balance every day. An ADB of $0 on an active business account with deposits and withdrawals is ALWAYS an extraction error — try harder.
+
+MANDATORY ADB CALCULATION — DO NOT SKIP:
+If you cannot find an explicit "Average Daily Balance" line, you MUST calculate it yourself:
+- Look at the running balance column in the transaction ledger
+- For each calendar day, take the closing balance (last transaction balance of that day)
+- For days with no transactions, carry forward the previous day's closing balance
+- Sum all daily closing balances and divide by the number of days in the statement period
+- A business doing $500K+ monthly through the account will have an ADB of at least $10K-$100K+
+- If your calculated ADB is $0 or suspiciously low, you made an error — recalculate
 
 • Flag: If any single day's balance is >50% higher than surrounding days due to a known MCA advance wire, calculate a second "avg_daily_balance_adjusted" excluding that spike date
 
@@ -469,29 +508,69 @@ If MORE THAN ONE debit from the same funder occurs within a 7-day window at DIFF
 RESPOND WITH VALID JSON ONLY. NO TEXT BEFORE OR AFTER THE JSON. START YOUR RESPONSE WITH { AND END WITH }. ANY TEXT OUTSIDE THE JSON OBJECT WILL BREAK THE APPLICATION.`;
 
 // ─── POST-PROCESSING: Deduplicate MCA positions ────────────────────────────
-// Merges duplicate positions from the same funder when payment amounts match
-// within $500 and dates overlap within 2 weeks. Only keeps separate positions
-// when the payment amounts are meaningfully different.
+// 1. Filters out sub-$500/wk positions (not MCA — operating expenses)
+// 2. Filters out positions with fewer than 3 occurrences (one-off debits)
+// 3. Merges duplicate positions from same funder with same amount (within $500)
+// 4. Merges TMM overcharges as overpull flags on existing TMM positions
 function deduplicatePositions(positions) {
   if (!positions || positions.length === 0) return [];
 
   const normalize = (name) => (name || '').toLowerCase().replace(/[^a-z0-9]/g, '');
 
-  // Group by normalized funder name (first 6+ chars match)
+  // Convert payment to weekly equivalent for threshold check
+  const toWeekly = (amt, freq) => {
+    const f = (freq || '').toLowerCase();
+    if (f === 'daily') return amt * 5;
+    if (f === 'bi-weekly') return amt / 2;
+    if (f === 'monthly') return amt / 4.33;
+    return amt; // default weekly
+  };
+
+  // Step 1: Filter out positions below minimum thresholds
+  // Paid-off positions are exempt from the occurrence threshold
+  // Potential overcharges (same funder name as another position) are kept for merge step
+  const funderNames = positions.map(p => normalize(p.funder_name));
+  const filtered = positions.filter((p, idx) => {
+    const amt = p.payment_amount_current || p.payment_amount || 0;
+    const weeklyAmt = toWeekly(amt, p.frequency);
+    const occurrences = p.payments_detected || 0;
+    const isPaidOff = (p.status || '').toLowerCase() === 'paid_off';
+    const nameNorm = funderNames[idx];
+
+    // Minimum $500/week to be MCA
+    if (weeklyAmt < 500 && weeklyAmt > 0) {
+      console.log(`[dedup] Filtering out ${p.funder_name}: $${weeklyAmt.toFixed(0)}/wk below $500 minimum`);
+      return false;
+    }
+    // Minimum 3 occurrences (unless paid-off, or matches another position's funder for overcharge merge)
+    if (occurrences > 0 && occurrences < 3 && !isPaidOff) {
+      const prefixLen = Math.max(3, Math.min(nameNorm.length, 6));
+      const hasSameFunderSibling = funderNames.some((fn, j) => j !== idx &&
+        fn.length >= prefixLen && nameNorm.length >= prefixLen &&
+        (fn.includes(nameNorm.slice(0, prefixLen)) || nameNorm.includes(fn.slice(0, prefixLen))));
+      if (!hasSameFunderSibling) {
+        console.log(`[dedup] Filtering out ${p.funder_name}: only ${occurrences} occurrences (need 3+)`);
+        return false;
+      }
+      // Keep it — will be merged as overcharge in step 3
+    }
+    return true;
+  });
+
+  // Step 2: Group by normalized funder name (6+ char prefix match)
   const groups = [];
   const assigned = new Set();
 
-  for (let i = 0; i < positions.length; i++) {
+  for (let i = 0; i < filtered.length; i++) {
     if (assigned.has(i)) continue;
     const group = [i];
     assigned.add(i);
-    const nameI = normalize(positions[i].funder_name);
+    const nameI = normalize(filtered[i].funder_name);
 
-    for (let j = i + 1; j < positions.length; j++) {
+    for (let j = i + 1; j < filtered.length; j++) {
       if (assigned.has(j)) continue;
-      const nameJ = normalize(positions[j].funder_name);
+      const nameJ = normalize(filtered[j].funder_name);
 
-      // Check if same funder (6+ char prefix match or substring containment)
       const isSameFunder =
         (nameI.length >= 6 && nameJ.length >= 6 &&
          (nameI.includes(nameJ.slice(0, 6)) || nameJ.includes(nameI.slice(0, 6)))) ||
@@ -505,38 +584,63 @@ function deduplicatePositions(positions) {
     groups.push(group);
   }
 
+  // Step 3: Within each funder group, merge same-amount and handle overcharges
   const deduped = [];
   for (const group of groups) {
     if (group.length === 1) {
-      deduped.push(positions[group[0]]);
+      deduped.push(filtered[group[0]]);
       continue;
     }
 
-    // Within a same-funder group, merge positions with similar payment amounts
-    const subPositions = group.map(i => positions[i]);
+    const subPositions = group.map(i => filtered[i]);
     const kept = [];
 
     for (const pos of subPositions) {
       const amt = pos.payment_amount_current || pos.payment_amount || 0;
-      // Find an existing kept position with similar amount
+
+      // Find an existing kept position with similar amount (within $500)
+      // Only merge if BOTH have the same status (don't merge active with paid_off)
+      const posStatus = (pos.status || 'active').toLowerCase();
       const match = kept.find(k => {
         const kAmt = k.payment_amount_current || k.payment_amount || 0;
-        return Math.abs(amt - kAmt) <= 500;
+        const kStatus = (k.status || 'active').toLowerCase();
+        return Math.abs(amt - kAmt) <= 500 && kStatus === posStatus;
       });
 
       if (match) {
-        // Merge: keep the one with more payments detected, or the more recent one
+        // Same amount + same status → merge (keep higher payments_detected)
         const matchPayments = match.payments_detected || 0;
         const posPayments = pos.payments_detected || 0;
         if (posPayments > matchPayments) {
-          // Replace match with this one (more data)
           const idx = kept.indexOf(match);
           kept[idx] = pos;
         }
-        // Otherwise just skip this duplicate
       } else {
-        // Meaningfully different amount (>$500) → separate position
-        kept.push(pos);
+        // Different amount — check if this is an overcharge on an existing position
+        // (amount is close but higher, like $12K vs expected $11.6K for TMM)
+        const overchargeTarget = kept.find(k => {
+          const kAmt = k.payment_amount_current || k.payment_amount || 0;
+          // Overcharge: pos amount is 1-15% higher than existing position
+          return amt > kAmt && amt < kAmt * 1.15 && (amt - kAmt) > 500;
+        });
+
+        if (overchargeTarget) {
+          // Merge as overpull/double-pull on the existing position
+          overchargeTarget.double_pull = true;
+          overchargeTarget.double_pull_amounts = [
+            ...(overchargeTarget.double_pull_amounts || []),
+            amt
+          ];
+          overchargeTarget.double_pull_dates = [
+            ...(overchargeTarget.double_pull_dates || []),
+            ...(pos.double_pull_dates || [pos.first_payment_date || 'unknown'])
+          ];
+          overchargeTarget.notes = (overchargeTarget.notes || '') +
+            ` | Overpull detected: $${amt.toFixed(2)} vs expected $${(overchargeTarget.payment_amount_current || overchargeTarget.payment_amount || 0).toFixed(2)}`;
+        } else {
+          // Genuinely different amount → separate position
+          kept.push(pos);
+        }
       }
     }
 
