@@ -222,21 +222,53 @@ function buildPaymentCompliance(positions, agreementResults, monthlyBreakdown) {
 function postProcessAnalysis(analysis) {
   if (!analysis) return analysis;
 
-  // 1. Deduplicate MCA positions (same funder + same amount within $500 = merge)
+  // 1. Filter and deduplicate MCA positions
+  // - Remove sub-$500/wk positions (not MCA — operating expenses)
+  // - Remove positions with <3 occurrences (one-off debits) unless paid_off
+  // - Merge same funder + same amount (within $500)
+  // - Merge overcharges as overpull flags on existing positions
   if (analysis.mca_positions?.length > 0) {
     const normalize = (name) => (name || '').toLowerCase().replace(/[^a-z0-9]/g, '');
+    const toWeekly = (amt, freq) => {
+      const f = (freq || '').toLowerCase();
+      if (f === 'daily') return amt * 5;
+      if (f === 'bi-weekly') return amt / 2;
+      if (f === 'monthly') return amt / 4.33;
+      return amt;
+    };
+
+    // Filter below-threshold positions (keep potential overcharges for merge step)
+    const allPositions = analysis.mca_positions;
+    const funderNames = allPositions.map(p => normalize(p.funder_name));
+    const filtered = allPositions.filter((p, idx) => {
+      const amt = p.payment_amount_current || p.payment_amount || 0;
+      const weeklyAmt = toWeekly(amt, p.frequency);
+      const occurrences = p.payments_detected || 0;
+      const isPaidOff = (p.status || '').toLowerCase() === 'paid_off';
+      const nameNorm = funderNames[idx];
+      if (weeklyAmt < 500 && weeklyAmt > 0) return false;
+      if (occurrences > 0 && occurrences < 3 && !isPaidOff) {
+        // Keep if same funder exists (potential overcharge to merge)
+        const prefixLen = Math.max(3, Math.min(nameNorm.length, 6));
+        const hasSibling = funderNames.some((fn, j) => j !== idx &&
+          fn.length >= prefixLen && nameNorm.length >= prefixLen &&
+          (fn.includes(nameNorm.slice(0, prefixLen)) || nameNorm.includes(fn.slice(0, prefixLen))));
+        if (!hasSibling) return false;
+      }
+      return true;
+    });
+
+    // Group by normalized funder name
     const groups = [];
     const assigned = new Set();
-
-    for (let i = 0; i < analysis.mca_positions.length; i++) {
+    for (let i = 0; i < filtered.length; i++) {
       if (assigned.has(i)) continue;
       const group = [i];
       assigned.add(i);
-      const nameI = normalize(analysis.mca_positions[i].funder_name);
-
-      for (let j = i + 1; j < analysis.mca_positions.length; j++) {
+      const nameI = normalize(filtered[i].funder_name);
+      for (let j = i + 1; j < filtered.length; j++) {
         if (assigned.has(j)) continue;
-        const nameJ = normalize(analysis.mca_positions[j].funder_name);
+        const nameJ = normalize(filtered[j].funder_name);
         const isSameFunder =
           (nameI.length >= 6 && nameJ.length >= 6 &&
            (nameI.includes(nameJ.slice(0, 6)) || nameJ.includes(nameI.slice(0, 6)))) ||
@@ -248,21 +280,35 @@ function postProcessAnalysis(analysis) {
 
     const deduped = [];
     for (const group of groups) {
-      if (group.length === 1) { deduped.push(analysis.mca_positions[group[0]]); continue; }
-      const subPositions = group.map(i => analysis.mca_positions[i]);
+      if (group.length === 1) { deduped.push(filtered[group[0]]); continue; }
+      const subPositions = group.map(i => filtered[i]);
       const kept = [];
       for (const pos of subPositions) {
         const amt = pos.payment_amount_current || pos.payment_amount || 0;
+        const posStatus = (pos.status || 'active').toLowerCase();
         const match = kept.find(k => {
           const kAmt = k.payment_amount_current || k.payment_amount || 0;
-          return Math.abs(amt - kAmt) <= 500;
+          const kStatus = (k.status || 'active').toLowerCase();
+          return Math.abs(amt - kAmt) <= 500 && kStatus === posStatus;
         });
         if (match) {
           const matchPayments = match.payments_detected || 0;
           const posPayments = pos.payments_detected || 0;
           if (posPayments > matchPayments) { kept[kept.indexOf(match)] = pos; }
         } else {
-          kept.push(pos);
+          // Check if overcharge on existing position (1-15% higher, >$500 diff)
+          const overchargeTarget = kept.find(k => {
+            const kAmt = k.payment_amount_current || k.payment_amount || 0;
+            return amt > kAmt && amt < kAmt * 1.15 && (amt - kAmt) > 500;
+          });
+          if (overchargeTarget) {
+            overchargeTarget.double_pull = true;
+            overchargeTarget.double_pull_amounts = [...(overchargeTarget.double_pull_amounts || []), amt];
+            overchargeTarget.double_pull_dates = [...(overchargeTarget.double_pull_dates || []), ...(pos.double_pull_dates || [pos.first_payment_date || 'unknown'])];
+            overchargeTarget.notes = (overchargeTarget.notes || '') + ` | Overpull: $${amt.toFixed(2)} vs expected $${(overchargeTarget.payment_amount_current || overchargeTarget.payment_amount || 0).toFixed(2)}`;
+          } else {
+            kept.push(pos);
+          }
         }
       }
       deduped.push(...kept);
