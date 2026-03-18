@@ -218,6 +218,187 @@ function buildPaymentCompliance(positions, agreementResults, monthlyBreakdown) {
   });
 }
 
+// ─── Post-process analysis from Claude (dedup, fix fields, recalc) ──────────
+function postProcessAnalysis(analysis) {
+  if (!analysis) return analysis;
+
+  // 1. Deduplicate MCA positions (same funder + same amount within $500 = merge)
+  if (analysis.mca_positions?.length > 0) {
+    const normalize = (name) => (name || '').toLowerCase().replace(/[^a-z0-9]/g, '');
+    const groups = [];
+    const assigned = new Set();
+
+    for (let i = 0; i < analysis.mca_positions.length; i++) {
+      if (assigned.has(i)) continue;
+      const group = [i];
+      assigned.add(i);
+      const nameI = normalize(analysis.mca_positions[i].funder_name);
+
+      for (let j = i + 1; j < analysis.mca_positions.length; j++) {
+        if (assigned.has(j)) continue;
+        const nameJ = normalize(analysis.mca_positions[j].funder_name);
+        const isSameFunder =
+          (nameI.length >= 6 && nameJ.length >= 6 &&
+           (nameI.includes(nameJ.slice(0, 6)) || nameJ.includes(nameI.slice(0, 6)))) ||
+          nameI === nameJ;
+        if (isSameFunder) { group.push(j); assigned.add(j); }
+      }
+      groups.push(group);
+    }
+
+    const deduped = [];
+    for (const group of groups) {
+      if (group.length === 1) { deduped.push(analysis.mca_positions[group[0]]); continue; }
+      const subPositions = group.map(i => analysis.mca_positions[i]);
+      const kept = [];
+      for (const pos of subPositions) {
+        const amt = pos.payment_amount_current || pos.payment_amount || 0;
+        const match = kept.find(k => {
+          const kAmt = k.payment_amount_current || k.payment_amount || 0;
+          return Math.abs(amt - kAmt) <= 500;
+        });
+        if (match) {
+          const matchPayments = match.payments_detected || 0;
+          const posPayments = pos.payments_detected || 0;
+          if (posPayments > matchPayments) { kept[kept.indexOf(match)] = pos; }
+        } else {
+          kept.push(pos);
+        }
+      }
+      deduped.push(...kept);
+    }
+    analysis.mca_positions = deduped;
+  }
+
+  // 2. Fix excluded_mca_proceeds — protect known revenue processors
+  if (analysis.revenue?.revenue_sources) {
+    const protectedProcessors = [
+      'three square', 'square', 'le-usa', 'usa technol', 'cantaloupe',
+      'ferrara', 'advantech', 'unified strategi', 'canteen', 'compass group',
+      'aramark', 'first data', 'vend', 'route', 'customer', 'cust pmt',
+    ];
+    const knownFunders = [
+      'tbf', 'rowan', 'merchant market', 'ondeck', 'newtek', 'fundkite',
+      'libertas', 'forward fin', 'merchant marketplace', 'tmm',
+    ];
+    for (const src of analysis.revenue.revenue_sources) {
+      const name = (src.name || '').toLowerCase();
+      if (src.is_excluded && src.type === 'loan') {
+        const isProtected = protectedProcessors.some(p => name.includes(p));
+        const isFunder = knownFunders.some(f => name.includes(f));
+        if (isProtected && !isFunder) {
+          src.is_excluded = false;
+          src.type = 'ach_credit';
+          src.note = (src.note || '') + ' [CORRECTED: reclassified from loan to revenue]';
+        }
+      }
+    }
+    // Recalculate excluded_mca_proceeds from actual funder wires only
+    const months = Math.max((analysis.monthly_breakdown || []).length, 1);
+    analysis.revenue.excluded_mca_proceeds = analysis.revenue.revenue_sources
+      .filter(s => s.is_excluded && s.type === 'loan')
+      .reduce((sum, s) => sum + (s.total || 0), 0);
+    const grossDeposits = analysis.revenue.gross_deposits || 0;
+    const excludedTotal = (analysis.revenue.excluded_mca_proceeds || 0) +
+      (analysis.revenue.excluded_nsf_returns || 0) +
+      (analysis.revenue.excluded_transfers || 0) +
+      (analysis.revenue.excluded_other || 0);
+    analysis.revenue.net_verified_revenue = grossDeposits - excludedTotal;
+    analysis.revenue.monthly_average_revenue = analysis.revenue.net_verified_revenue / months;
+  }
+
+  // 3. Fix balance fields — ensure ending_balance, days_negative, avg_daily_balance are set
+  const balance = analysis.balance_summary || {};
+  const monthly = analysis.monthly_breakdown || [];
+  const adbByMonth = analysis.adb_by_month || [];
+
+  if (!balance.ending_balance && balance.most_recent_ending_balance) {
+    balance.ending_balance = balance.most_recent_ending_balance;
+  }
+  if (!balance.ending_balance && monthly.length > 0) {
+    balance.ending_balance = monthly[monthly.length - 1].ending_balance || 0;
+  }
+  if (!balance.days_negative && balance.total_days_negative) {
+    balance.days_negative = balance.total_days_negative;
+  }
+  if (!balance.days_negative && monthly.length > 0) {
+    balance.days_negative = monthly.reduce((sum, m) => sum + (m.days_negative || 0), 0);
+  }
+  if (!balance.avg_daily_balance && adbByMonth.length > 0) {
+    const validAdbs = adbByMonth.filter(m => m.adb > 0);
+    if (validAdbs.length > 0) {
+      balance.avg_daily_balance = Math.round(validAdbs.reduce((s, m) => s + m.adb, 0) / validAdbs.length);
+    }
+  }
+  if (!balance.avg_daily_balance && monthly.length > 0) {
+    const avgBalances = monthly
+      .filter(m => m.beginning_balance || m.ending_balance)
+      .map(m => ((m.beginning_balance || 0) + (m.ending_balance || 0)) / 2);
+    if (avgBalances.length > 0) {
+      balance.avg_daily_balance = Math.round(avgBalances.reduce((a, b) => a + b, 0) / avgBalances.length);
+    }
+  }
+  analysis.balance_summary = balance;
+
+  // 4. Build statement_month from statement_periods if missing
+  if (!analysis.statement_month && analysis.statement_periods?.length > 0) {
+    const periods = [...analysis.statement_periods].sort((a, b) => (a.start || '').localeCompare(b.start || ''));
+    analysis.statement_month = `${periods[0].month || ''} – ${periods[periods.length - 1].month || ''}`.trim();
+  }
+
+  // 5. Recalculate MCA metrics from deduped positions
+  const activePositions = (analysis.mca_positions || []).filter(p => p.status === 'active' || !p.status);
+  const totalWeekly = activePositions.reduce((sum, p) => {
+    const amt = p.payment_amount_current || p.payment_amount || 0;
+    const freq = (p.frequency || '').toLowerCase();
+    if (freq === 'daily') return sum + amt * 5;
+    if (freq === 'bi-weekly') return sum + amt / 2;
+    if (freq === 'monthly') return sum + amt / 4.33;
+    return sum + amt;
+  }, 0);
+
+  const metrics = analysis.calculated_metrics || {};
+  metrics.total_mca_weekly = Math.round(totalWeekly * 100) / 100;
+  metrics.total_mca_monthly = Math.round(totalWeekly * 4.33 * 100) / 100;
+
+  const monthlyRevenue = analysis.revenue?.monthly_average_revenue || analysis.revenue?.net_verified_revenue || 1;
+  const cogsRate = analysis.revenue?.cogs_rate || 0.40;
+  const grossProfit = monthlyRevenue * (1 - cogsRate);
+  metrics.dsr_percent = Math.round((metrics.total_mca_monthly / grossProfit) * 10000) / 100;
+
+  if (metrics.dsr_percent < 20) metrics.dsr_posture = 'healthy';
+  else if (metrics.dsr_percent < 35) metrics.dsr_posture = 'elevated';
+  else if (metrics.dsr_percent < 50) metrics.dsr_posture = 'stressed';
+  else if (metrics.dsr_percent < 65) metrics.dsr_posture = 'critical';
+  else metrics.dsr_posture = 'unsustainable';
+
+  const opex = analysis.expense_categories?.total_operating_expenses || 0;
+  const otherDebt = (analysis.other_debt_service || []).reduce((s, d) => s + (d.monthly_total || 0), 0);
+  metrics.free_cash_after_mca = Math.round((monthlyRevenue - metrics.total_mca_monthly) * 100) / 100;
+  metrics.true_free_cash = Math.round((monthlyRevenue - metrics.total_mca_monthly - otherDebt - opex) * 100) / 100;
+  metrics.total_debt_service_monthly = Math.round((metrics.total_mca_monthly + otherDebt) * 100) / 100;
+
+  // 6. Fix weeks_to_insolvency — only calculate if truly cash-flow negative
+  const avgDailyBalance = balance.avg_daily_balance || 0;
+  if (metrics.true_free_cash < 0) {
+    const monthlyBurn = metrics.total_mca_monthly - monthlyRevenue;
+    if (monthlyBurn > 0 && avgDailyBalance > 0) {
+      const monthsToInsolvency = (avgDailyBalance * 30) / monthlyBurn;
+      metrics.weeks_to_insolvency = Math.round(monthsToInsolvency * 4.33 * 10) / 10;
+    } else {
+      metrics.weeks_to_insolvency = null;
+    }
+  } else {
+    metrics.weeks_to_insolvency = null;
+  }
+
+  // Also copy avg_daily_balance into calculated_metrics for CSV export
+  metrics.avg_daily_balance = balance.avg_daily_balance || 0;
+
+  analysis.calculated_metrics = metrics;
+  return analysis;
+}
+
 // ─── CSV Export ──────────────────────────────────────────────────────────────
 function buildCSV(a, activePositions, totalMCAMonthly, dsr, totalOtherDebt, totalDSR, trueFree, adjustedRevenue) {
   const m = { ...a.calculated_metrics, total_mca_monthly: totalMCAMonthly || a.calculated_metrics?.total_mca_monthly, dsr_percent: dsr || a.calculated_metrics?.dsr_percent };
@@ -4771,6 +4952,12 @@ export default function FFAnalyzer() {
 
       const data = await fetchAnalysis(endpoint, body);
       clearInterval(interval);
+
+      // Post-process: deduplicate positions, fix missing fields, recalculate metrics
+      if (data.analysis) {
+        data.analysis = postProcessAnalysis(data.analysis);
+      }
+
       setResult(data);
       setPositions((data.analysis.mca_positions || []).map((p, i) => {
         const pa = parseFloat(p.payment_amount_current || p.payment_amount) || 0;
@@ -4829,6 +5016,12 @@ export default function FFAnalyzer() {
         : { statements, model, industry: selectedIndustry };
 
       const data = await fetchAnalysis(endpoint, body);
+
+      // Post-process: deduplicate positions, fix missing fields, recalculate metrics
+      if (data.analysis) {
+        data.analysis = postProcessAnalysis(data.analysis);
+      }
+
       setResult(data);
 
       // Merge new positions with preserved manual ones
