@@ -693,15 +693,26 @@ function fixExcludedMCAProceeds(analysis) {
     }
   }
 
-  // Recalculate excluded_mca_proceeds from actual funder wires only
+  // Recalculate excluded_mca_proceeds — ONLY count deposits from known MCA funders
+  // Any deposit NOT from a known funder is revenue, even if AI marked it as 'loan'
   const months = Math.max((analysis.monthly_breakdown || []).length, 1);
   const totalExcludedFromFunders = sources
-    .filter(s => s.is_excluded && s.type === 'loan')
+    .filter(s => {
+      if (!s.is_excluded || s.type !== 'loan') return false;
+      const name = (s.name || '').toLowerCase();
+      const isFunder = knownFunders.some(f => name.includes(f));
+      if (!isFunder) {
+        // Not a known funder — reclassify as revenue
+        s.is_excluded = false;
+        s.type = 'ach_credit';
+        s.note = (s.note || '') + ' [CORRECTED: not a known MCA funder — reclassified as revenue]';
+        return false;
+      }
+      return true;
+    })
     .reduce((sum, s) => sum + (s.total || 0), 0);
 
-  if (totalExcludedFromFunders > 0) {
-    analysis.revenue.excluded_mca_proceeds = totalExcludedFromFunders;
-  }
+  analysis.revenue.excluded_mca_proceeds = totalExcludedFromFunders;
 
   // Recalculate net_verified_revenue
   const grossDeposits = analysis.revenue.gross_deposits || 0;
@@ -807,8 +818,12 @@ function recalcMCAMetrics(analysis) {
   const metrics = analysis?.calculated_metrics || {};
   const revenue = analysis?.revenue || {};
 
-  // Only sum active positions
-  const activePositions = positions.filter(p => p.status === 'active' || !p.status);
+  // Only sum active positions — STRICTLY filter by status === 'active'
+  // Positions with status 'paid_off', 'paid off', or any non-active status are excluded
+  const activePositions = positions.filter(p => {
+    const status = (p.status || '').toLowerCase().replace(/[_\s]+/g, '');
+    return status === 'active' || status === '';
+  });
   const totalWeekly = activePositions.reduce((sum, p) => {
     const amt = p.payment_amount_current || p.payment_amount || 0;
     const freq = (p.frequency || '').toLowerCase();

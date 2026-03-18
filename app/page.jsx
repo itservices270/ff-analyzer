@@ -339,10 +339,23 @@ function postProcessAnalysis(analysis) {
         }
       }
     }
-    // Recalculate excluded_mca_proceeds from actual funder wires only
+    // Recalculate excluded_mca_proceeds — ONLY count deposits from known MCA funders
+    // Any deposit NOT from a known funder is revenue, even if AI marked it as 'loan'
     const months = Math.max((analysis.monthly_breakdown || []).length, 1);
     analysis.revenue.excluded_mca_proceeds = analysis.revenue.revenue_sources
-      .filter(s => s.is_excluded && s.type === 'loan')
+      .filter(s => {
+        if (!s.is_excluded || s.type !== 'loan') return false;
+        const name = (s.name || '').toLowerCase();
+        const isFunder = knownFunders.some(f => name.includes(f));
+        if (!isFunder) {
+          // Not a known funder — reclassify as revenue
+          s.is_excluded = false;
+          s.type = 'ach_credit';
+          s.note = (s.note || '') + ' [CORRECTED: not a known MCA funder — reclassified as revenue]';
+          return false;
+        }
+        return true;
+      })
       .reduce((sum, s) => sum + (s.total || 0), 0);
     const grossDeposits = analysis.revenue.gross_deposits || 0;
     const excludedTotal = (analysis.revenue.excluded_mca_proceeds || 0) +
@@ -392,8 +405,11 @@ function postProcessAnalysis(analysis) {
     analysis.statement_month = `${periods[0].month || ''} – ${periods[periods.length - 1].month || ''}`.trim();
   }
 
-  // 5. Recalculate MCA metrics from deduped positions
-  const activePositions = (analysis.mca_positions || []).filter(p => p.status === 'active' || !p.status);
+  // 5. Recalculate MCA metrics from deduped positions — STRICTLY active only
+  const activePositions = (analysis.mca_positions || []).filter(p => {
+    const status = (p.status || '').toLowerCase().replace(/[_\s]+/g, '');
+    return status === 'active' || status === '';
+  });
   const totalWeekly = activePositions.reduce((sum, p) => {
     const amt = p.payment_amount_current || p.payment_amount || 0;
     const freq = (p.frequency || '').toLowerCase();
@@ -3170,14 +3186,19 @@ function confidentialityCheck(text) {
 function ExportTab({ a, fileName, positions, excludedIds, otherExcludedIds, depositOverrides, agreementResults, enrolledPositions }) {
   const { useState: useLocalState, useMemo: useLocalMemo } = React;
   const allPositions = (positions || a.mca_positions || []).filter(p => !(excludedIds || []).includes(p._id));
-  const totalMCAMonthly = allPositions.reduce((s, p) => s + (p.estimated_monthly_total || 0), 0);
+  // Only include ACTIVE positions in MCA calculations — exclude paid_off
+  const activeCalcPositions = allPositions.filter(p => {
+    const status = (p.status || '').toLowerCase().replace(/[_\s]+/g, '');
+    return status === 'active' || status === '';
+  });
+  const totalMCAMonthly = activeCalcPositions.reduce((s, p) => s + (p.estimated_monthly_total || 0), 0);
   const activeOther = (a.other_debt_service || []).filter((_, i) => !(otherExcludedIds || []).includes(i));
   const totalOtherDebt = activeOther.reduce((s, o) => s + (o.monthly_total || 0), 0);
   const revenue = calcAdjustedRevenue(a, depositOverrides);
   const dsr = (totalMCAMonthly / revenue) * 100;
   const totalDSR = ((totalMCAMonthly + totalOtherDebt) / revenue) * 100;
   const trueFree = revenue - totalMCAMonthly - totalOtherDebt - (a.expense_categories?.total_operating_expenses || 0);
-  const csv = buildCSV(a, allPositions, totalMCAMonthly, dsr, totalOtherDebt, totalDSR, trueFree, revenue);
+  const csv = buildCSV(a, activeCalcPositions, totalMCAMonthly, dsr, totalOtherDebt, totalDSR, trueFree, revenue);
 
   // ── Deal Economics state ──
   const [dealIsoPoints, setDealIsoPoints] = useLocalState(11);
