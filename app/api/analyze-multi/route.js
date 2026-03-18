@@ -107,7 +107,13 @@ CRITICAL REVENUE CALCULATION METHOD:
 ## MCA POSITION DETECTION
 
 CRITICAL RULE — SAME FUNDER, MULTIPLE POSITIONS:
-If you see debits from the same payee at DIFFERENT amounts on the SAME dates or same week, those are SEPARATE positions. Each gets its own entry in mca_positions array.
+If you see debits from the same payee at DIFFERENT amounts on the SAME dates or same week, those are SEPARATE positions ONLY IF the payment amounts differ by more than $500. If two debits from the same funder have the SAME amount (within $500), they are the SAME position — do NOT create duplicates.
+
+DEDUPLICATION RULE: Before finalizing mca_positions, check for duplicates:
+- If two entries have the same funder name (fuzzy match) AND payment amounts within $500 → MERGE into one position, keeping the one with more payments_detected
+- Only create separate positions for the same funder when amounts are MEANINGFULLY different (>$500 apart)
+- Example: Two "TBF GRP" entries both at $16,312.50/week = ONE position (merge them)
+- Example: "Merchant Market" at $11,693/week AND "Merchant Market" at $9,764/week = TWO positions (different amounts)
 
 ### Merchant Marketplace / The Merchant Marketplace Holdings Corp:
 • Bank debit payee: "Merchant Market8882711420" (note phone number embedded)
@@ -357,11 +363,32 @@ DO NOT return 0 for ADB unless the account truly had a $0 balance every day. An 
   "analysis_notes": "string — any issues, scanned pages that couldn't be read, etc."
 }
 
+## WEEKS TO INSOLVENCY — CORRECTED FORMULA:
+weeks_to_insolvency should ONLY be calculated when true_free_cash is NEGATIVE (business is losing money).
+Formula: weeks = (avg_daily_balance × 30) / (total_mca_monthly - monthly_average_revenue) × 4.33
+If monthly_average_revenue >= total_mca_monthly, set weeks_to_insolvency to null — the business is NOT insolvent.
+If avg_daily_balance is 0, set weeks_to_insolvency to null.
+Do NOT default to 2 weeks. A business doing $500K+ monthly revenue with $200K MCA burden is NOT 2 weeks from insolvency.
+
+## EXCLUDED MCA PROCEEDS — STRICT RULES:
+excluded_mca_proceeds must ONLY include actual MCA advance wire deposits from known funders.
+NEVER classify these as MCA proceeds regardless of amount:
+• THREE SQUARE MAR / THREE SQUARE → Square card processing = REVENUE
+• LE-USA TECHNOL / USA TECHNOL → USA Technologies = REVENUE
+• Cantaloupe, Inc. PAYMENTS / CANTALOUPE → Cashless vending = REVENUE
+• FERRARA CANDY → Vendor rebate = REVENUE
+• ADVANTECH CORP → Vendor rebate = REVENUE
+• Any deposit from a payment processor or customer = REVENUE
+Only these patterns indicate MCA advance proceeds:
+• Wire credits explicitly labeled with funder names (TMM, TBF, ROWAN, ONDECK, etc.)
+• Credits containing "WIRE" + a funder name
+• Large lump sums appearing 5-7 days before new MCA debit series starts
+
 ## CRITICAL RULES SUMMARY:
 
 1. REVENUE: Start with gross deposits, subtract exclusions. Cantaloupe PAYMENTS is the LARGEST vending revenue source.
 
-2. MULTIPLE POSITIONS: Same funder with different amounts = SEPARATE positions. Merchant Market at $11,693/wk AND $9,764/wk = TWO positions.
+2. MULTIPLE POSITIONS: Same funder with different amounts (>$500 apart) = SEPARATE positions. Same funder with same amount (within $500) = ONE position, do NOT duplicate.
 
 3. WIRE TRACKING: List EACH MCA wire as separate revenue_source entry with its own date. Never combine or sum multiple wires from same funder. EVERY excluded transaction (MCA wires, staffing credits, transfers) MUST appear in the revenue_sources array with is_excluded: true. If a wire appears as an advance_deposit on an MCA position, it MUST ALSO appear in revenue_sources as type "loan", is_excluded: true. CROSS-CHECK: After building mca_positions, scan ALL advance_deposit entries — for EACH advance_deposit_amount/advance_deposit_date, verify a matching revenue_source entry exists. If missing, ADD it. A funder with 2 wires = 2 revenue_source entries. Example: TMM wire $319K on 12/30 AND TMM wire $121K on 2/19 = TWO separate revenue_source entries both type "loan", is_excluded: true.
 
@@ -440,6 +467,279 @@ If MORE THAN ONE debit from the same funder occurs within a 7-day window at DIFF
 - estimated_monthly_total should reflect the ACTUAL total debited in the most recent month (sum all debits for that month)
 
 RESPOND WITH VALID JSON ONLY. NO TEXT BEFORE OR AFTER THE JSON. START YOUR RESPONSE WITH { AND END WITH }. ANY TEXT OUTSIDE THE JSON OBJECT WILL BREAK THE APPLICATION.`;
+
+// ─── POST-PROCESSING: Deduplicate MCA positions ────────────────────────────
+// Merges duplicate positions from the same funder when payment amounts match
+// within $500 and dates overlap within 2 weeks. Only keeps separate positions
+// when the payment amounts are meaningfully different.
+function deduplicatePositions(positions) {
+  if (!positions || positions.length === 0) return [];
+
+  const normalize = (name) => (name || '').toLowerCase().replace(/[^a-z0-9]/g, '');
+
+  // Group by normalized funder name (first 6+ chars match)
+  const groups = [];
+  const assigned = new Set();
+
+  for (let i = 0; i < positions.length; i++) {
+    if (assigned.has(i)) continue;
+    const group = [i];
+    assigned.add(i);
+    const nameI = normalize(positions[i].funder_name);
+
+    for (let j = i + 1; j < positions.length; j++) {
+      if (assigned.has(j)) continue;
+      const nameJ = normalize(positions[j].funder_name);
+
+      // Check if same funder (6+ char prefix match or substring containment)
+      const isSameFunder =
+        (nameI.length >= 6 && nameJ.length >= 6 &&
+         (nameI.includes(nameJ.slice(0, 6)) || nameJ.includes(nameI.slice(0, 6)))) ||
+        nameI === nameJ;
+
+      if (isSameFunder) {
+        group.push(j);
+        assigned.add(j);
+      }
+    }
+    groups.push(group);
+  }
+
+  const deduped = [];
+  for (const group of groups) {
+    if (group.length === 1) {
+      deduped.push(positions[group[0]]);
+      continue;
+    }
+
+    // Within a same-funder group, merge positions with similar payment amounts
+    const subPositions = group.map(i => positions[i]);
+    const kept = [];
+
+    for (const pos of subPositions) {
+      const amt = pos.payment_amount_current || pos.payment_amount || 0;
+      // Find an existing kept position with similar amount
+      const match = kept.find(k => {
+        const kAmt = k.payment_amount_current || k.payment_amount || 0;
+        return Math.abs(amt - kAmt) <= 500;
+      });
+
+      if (match) {
+        // Merge: keep the one with more payments detected, or the more recent one
+        const matchPayments = match.payments_detected || 0;
+        const posPayments = pos.payments_detected || 0;
+        if (posPayments > matchPayments) {
+          // Replace match with this one (more data)
+          const idx = kept.indexOf(match);
+          kept[idx] = pos;
+        }
+        // Otherwise just skip this duplicate
+      } else {
+        // Meaningfully different amount (>$500) → separate position
+        kept.push(pos);
+      }
+    }
+
+    deduped.push(...kept);
+  }
+
+  return deduped;
+}
+
+// ─── POST-PROCESSING: Fix excluded_mca_proceeds ─────────────────────────────
+// Only count revenue_sources as excluded MCA proceeds if they match known funder
+// patterns. Protected revenue processors are NEVER MCA proceeds.
+function fixExcludedMCAProceeds(analysis) {
+  if (!analysis?.revenue?.revenue_sources) return analysis;
+
+  const protectedProcessors = [
+    'three square', 'square', 'le-usa', 'usa technol', 'cantaloupe',
+    'ferrara', 'advantech', 'unified strategi', 'canteen', 'compass group',
+    'aramark', 'first data', 'vend', 'route', 'customer', 'cust pmt',
+  ];
+
+  const knownFunders = [
+    'tbf', 'rowan', 'merchant market', 'ondeck', 'newtek', 'fundkite',
+    'libertas', 'forward fin', 'merchant marketplace', 'tmm',
+    'bizfi', 'credibly', 'kapitus', 'yellowstone', 'rapid', 'can capital',
+    'square capital' // Note: "Square Capital" IS an MCA funder, not Square payments
+  ];
+
+  let correctedExcluded = 0;
+  const sources = analysis.revenue.revenue_sources;
+
+  for (const src of sources) {
+    const name = (src.name || '').toLowerCase();
+
+    // If marked as excluded loan, check if it's actually a protected processor
+    if (src.is_excluded && src.type === 'loan') {
+      const isProtected = protectedProcessors.some(p => name.includes(p));
+      const isFunder = knownFunders.some(f => name.includes(f));
+
+      if (isProtected && !isFunder) {
+        // Wrongly classified — this is revenue, not MCA proceeds
+        src.is_excluded = false;
+        src.type = 'ach_credit';
+        src.note = (src.note || '') + ' [CORRECTED: reclassified from loan to revenue — matches known revenue processor]';
+      } else if (isFunder) {
+        correctedExcluded += src.total || src.monthly_avg || 0;
+      }
+    } else if (src.is_excluded && src.type === 'loan') {
+      correctedExcluded += src.total || src.monthly_avg || 0;
+    }
+  }
+
+  // Recalculate excluded_mca_proceeds from actual funder wires only
+  const months = Math.max((analysis.monthly_breakdown || []).length, 1);
+  const totalExcludedFromFunders = sources
+    .filter(s => s.is_excluded && s.type === 'loan')
+    .reduce((sum, s) => sum + (s.total || 0), 0);
+
+  if (totalExcludedFromFunders > 0) {
+    analysis.revenue.excluded_mca_proceeds = totalExcludedFromFunders;
+  }
+
+  // Recalculate net_verified_revenue
+  const grossDeposits = analysis.revenue.gross_deposits || 0;
+  const excludedTotal = (analysis.revenue.excluded_mca_proceeds || 0) +
+    (analysis.revenue.excluded_nsf_returns || 0) +
+    (analysis.revenue.excluded_transfers || 0) +
+    (analysis.revenue.excluded_other || 0);
+  analysis.revenue.net_verified_revenue = grossDeposits - excludedTotal;
+  analysis.revenue.monthly_average_revenue = analysis.revenue.net_verified_revenue / months;
+
+  return analysis;
+}
+
+// ─── POST-PROCESSING: Fix weeks_to_insolvency ───────────────────────────────
+// Formula: weeks = avg_daily_balance * 30 / (monthly_mca - monthly_revenue)
+// Only calculate if true_free_cash is negative (spending more than earning)
+function fixInsolvencyCalc(analysis) {
+  const metrics = analysis?.calculated_metrics;
+  const balance = analysis?.balance_summary;
+  if (!metrics) return analysis;
+
+  const avgDailyBalance = balance?.avg_daily_balance || 0;
+  const monthlyMCA = metrics.total_mca_monthly || 0;
+  const monthlyRevenue = analysis?.revenue?.monthly_average_revenue || 0;
+  const trueFree = metrics.true_free_cash;
+
+  // Only calculate insolvency if the business is truly cash-flow negative
+  if (trueFree !== undefined && trueFree !== null && trueFree < 0) {
+    const monthlyBurn = monthlyMCA - monthlyRevenue;
+    if (monthlyBurn > 0 && avgDailyBalance > 0) {
+      // weeks = (ADB * 30) / monthly_burn_rate / 4.33
+      const monthsToInsolvency = (avgDailyBalance * 30) / monthlyBurn;
+      metrics.weeks_to_insolvency = Math.round(monthsToInsolvency * 4.33 * 10) / 10;
+    } else {
+      metrics.weeks_to_insolvency = null;
+    }
+  } else {
+    // Revenue exceeds MCA burden — not insolvent
+    metrics.weeks_to_insolvency = null;
+  }
+
+  return analysis;
+}
+
+// ─── POST-PROCESSING: Ensure balance fields are populated ───────────────────
+function fixBalanceFields(analysis) {
+  const balance = analysis?.balance_summary || {};
+  const monthly = analysis?.monthly_breakdown || [];
+  const adbByMonth = analysis?.adb_by_month || [];
+  const periods = analysis?.statement_periods || [];
+
+  // ending_balance: use most_recent_ending_balance or last month's ending balance
+  if (!balance.most_recent_ending_balance && monthly.length > 0) {
+    const lastMonth = monthly[monthly.length - 1];
+    balance.most_recent_ending_balance = lastMonth.ending_balance || 0;
+  }
+  // Also set a convenience ending_balance field
+  if (balance.most_recent_ending_balance && !balance.ending_balance) {
+    balance.ending_balance = balance.most_recent_ending_balance;
+  }
+
+  // days_negative: sum from monthly breakdowns if total_days_negative is missing
+  if (!balance.total_days_negative && monthly.length > 0) {
+    balance.total_days_negative = monthly.reduce((sum, m) => sum + (m.days_negative || 0), 0);
+  }
+  // Also set convenience days_negative field
+  if (balance.total_days_negative && !balance.days_negative) {
+    balance.days_negative = balance.total_days_negative;
+  }
+
+  // avg_daily_balance: compute from adb_by_month if missing
+  if (!balance.avg_daily_balance && adbByMonth.length > 0) {
+    const validAdbs = adbByMonth.filter(m => m.adb > 0);
+    if (validAdbs.length > 0) {
+      balance.avg_daily_balance = Math.round(validAdbs.reduce((s, m) => s + m.adb, 0) / validAdbs.length);
+    }
+  }
+  // Fallback: estimate from beginning + ending balance average
+  if (!balance.avg_daily_balance && monthly.length > 0) {
+    const avgBalances = monthly
+      .filter(m => m.beginning_balance || m.ending_balance)
+      .map(m => ((m.beginning_balance || 0) + (m.ending_balance || 0)) / 2);
+    if (avgBalances.length > 0) {
+      balance.avg_daily_balance = Math.round(avgBalances.reduce((a, b) => a + b, 0) / avgBalances.length);
+    }
+  }
+
+  // statement_period: build from statement_periods array if statement_month missing
+  if (!analysis.statement_month && periods.length > 0) {
+    const sortedPeriods = [...periods].sort((a, b) => (a.start || '').localeCompare(b.start || ''));
+    const earliest = sortedPeriods[0];
+    const latest = sortedPeriods[sortedPeriods.length - 1];
+    analysis.statement_month = `${earliest.month || ''} – ${latest.month || ''}`.trim();
+  }
+
+  analysis.balance_summary = balance;
+  return analysis;
+}
+
+// ─── POST-PROCESSING: Recalculate total MCA from deduped positions ──────────
+function recalcMCAMetrics(analysis) {
+  const positions = analysis?.mca_positions || [];
+  const metrics = analysis?.calculated_metrics || {};
+  const revenue = analysis?.revenue || {};
+
+  // Only sum active positions
+  const activePositions = positions.filter(p => p.status === 'active' || !p.status);
+  const totalWeekly = activePositions.reduce((sum, p) => {
+    const amt = p.payment_amount_current || p.payment_amount || 0;
+    const freq = (p.frequency || '').toLowerCase();
+    if (freq === 'daily') return sum + amt * 5;
+    if (freq === 'bi-weekly') return sum + amt / 2;
+    if (freq === 'monthly') return sum + amt / 4.33;
+    return sum + amt; // default weekly
+  }, 0);
+
+  metrics.total_mca_weekly = Math.round(totalWeekly * 100) / 100;
+  metrics.total_mca_monthly = Math.round(totalWeekly * 4.33 * 100) / 100;
+
+  // Recalculate DSR
+  const monthlyRevenue = revenue.monthly_average_revenue || revenue.net_verified_revenue || 1;
+  const cogsRate = revenue.cogs_rate || 0.40;
+  const grossProfit = monthlyRevenue * (1 - cogsRate);
+  metrics.dsr_percent = Math.round((metrics.total_mca_monthly / grossProfit) * 10000) / 100;
+
+  // DSR posture
+  if (metrics.dsr_percent < 20) metrics.dsr_posture = 'healthy';
+  else if (metrics.dsr_percent < 35) metrics.dsr_posture = 'elevated';
+  else if (metrics.dsr_percent < 50) metrics.dsr_posture = 'stressed';
+  else if (metrics.dsr_percent < 65) metrics.dsr_posture = 'critical';
+  else metrics.dsr_posture = 'unsustainable';
+
+  // Free cash
+  const opex = analysis?.expense_categories?.total_operating_expenses || 0;
+  const otherDebt = (analysis?.other_debt_service || []).reduce((s, d) => s + (d.monthly_total || 0), 0);
+  metrics.free_cash_after_mca = Math.round((monthlyRevenue - metrics.total_mca_monthly) * 100) / 100;
+  metrics.true_free_cash = Math.round((monthlyRevenue - metrics.total_mca_monthly - otherDebt - opex) * 100) / 100;
+  metrics.total_debt_service_monthly = Math.round((metrics.total_mca_monthly + otherDebt) * 100) / 100;
+
+  analysis.calculated_metrics = metrics;
+  return analysis;
+}
 
 // Parse raw text into a JSON analysis object.
 // Strips any preamble text before the first { and trailing text after the last }.
@@ -577,7 +877,16 @@ export async function POST(request) {
     console.log(`[analyze-multi] Response | stop_reason: ${response.stop_reason} | usage: input=${response.usage?.input_tokens} output=${response.usage?.output_tokens}`);
 
     const rawText = response.content.filter(b => b.type === 'text').map(b => b.text).join('');
-    const analysis = parseAnalysisJSON(rawText);
+    let analysis = parseAnalysisJSON(rawText);
+
+    // Post-process: deduplicate, fix fields, recalculate metrics
+    analysis.mca_positions = deduplicatePositions(analysis.mca_positions);
+    analysis = fixExcludedMCAProceeds(analysis);
+    analysis = fixBalanceFields(analysis);
+    analysis = recalcMCAMetrics(analysis);
+    analysis = fixInsolvencyCalc(analysis);
+
+    console.log(`[analyze-multi] Post-processing: ${analysis.mca_positions?.length} positions, MCA monthly: $${analysis.calculated_metrics?.total_mca_monthly}`);
 
     return Response.json({ success: true, analysis, statement_count: statements.length });
   } catch (err) {
