@@ -3191,9 +3191,13 @@ function ExportTab({ a, fileName, positions, excludedIds, otherExcludedIds, depo
   const [dealFfFeePct, setDealFfFeePct] = useLocalState(0.119);
 
   // ── Position status: 'include' | 'buyout' | 'exclude' ──
+  // Paid-off positions default to 'exclude' — they should not be in calculations
   const [positionStatuses, setPositionStatuses] = useLocalState(() => {
     const init = {};
-    allPositions.forEach((_, i) => { init[i] = 'include'; });
+    allPositions.forEach((p, i) => {
+      const status = (p.status || '').toLowerCase().replace(/[_\s]+/g, '');
+      init[i] = (status === 'paidoff') ? 'exclude' : 'include';
+    });
     return init;
   });
 
@@ -3234,7 +3238,10 @@ function ExportTab({ a, fileName, positions, excludedIds, otherExcludedIds, depo
   // Enrollment: use parent enrolledPositions (Set of position _ids) if available
   // A deduped position is enrolled if ANY of its source positions are enrolled
   const isPositionEnrolled = (dp) => {
-    if (dp._consolidatedStatus === 'paid_off') return false;
+    if (dp._consolidatedStatus === 'paid_off' || dp._consolidatedStatus === 'exclude') return false;
+    // Also check underlying MCA status from AI
+    const mcaStatus = (dp.status || '').toLowerCase().replace(/[_\s]+/g, '');
+    if (mcaStatus === 'paidoff') return false;
     if (enrolledPositions === null) return true; // null = all enrolled
     if (!(enrolledPositions instanceof Set)) return true;
     return dp._sourceIndices.some(idx => enrolledPositions.has(allPositions[idx]?._id));

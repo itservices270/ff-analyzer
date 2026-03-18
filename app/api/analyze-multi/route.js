@@ -183,6 +183,21 @@ Do NOT mark as active unless payments appear in the most recent month.
   3. New position starts debiting 1 week later at new amount
 • List paid-off positions with status: "paid_off" and final payment date filled in
 
+## BALANCE CALCULATION RULES (MANDATORY):
+• remaining_balance = purchased_amount - total_paid_to_date
+• Do NOT add purchase_price to payback_amount to get balance — that produces a number HIGHER than the original deal
+• Never show a remaining_balance higher than the original purchased_amount unless there is a documented factor rate applied
+• If total_paid_to_date is unknown, estimate: weekly_payment × estimated_weeks_remaining
+• Cross-check: if your calculated balance exceeds the purchased_amount, you made an arithmetic error — recalculate
+• Example: TBF at $16,312.50/wk, started ~Nov 2025, ~24 weeks remaining ≈ $391,500 balance (NOT $848,250)
+
+## POSITION SEPARATION RULES (MANDATORY):
+• The Merchant Marketplace commonly has MULTIPLE separate positions with DIFFERENT weekly payment amounts
+• Different ACH reference numbers = DIFFERENT positions — never combine them
+• If you see two different payment amounts from Merchant Marketplace debits, output TWO separate position objects
+• Each position must have its own payment_amount, remaining_balance, and reference number
+• Do NOT sum two Merchant Marketplace positions into one combined entry
+
 ## NSF / RETURNED ITEMS — REPORT ALL:
 • Returned checks: Look for "R" flag next to check number, or "RETURN ITEM" credit appearing after the check debit
 • Returned ACH: Look for credit with same amount as a recent funder debit, labeled "RETURN" — report the funder name and amount
@@ -787,6 +802,35 @@ function fixBalanceFields(analysis) {
   return analysis;
 }
 
+// ─── POST-PROCESSING: Sanity-check MCA position balances ─────────────────────
+// remaining_balance should never exceed purchased_amount. If it does, estimate
+// from weekly_payment × estimated_weeks_remaining instead.
+function fixPositionBalances(analysis) {
+  const positions = analysis?.mca_positions || [];
+  for (const pos of positions) {
+    const balance = pos.remaining_balance || 0;
+    const purchased = pos.purchased_amount || pos.purchase_price || 0;
+    const weeklyPayment = pos.payment_amount_current || pos.payment_amount || 0;
+
+    // Balance exceeds purchased amount — this is an arithmetic error
+    if (balance > 0 && purchased > 0 && balance > purchased) {
+      const weeksRemaining = pos.estimated_weeks_remaining || 24;
+      const estimated = weeklyPayment * weeksRemaining;
+      pos.remaining_balance = Math.round(estimated * 100) / 100;
+      pos.notes = (pos.notes || '') + ` [CORRECTED: balance $${balance.toLocaleString()} exceeded purchase $${purchased.toLocaleString()} — estimated from ${weeksRemaining}wk × $${weeklyPayment.toLocaleString()}]`;
+    }
+
+    // Balance is zero but position is active — estimate from payments
+    if ((!balance || balance === 0) && weeklyPayment > 0 && (pos.status || '').toLowerCase() !== 'paid_off') {
+      const weeksRemaining = pos.estimated_weeks_remaining || 24;
+      pos.remaining_balance = Math.round(weeklyPayment * weeksRemaining * 100) / 100;
+      pos.notes = (pos.notes || '') + ` [ESTIMATED: balance from ${weeksRemaining}wk × $${weeklyPayment.toLocaleString()}]`;
+    }
+  }
+  analysis.mca_positions = positions;
+  return analysis;
+}
+
 // ─── POST-PROCESSING: Enforce paid_off for positions with no recent activity ─
 // If a position has payments in earlier months but ZERO in the most recent month,
 // it must be marked paid_off regardless of what the AI returned.
@@ -1028,6 +1072,7 @@ export async function POST(request) {
     analysis.mca_positions = deduplicatePositions(analysis.mca_positions);
     analysis = fixExcludedMCAProceeds(analysis);
     analysis = fixBalanceFields(analysis);
+    analysis = fixPositionBalances(analysis);
     analysis = enforcePaidOffStatus(analysis);
     analysis = recalcMCAMetrics(analysis);
     analysis = fixInsolvencyCalc(analysis);
