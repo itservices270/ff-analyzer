@@ -631,6 +631,7 @@ function MCATab({ a, positions, setPositions, excludedIds, setExcludedIds, other
   const [editValues, setEditValues] = useState({});
   const [showDirectForm, setShowDirectForm] = useState(false);
   const [directForm, setDirectForm] = useState({ funder_name: '', payment_amount: '', frequency: 'weekly', estimated_balance: '', notes: '' });
+  const [paidOffCollapsed, setPaidOffCollapsed] = useState(true);
 
   const startEdit = (p) => {
     setEditingId(p._id);
@@ -679,7 +680,9 @@ function MCATab({ a, positions, setPositions, excludedIds, setExcludedIds, other
     setShowDirectForm(false);
   };
 
-  const activePositions = positions.filter(p => !excludedIds.includes(p._id));
+  const nonExcluded = positions.filter(p => !excludedIds.includes(p._id));
+  const activePositions = nonExcluded.filter(p => p.status !== 'paid_off');
+  const paidOffPositions = nonExcluded.filter(p => p.status === 'paid_off');
   const excludedPositions = positions.filter(p => excludedIds.includes(p._id));
   const other = a.other_debt_service || [];
   const revenue = calcAdjustedRevenue(a, depositOverrides);
@@ -750,7 +753,7 @@ function MCATab({ a, positions, setPositions, excludedIds, setExcludedIds, other
       <div style={S.row}>
         <div style={{ ...S.stat, flex: 1 }}>
           <div style={S.statLabel}>Active Positions</div>
-          <div style={S.statValue('#EAD068')}>{activePositions.length}<span style={{ fontSize: 13, color: 'rgba(232,232,240,0.4)' }}> / {positions.length} total</span></div>
+          <div style={S.statValue('#EAD068')}>{activePositions.length} active{paidOffPositions.length > 0 && <span style={{ fontSize: 13, color: 'rgba(232,232,240,0.4)' }}> · {paidOffPositions.length} paid off</span>}</div>
         </div>
         <div style={{ ...S.stat, flex: 1 }}>
           <div style={S.statLabel}>Monthly MCA Total</div>
@@ -770,7 +773,7 @@ function MCATab({ a, positions, setPositions, excludedIds, setExcludedIds, other
         <span style={{ fontSize: 11, color: 'rgba(232,232,240,0.35)' }}>Excluded positions are hidden from UW Calculator export</span>
       </div>
 
-      {positions.length === 0 && (
+      {activePositions.length === 0 && paidOffPositions.length === 0 && (
         <div style={{ color: 'rgba(232,232,240,0.4)', fontSize: 13, padding: '16px 0' }}>No MCA positions detected</div>
       )}
 
@@ -960,6 +963,43 @@ function MCATab({ a, positions, setPositions, excludedIds, setExcludedIds, other
         </div>
       ))}
 
+      {paidOffPositions.length > 0 && (
+        <>
+          <div style={{ marginTop: 16, marginBottom: 8 }}>
+            <button
+              onClick={() => setPaidOffCollapsed(!paidOffCollapsed)}
+              style={{ display: 'flex', alignItems: 'center', gap: 8, background: 'none', border: '1px solid rgba(150,150,150,0.2)', borderRadius: 8, padding: '8px 14px', cursor: 'pointer', width: '100%', fontFamily: 'inherit' }}
+            >
+              <span style={{ fontSize: 12, color: 'rgba(232,232,240,0.5)', transition: 'transform 0.2s', transform: paidOffCollapsed ? 'rotate(-90deg)' : 'rotate(0deg)', display: 'inline-block' }}>▼</span>
+              <span style={{ fontSize: 12, letterSpacing: 1, color: 'rgba(232,232,240,0.4)', textTransform: 'uppercase' }}>Paid Off / Inactive ({paidOffPositions.length})</span>
+              <span style={{ fontSize: 11, color: 'rgba(232,232,240,0.25)', marginLeft: 'auto' }}>Not included in DSR or UW calculations</span>
+            </button>
+          </div>
+          {!paidOffCollapsed && paidOffPositions.map((p) => (
+            <div key={p._id} style={{ ...S.funderCard, opacity: 0.55, borderColor: 'rgba(150,150,150,0.2)', background: 'rgba(80,80,80,0.1)' }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', flexWrap: 'wrap', gap: 8 }}>
+                <div>
+                  <div style={{ fontSize: 15, color: 'rgba(232,232,240,0.7)', marginBottom: 2 }}>{p.funder_name}</div>
+                  <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+                    <span style={S.tag('grey')}>PAID OFF</span>
+                    <span style={S.tag('grey')}>{p.frequency}</span>
+                    {p.fuzzy_match && <span style={S.tag('amber')}>fuzzy match</span>}
+                  </div>
+                </div>
+                <div style={{ textAlign: 'right' }}>
+                  <div style={{ fontSize: 16, color: 'rgba(232,232,240,0.45)', textDecoration: 'line-through' }}>{fmt(p.estimated_monthly_total)}<span style={{ fontSize: 11, color: 'rgba(232,232,240,0.3)' }}>/mo</span></div>
+                  <div style={{ fontSize: 12, color: 'rgba(232,232,240,0.35)' }}>{fmt(p.payment_amount_current || p.payment_amount)} × {p.payments_detected} pmts</div>
+                </div>
+              </div>
+              <div style={{ fontSize: 12, color: 'rgba(232,232,240,0.35)', marginTop: 6 }}>{p.pattern_description}</div>
+              {(p.first_payment_date || p.last_payment_date) && (
+                <div style={{ fontSize: 11, color: 'rgba(232,232,240,0.25)', marginTop: 4 }}>{p.first_payment_date} → {p.last_payment_date || 'unknown'}</div>
+              )}
+            </div>
+          ))}
+        </>
+      )}
+
       {excludedPositions.length > 0 && (
         <>
           <div style={S.divider} />
@@ -1124,7 +1164,7 @@ function MCATab({ a, positions, setPositions, excludedIds, setExcludedIds, other
 
 // ─── Risk Tab ─────────────────────────────────────────────────────────────────
 function RiskTab({ a, positions, excludedIds, otherExcludedIds, depositOverrides }) {
-  const activePositions = (positions || []).filter(p => !(excludedIds || []).includes(p._id));
+  const activePositions = (positions || []).filter(p => !(excludedIds || []).includes(p._id) && p.status !== 'paid_off');
   const totalMCAMonthly = activePositions.reduce((s, p) => s + (p.estimated_monthly_total || 0), 0);
   const activeOther = (a.other_debt_service || []).filter((_, i) => !(otherExcludedIds || []).includes(i));
   const totalOtherDebt = activeOther.reduce((s, o) => s + (o.monthly_total || 0), 0);
@@ -1226,7 +1266,7 @@ function RiskTab({ a, positions, excludedIds, otherExcludedIds, depositOverrides
 // ─── Negotiation Tab ──────────────────────────────────────────────────────────
 function NegotiationTab({ a, positions, excludedIds, otherExcludedIds, depositOverrides, agreementResults, enrolledPositions }) {
   const intel = a.negotiation_intel || {};
-  const activePositions = (positions || a.mca_positions || []).filter(p => !(excludedIds || []).includes(p._id));
+  const activePositions = (positions || a.mca_positions || []).filter(p => !(excludedIds || []).includes(p._id) && p.status !== 'paid_off');
   const totalMCAMonthly = activePositions.reduce((s, p) => s + (p.estimated_monthly_total || 0), 0);
   const activeOther = (a.other_debt_service || []).filter((_, i) => !(otherExcludedIds || []).includes(i));
   const totalOtherDebt = activeOther.reduce((s, o) => s + (o.monthly_total || 0), 0);
