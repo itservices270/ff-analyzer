@@ -316,46 +316,32 @@ function postProcessAnalysis(analysis) {
     analysis.mca_positions = deduped;
   }
 
-  // 2. Fix excluded_mca_proceeds — protect known revenue processors
+  // 2. Fix excluded_mca_proceeds — ONLY funder wires stay excluded
   if (analysis.revenue?.revenue_sources) {
-    const protectedProcessors = [
-      'three square', 'square', 'le-usa', 'usa technol', 'cantaloupe',
-      'ferrara', 'advantech', 'unified strategi', 'canteen', 'compass group',
-      'aramark', 'first data', 'vend', 'route', 'customer', 'cust pmt',
-    ];
     const knownFunders = [
       'tbf', 'rowan', 'merchant market', 'ondeck', 'newtek', 'fundkite',
       'libertas', 'forward fin', 'merchant marketplace', 'tmm',
+      'bizfi', 'credibly', 'kapitus', 'yellowstone', 'rapid', 'can capital',
     ];
+
+    // Scan ALL excluded sources — regardless of type (loan, wire, mca_advance, etc.)
+    // Only keep excluded if source name matches a known MCA funder
     for (const src of analysis.revenue.revenue_sources) {
+      if (!src.is_excluded) continue;
       const name = (src.name || '').toLowerCase();
-      if (src.is_excluded && src.type === 'loan') {
-        const isProtected = protectedProcessors.some(p => name.includes(p));
-        const isFunder = knownFunders.some(f => name.includes(f));
-        if (isProtected && !isFunder) {
-          src.is_excluded = false;
-          src.type = 'ach_credit';
-          src.note = (src.note || '') + ' [CORRECTED: reclassified from loan to revenue]';
-        }
+      const isFunder = knownFunders.some(f => name.includes(f));
+      if (!isFunder) {
+        // Not a known funder — this is revenue, reclassify
+        src.is_excluded = false;
+        src.type = 'ach_credit';
+        src.note = (src.note || '') + ' [CORRECTED: not a known MCA funder — reclassified as revenue]';
       }
     }
-    // Recalculate excluded_mca_proceeds — ONLY count deposits from known MCA funders
-    // Any deposit NOT from a known funder is revenue, even if AI marked it as 'loan'
+
+    // Recalculate excluded_mca_proceeds from what remains excluded
     const months = Math.max((analysis.monthly_breakdown || []).length, 1);
     analysis.revenue.excluded_mca_proceeds = analysis.revenue.revenue_sources
-      .filter(s => {
-        if (!s.is_excluded || s.type !== 'loan') return false;
-        const name = (s.name || '').toLowerCase();
-        const isFunder = knownFunders.some(f => name.includes(f));
-        if (!isFunder) {
-          // Not a known funder — reclassify as revenue
-          s.is_excluded = false;
-          s.type = 'ach_credit';
-          s.note = (s.note || '') + ' [CORRECTED: not a known MCA funder — reclassified as revenue]';
-          return false;
-        }
-        return true;
-      })
+      .filter(s => s.is_excluded)
       .reduce((sum, s) => sum + (s.total || 0), 0);
     const grossDeposits = analysis.revenue.gross_deposits || 0;
     const excludedTotal = (analysis.revenue.excluded_mca_proceeds || 0) +

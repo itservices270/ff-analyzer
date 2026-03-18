@@ -170,8 +170,12 @@ DEDUPLICATION RULE: Before finalizing mca_positions, check for duplicates:
 • AMERICAN FUNDS INVESTMENT: 401k/investment contributions. Owner expense, NOT MCA.
 • Any staffing/temp agency with daily payment patterns = payroll OpEx, NOT MCA.
 
-## PAID-OFF DETECTION (CRITICAL):
+## PAID-OFF DETECTION (CRITICAL — MANDATORY RULE):
+A position is paid_off if it shows ZERO payment activity in the MOST RECENT statement month.
+Do NOT mark as active unless payments appear in the most recent month.
 • If a funder shows consistent weekly/daily payments in earlier months but ZERO debits in the most recent month → status: "paid_off"
+• If payments stopped before the final statement month → status: "paid_off" even if there were many payments in prior months
+• OnDeck, Newtek, or any funder with $0 debits in the last month = paid_off
 • If a funder wire appears (credit) but NO matching debits ever appear → status: "unmatched_advance"
 • When a Merchant Marketplace position STOPS mid-statement and a wire from "THE MERCHANT MARKETPLACE CORP" arrives around the same time, followed by a new debit amount starting 1 week later:
   1. Old position was paid off (final balance in the new advance)
@@ -435,7 +439,7 @@ Only these patterns indicate MCA advance proceeds:
 
 5. DSR TIERS: <20% healthy | 20-35% elevated | 35-50% stressed | 50-65% critical | 65%+ unsustainable
 
-6. PAID-OFF: Consistent payments in earlier months + $0 in recent month = status: "paid_off"
+6. PAID-OFF (MANDATORY): A position is paid_off if it has ZERO debits in the most recent statement month. Do NOT mark as active unless payments appear in the LAST month. OnDeck, Newtek, or any funder with $0 in the final month = paid_off.
 
 7. NSF PRIORITY: Returned MCA ACH debits are CRITICAL signals. Always report funder name and amount.
 
@@ -651,16 +655,10 @@ function deduplicatePositions(positions) {
 }
 
 // ─── POST-PROCESSING: Fix excluded_mca_proceeds ─────────────────────────────
-// Only count revenue_sources as excluded MCA proceeds if they match known funder
-// patterns. Protected revenue processors are NEVER MCA proceeds.
+// Only keep deposits excluded if source name matches a known MCA funder.
+// Everything else is revenue — regardless of what type the AI assigned.
 function fixExcludedMCAProceeds(analysis) {
   if (!analysis?.revenue?.revenue_sources) return analysis;
-
-  const protectedProcessors = [
-    'three square', 'square', 'le-usa', 'usa technol', 'cantaloupe',
-    'ferrara', 'advantech', 'unified strategi', 'canteen', 'compass group',
-    'aramark', 'first data', 'vend', 'route', 'customer', 'cust pmt',
-  ];
 
   const knownFunders = [
     'tbf', 'rowan', 'merchant market', 'ondeck', 'newtek', 'fundkite',
@@ -669,50 +667,27 @@ function fixExcludedMCAProceeds(analysis) {
     'square capital' // Note: "Square Capital" IS an MCA funder, not Square payments
   ];
 
-  let correctedExcluded = 0;
   const sources = analysis.revenue.revenue_sources;
 
+  // Scan ALL excluded sources — regardless of type (loan, wire, mca_advance, etc.)
+  // Only keep excluded if source name matches a known MCA funder
   for (const src of sources) {
+    if (!src.is_excluded) continue;
     const name = (src.name || '').toLowerCase();
-
-    // If marked as excluded loan, check if it's actually a protected processor
-    if (src.is_excluded && src.type === 'loan') {
-      const isProtected = protectedProcessors.some(p => name.includes(p));
-      const isFunder = knownFunders.some(f => name.includes(f));
-
-      if (isProtected && !isFunder) {
-        // Wrongly classified — this is revenue, not MCA proceeds
-        src.is_excluded = false;
-        src.type = 'ach_credit';
-        src.note = (src.note || '') + ' [CORRECTED: reclassified from loan to revenue — matches known revenue processor]';
-      } else if (isFunder) {
-        correctedExcluded += src.total || src.monthly_avg || 0;
-      }
-    } else if (src.is_excluded && src.type === 'loan') {
-      correctedExcluded += src.total || src.monthly_avg || 0;
+    const isFunder = knownFunders.some(f => name.includes(f));
+    if (!isFunder) {
+      // Not a known funder — this is revenue, reclassify
+      src.is_excluded = false;
+      src.type = 'ach_credit';
+      src.note = (src.note || '') + ' [CORRECTED: not a known MCA funder — reclassified as revenue]';
     }
   }
 
-  // Recalculate excluded_mca_proceeds — ONLY count deposits from known MCA funders
-  // Any deposit NOT from a known funder is revenue, even if AI marked it as 'loan'
+  // Recalculate excluded_mca_proceeds from what remains excluded
   const months = Math.max((analysis.monthly_breakdown || []).length, 1);
-  const totalExcludedFromFunders = sources
-    .filter(s => {
-      if (!s.is_excluded || s.type !== 'loan') return false;
-      const name = (s.name || '').toLowerCase();
-      const isFunder = knownFunders.some(f => name.includes(f));
-      if (!isFunder) {
-        // Not a known funder — reclassify as revenue
-        s.is_excluded = false;
-        s.type = 'ach_credit';
-        s.note = (s.note || '') + ' [CORRECTED: not a known MCA funder — reclassified as revenue]';
-        return false;
-      }
-      return true;
-    })
+  analysis.revenue.excluded_mca_proceeds = sources
+    .filter(s => s.is_excluded)
     .reduce((sum, s) => sum + (s.total || 0), 0);
-
-  analysis.revenue.excluded_mca_proceeds = totalExcludedFromFunders;
 
   // Recalculate net_verified_revenue
   const grossDeposits = analysis.revenue.gross_deposits || 0;
@@ -809,6 +784,57 @@ function fixBalanceFields(analysis) {
   }
 
   analysis.balance_summary = balance;
+  return analysis;
+}
+
+// ─── POST-PROCESSING: Enforce paid_off for positions with no recent activity ─
+// If a position has payments in earlier months but ZERO in the most recent month,
+// it must be marked paid_off regardless of what the AI returned.
+function enforcePaidOffStatus(analysis) {
+  const positions = analysis?.mca_positions || [];
+  const monthly = analysis?.monthly_breakdown || [];
+  if (positions.length === 0 || monthly.length === 0) return analysis;
+
+  // Determine the most recent month's date range
+  const sortedMonths = [...monthly].sort((a, b) => {
+    const dateA = a.month_end || a.end_date || a.month || '';
+    const dateB = b.month_end || b.end_date || b.month || '';
+    return dateB.localeCompare(dateA);
+  });
+  const latestMonth = sortedMonths[0];
+  const latestMonthLabel = (latestMonth?.month || latestMonth?.period || '').toLowerCase();
+
+  for (const pos of positions) {
+    const status = (pos.status || '').toLowerCase().replace(/[_\s]+/g, '');
+    if (status === 'paidoff') continue; // Already marked
+
+    // Check if position has a last_payment_date that's before the latest month
+    const lastPayment = pos.last_payment_date || pos.final_payment_date || '';
+    const paymentsInLatest = pos.payments_in_latest_month ?? pos.recent_month_payments;
+
+    // If explicitly zero payments in latest month → paid_off
+    if (paymentsInLatest !== undefined && paymentsInLatest !== null && paymentsInLatest === 0) {
+      pos.status = 'paid_off';
+      pos.notes = (pos.notes || '') + ' [AUTO: $0 activity in most recent month → paid_off]';
+      continue;
+    }
+
+    // If last payment date exists and is clearly before the latest statement month
+    if (lastPayment) {
+      const lastPayDate = new Date(lastPayment);
+      const latestEnd = new Date(latestMonth?.month_end || latestMonth?.end_date || '');
+      if (!isNaN(lastPayDate) && !isNaN(latestEnd)) {
+        // If last payment was more than 35 days before the end of latest statement
+        const daysDiff = (latestEnd - lastPayDate) / (1000 * 60 * 60 * 24);
+        if (daysDiff > 35) {
+          pos.status = 'paid_off';
+          pos.notes = (pos.notes || '') + ` [AUTO: last payment ${lastPayment} is >35 days before latest statement end → paid_off]`;
+        }
+      }
+    }
+  }
+
+  analysis.mca_positions = positions;
   return analysis;
 }
 
@@ -1002,6 +1028,7 @@ export async function POST(request) {
     analysis.mca_positions = deduplicatePositions(analysis.mca_positions);
     analysis = fixExcludedMCAProceeds(analysis);
     analysis = fixBalanceFields(analysis);
+    analysis = enforcePaidOffStatus(analysis);
     analysis = recalcMCAMetrics(analysis);
     analysis = fixInsolvencyCalc(analysis);
 
