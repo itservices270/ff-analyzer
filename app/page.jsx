@@ -317,22 +317,51 @@ function postProcessAnalysis(analysis) {
     analysis.mca_positions = deduped;
   }
 
-  // 2. Fix excluded_mca_proceeds — ONLY funder wires stay excluded
+  // 2. Fix excluded_mca_proceeds — ONLY funder wires/advances stay excluded
   if (analysis.revenue?.revenue_sources) {
     const knownFunders = [
       'tbf', 'rowan', 'merchant market', 'ondeck', 'newtek', 'fundkite',
       'libertas', 'forward fin', 'merchant marketplace', 'tmm',
       'bizfi', 'credibly', 'kapitus', 'yellowstone', 'rapid', 'can capital',
+      'itria', 'suncoast',
+      // Reverse MCA funders
+      'ufce', 'greenbox', 'sos capital', 'stream capital', 'expansion cap',
+      '1west', 'mantis', 'everest', 'velocity cap', 'cresthill', 'reliant funding',
     ];
 
-    // Scan ALL excluded sources — regardless of type (loan, wire, mca_advance, etc.)
-    // Only keep excluded if source name matches a known MCA funder
+    // Reverse MCA funders — their credits are ALWAYS advance proceeds
+    const reverseMCAFunders = [
+      'ufce', 'greenbox', 'sos capital', 'stream capital', 'expansion cap',
+      '1west', 'mantis', 'everest', 'velocity cap', 'cresthill', 'reliant funding',
+    ];
+
+    // PASS 1: Force-exclude any reverse MCA funder credits that LLM left as revenue
+    for (const src of analysis.revenue.revenue_sources) {
+      const name = (src.name || '').toLowerCase();
+      const note = (src.note || '').toLowerCase();
+      const isReverseMCAFunder = reverseMCAFunders.some(f => name.includes(f));
+      if (isReverseMCAFunder && !src.is_excluded) {
+        // Any credit from a reverse MCA funder is an advance, not revenue
+        const isAdvanceCredit = note.includes('advance') || note.includes('reverse') ||
+          note.includes('dc') || note.includes('disburs') || note.includes('loan') ||
+          src.type === 'reverse_mca_advance' || src.type === 'ach_credit' ||
+          (src.total || 0) > 3000;
+        if (isAdvanceCredit) {
+          src.is_excluded = true;
+          src.type = 'reverse_mca_advance';
+          src.note = (src.note || '') + ' [CORRECTED: reverse MCA advance — forced exclusion]';
+        }
+      }
+    }
+
+    // PASS 2: Scan excluded sources — reclassify non-funder items as revenue
     for (const src of analysis.revenue.revenue_sources) {
       if (!src.is_excluded) continue;
       const name = (src.name || '').toLowerCase();
       const isFunder = knownFunders.some(f => name.includes(f));
-      if (!isFunder) {
-        // Not a known funder — this is revenue, reclassify
+      // Also keep excluded if type is explicitly reverse_mca_advance or returned_item
+      const isSpecialExclusion = src.type === 'reverse_mca_advance' || src.type === 'returned_item' || src.type === 'owner_loan';
+      if (!isFunder && !isSpecialExclusion) {
         src.is_excluded = false;
         src.type = 'ach_credit';
         src.note = (src.note || '') + ' [CORRECTED: not a known MCA funder — reclassified as revenue]';
@@ -399,9 +428,9 @@ function postProcessAnalysis(analysis) {
   });
   const totalWeekly = activePositions.reduce((sum, p) => {
     const amt = p.payment_amount_current || p.payment_amount || 0;
-    const freq = (p.frequency || '').toLowerCase();
+    const freq = (p.frequency || '').toLowerCase().replace(/[-_\s]/g, '');
     if (freq === 'daily') return sum + amt * 5;
-    if (freq === 'bi-weekly') return sum + amt / 2;
+    if (freq === 'biweekly') return sum + amt / 2;
     if (freq === 'monthly') return sum + amt / 4.33;
     return sum + amt;
   }, 0);
@@ -5222,8 +5251,8 @@ export default function FFAnalyzer() {
       setResult(data);
       setPositions((data.analysis.mca_positions || []).map((p, i) => {
         const pa = parseFloat(p.payment_amount_current || p.payment_amount) || 0;
-        const freq = p.frequency || 'weekly';
-        const freqMult = freq === 'daily' ? 22 : freq === 'bi-weekly' ? 2.17 : freq === 'monthly' ? 1 : 4.33;
+        const freq = (p.frequency || 'weekly').toLowerCase().replace(/[-_\s]/g, '');
+        const freqMult = freq === 'daily' ? 22 : freq === 'biweekly' ? 2.17 : freq === 'monthly' ? 1 : 4.33;
         const computedMonthly = pa * freqMult;
         return {
           ...p,
@@ -5288,8 +5317,8 @@ export default function FFAnalyzer() {
       // Merge new positions with preserved manual ones
       const newPositions = (data.analysis.mca_positions || []).map((p, i) => {
         const pa = parseFloat(p.payment_amount_current || p.payment_amount) || 0;
-        const freq = p.frequency || 'weekly';
-        const freqMult = freq === 'daily' ? 22 : freq === 'bi-weekly' ? 2.17 : freq === 'monthly' ? 1 : 4.33;
+        const freq = (p.frequency || 'weekly').toLowerCase().replace(/[-_\s]/g, '');
+        const freqMult = freq === 'daily' ? 22 : freq === 'biweekly' ? 2.17 : freq === 'monthly' ? 1 : 4.33;
         const computedMonthly = pa * freqMult;
         return {
           ...p,

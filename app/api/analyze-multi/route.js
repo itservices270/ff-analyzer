@@ -289,6 +289,27 @@ IMPORTANT DISTINCTION FROM LOC:
 • True Split = variable payments from a PERCENTAGE-BASED MCA (revenue split, no ACH)
 • LOC is excluded from MCA totals. True splits are INCLUDED in MCA totals.
 
+## PAYMENT FREQUENCY DETECTION — DO NOT DEFAULT TO WEEKLY:
+
+Not all MCA positions debit weekly. Misidentifying frequency will double or halve the debt service calculation.
+
+To detect payment frequency, count how many times per month a funder debits the account:
+• ~20-22x/month → daily (Mon-Fri business days)
+• ~4x/month → weekly (standard)
+• ~2x/month → biweekly (every 2 weeks)
+• ~1x/month → monthly
+
+For biweekly positions:
+• Set frequency: "biweekly"
+• payment_amount = the per-occurrence payment amount (average if alternating)
+• estimated_monthly_total = sum of ALL actual monthly debits (typically 2 debits/month)
+• For DSR: use estimated_monthly_total directly, NOT payment_amount × 4.33
+
+For alternating payment amounts on same funder at same frequency:
+• This is ONE position with an alternating payment schedule — do NOT split into two positions
+• Set payment_amount to the average of the two alternating amounts
+• Example: Itria $865.38 and $951.92 alternating biweekly = ONE position, avg $908.65, biweekly
+
 CRITICAL RULE — SAME FUNDER, MULTIPLE POSITIONS:
 If you see debits from the same payee at DIFFERENT amounts on the SAME dates or same week, those are SEPARATE positions ONLY IF the payment amounts differ by more than $500. If two debits from the same funder have the SAME amount (within $500), they are the SAME position — do NOT create duplicates.
 
@@ -759,9 +780,9 @@ function deduplicatePositions(positions) {
 
   // Convert payment to weekly equivalent for threshold check
   const toWeekly = (amt, freq) => {
-    const f = (freq || '').toLowerCase();
+    const f = (freq || '').toLowerCase().replace(/[-_\s]/g, '');
     if (f === 'daily') return amt * 5;
-    if (f === 'bi-weekly') return amt / 2;
+    if (f === 'biweekly') return amt / 2;
     if (f === 'monthly') return amt / 4.33;
     return amt; // default weekly
   };
