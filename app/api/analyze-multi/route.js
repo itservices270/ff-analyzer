@@ -318,33 +318,41 @@ DEDUPLICATION RULE: Before finalizing mca_positions, check for duplicates:
 • Newtek: "Newtek S Bus Fin" — daily/weekly
 • Itria Ventures: "Itria Ven-Mercha" — see below for multiple position handling
 
-### Itria Ventures — MULTIPLE POSITION DETECTION (CRITICAL):
-Itria Ventures commonly runs multiple simultaneous positions on the same merchant. The ACH descriptor format is:
+### Itria Ventures — MULTIPLE POSITION DETECTION (CRITICAL — READ CAREFULLY):
+Itria Ventures funds merchants with MULTIPLE simultaneous positions. The ACH descriptor format is:
 "Itria Ven-Mercha DES:AP Payment ID:Trans#XXXXXXX INDN:[merchant] CO ID:XXXXXXXXXX"
 
-The Trans# number is the KEY to separating positions:
-STEP 1: Extract ALL distinct Trans# values from every Itria debit entry across all months
-STEP 2: Group debits by Trans# — each unique Trans# is a SEPARATE position
-STEP 3: Within each Trans# group, calculate the weekly payment total
+STEP-BY-STEP POSITION SEPARATION:
 
-IMPORTANT — ALTERNATING PAYMENT AMOUNTS:
-Itria positions often alternate between two payment amounts on the same Trans# series.
-Example: Trans#1234567 debits alternate $865.38 / $951.92 / $865.38 / $951.92
-This alternating pattern is ONE position (same Trans#), NOT two positions.
-The weekly equivalent = sum of all debits in a typical week (usually 3 debits Mon/Wed/Fri).
+STEP 1: Extract the Trans# number from EVERY Itria debit entry across ALL months.
+  Example: "ID:Trans#3055805" → Trans# is 3055805
 
-EXPECTED PATTERN FOR MULTI-POSITION MERCHANTS:
-• Itria Ventures (Position A): Trans# series XXXXXXX, alternating ~$865/$952 per debit, 3x/week = ~$2,700/week
-• Itria Ventures (Position B): Trans# series YYYYYYY (DIFFERENT number), ~$430/debit, 3x/week = ~$1,300/week
-• Both positions debit from the same account with the same "Itria Ven-Mercha" descriptor
-• The ONLY way to tell them apart is the Trans# in the payment ID field
+STEP 2: Sort all Trans# numbers numerically.
 
-DO NOT aggregate all Itria debits into a single position.
-DO NOT assume alternating amounts ($865/$952) are different positions — check the Trans# first.
-Each distinct Trans# group = one position object in the output.
-Label them "Itria Ventures (Position A)", "Itria Ventures (Position B)", etc.
-Include the Trans# reference in the notes field for each position.
+STEP 3: Look for GAPS in the Trans# sequence.
+  A gap of more than 10,000 between sequential Trans# numbers indicates DIFFERENT positions.
+  Numbers close together (gap < 5,000) = same position.
+  Example from actual data:
+    Trans# 3055805, 3060300, 3061418, 3065832, 3066963, 3071553, 3072757, 3076981
+    → These are close together (gaps ~4,000-5,000) = ALL ONE POSITION (Position A)
+    Trans# 3105191, 3106541, 3108966 (or similar numbers with a gap of ~30,000+ from the above)
+    → The gap between ~3076981 and ~3105191 is ~28,000 = DIFFERENT POSITION (Position B)
+
+STEP 4: For each distinct Trans# cluster, calculate the weekly payment:
+  Position A: amounts alternate between $865.38 and $951.92 on successive debits
+    This alternating pattern is ONE position — do NOT split it by amount
+    Weekly total = sum of all Position A debits in a typical week (usually 2 debits from this position per week)
+  Position B: debits at a different consistent amount (~$865-1,300 per debit)
+    Weekly total = sum of all Position B debits in a typical week
+
+STEP 5: Create SEPARATE position entries for each Trans# cluster:
+  "Itria Ventures (Position A)" — alternating $865/$952, Trans# series 305xxxx-307xxxx
+  "Itria Ventures (Position B)" — separate Trans# series 310xxxx+, ~$1,300/week
+
+DO NOT aggregate all Itria debits into a single position — you MUST output TWO positions.
+DO NOT split Position A's alternating $865/$952 pattern into two positions — same Trans# range = one position.
 Both positions' weekly payments must be included in total_mca_weekly and DSR calculation.
+Include the Trans# range in the notes field for each position.
 
 ### NOT-MCA EXCLUSIONS (do NOT classify as MCA positions):
 • FleetCor: "FLEETCOR FUNDING" — fleet fuel cards. Classify as vehicle_fleet expense, NOT MCA.
@@ -491,8 +499,9 @@ If you cannot find an explicit "Average Daily Balance" line, you MUST calculate 
     "vendor_credits": 0.00,
     "cross_account_transfers_detected": 0.00,
     "revenue_sources": [
-      { "name": "string", "type": "card_processing|cash_deposit|ach_credit|vendor_payment|loan|transfer|other", "total": 0.00, "monthly_avg": 0.00, "is_excluded": false, "confidence": 95, "date": "YYYY-MM-DD or null", "note": "string" }
-    ]
+      { "name": "string", "type": "card_processing|cash_deposit|ach_credit|vendor_payment|loan|transfer|reverse_mca_advance|returned_item|owner_loan|other", "total": 0.00, "monthly_avg": 0.00, "is_excluded": false, "confidence": 95, "date": "YYYY-MM-DD or null", "note": "string" }
+    ],
+    "REVENUE_SOURCES_UFCE_EXAMPLE": "For UFCE reverse MCA advances, add: { name: 'UFCE Reverse MCA Advances', type: 'reverse_mca_advance', total: [SUM of ALL UFCE DES:DC credits across all months], monthly_avg: [total / months], is_excluded: true, confidence: 95, note: 'Reverse MCA advance disbursements — loan proceeds, not revenue. [count] credits totaling $[amount]' }. This entry MUST have is_excluded: true. The total MUST be added to excluded_mca_proceeds. If UFCE DES:DC credits exist on the statements and this entry is missing or has is_excluded: false, the analysis is WRONG."
   },
 
   "revenue_trend": {
@@ -917,7 +926,41 @@ function fixExcludedMCAProceeds(analysis) {
 
   const sources = analysis.revenue.revenue_sources;
 
-  // Scan ALL excluded sources — reclassify anything that shouldn't be excluded
+  // Known reverse MCA funders — their credits are ALWAYS advance proceeds,
+  // even when amounts are small and recurring (unlike standard MCA wires which are large lump sums)
+  const reverseMCAFunders = [
+    'ufce', 'greenbox', 'sos capital', 'stream capital', 'expansion cap',
+    '1west', 'mantis', 'everest', 'velocity cap', 'cresthill', 'reliant funding'
+  ];
+
+  // PASS 1: Force-exclude any UFCE/reverse MCA credits that the LLM may have left as revenue
+  for (const src of sources) {
+    const name = (src.name || '').toLowerCase();
+    const noteAndName = `${name} ${(src.note || '').toLowerCase()} ${(src.type || '').toLowerCase()}`;
+    const isReverseMCAFunder = reverseMCAFunders.some(f => name.includes(f));
+
+    // If this is a reverse MCA funder credit that is NOT excluded, force-exclude it
+    if (isReverseMCAFunder && !src.is_excluded) {
+      // Check it's an advance credit (not a returned debit or other)
+      const isAdvanceCredit = noteAndName.includes('advance') ||
+        noteAndName.includes('reverse') ||
+        noteAndName.includes('dc') ||
+        noteAndName.includes('disburs') ||
+        noteAndName.includes('loan') ||
+        src.type === 'reverse_mca_advance' ||
+        src.type === 'ach_credit' || // UFCE DC credits often misclassified as ach_credit
+        (src.total || 0) > 3000; // Reverse MCA advances are typically $5K-$8K each
+
+      if (isAdvanceCredit) {
+        src.is_excluded = true;
+        src.type = 'reverse_mca_advance';
+        src.note = (src.note || '') + ' [CORRECTED: reverse MCA advance credit — forced exclusion from revenue]';
+        console.log(`[fixExcludedMCAProceeds] Force-excluded reverse MCA credit: ${src.name} $${(src.total || 0).toLocaleString()}`);
+      }
+    }
+  }
+
+  // PASS 2: Scan excluded sources — reclassify anything that shouldn't be excluded
   for (const src of sources) {
     if (!src.is_excluded) continue;
     const name = (src.name || '').toLowerCase();
@@ -932,7 +975,15 @@ function fixExcludedMCAProceeds(analysis) {
       continue;
     }
 
-    // IS a known funder — but is this a lump-sum advance or a recurring payment?
+    // Reverse MCA funder credits are ALWAYS excluded — skip the lump-sum check
+    const isReverseMCAFunder = reverseMCAFunders.some(f => name.includes(f));
+    if (isReverseMCAFunder) {
+      // Always keep reverse MCA funder credits excluded — they are advance proceeds
+      // regardless of amount (reverse MCAs send small recurring advances, not large wires)
+      continue;
+    }
+
+    // IS a known STANDARD funder — but is this a lump-sum advance or a recurring payment?
     // Advance wires are large one-time amounts (typically $50K+)
     // Recurring returned ACH credits match the MCA debit amount
     const isLikelyRecurring = mcaPaymentAmounts.some(pmt =>
