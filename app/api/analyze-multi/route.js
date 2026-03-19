@@ -136,6 +136,33 @@ MINIMUM THRESHOLD RULES — APPLY BEFORE CREATING ANY MCA POSITION:
 3. REGULARITY: MCA payments follow a strict daily or weekly pattern. Irregular debits at varying intervals are NOT MCA.
 4. TMM OVERCHARGES: If a Merchant Marketplace debit appears at an amount HIGHER than the expected position amount (e.g., $12,000 when expected is $11,693), do NOT create a separate position. Instead, flag it as double_pull: true on the existing TMM position and add the overpull dates/amounts to double_pull_dates and double_pull_amounts arrays.
 
+## LINE OF CREDIT (LOC) DETECTION — CLASSIFY SEPARATELY FROM MCA
+
+KNOWN LOC FUNDERS (detect by ACH descriptor):
+• Headway Capital (Enova) — weekly or monthly payments
+• OnDeck (Enova) — weekly or monthly, may have BOTH draw deposits AND payments on same account
+• Rapid Finance — weekly payments
+• Bluevine — weekly or monthly
+• Fundbox — weekly
+• Back'd / Backd — weekly
+
+LOC DETECTION SIGNALS (if 2+ signals match, classify as LOC not MCA):
+1. VARIABLE PAYMENTS — payment amount changes month to month (MCA payments are fixed)
+2. DRAW DEPOSITS — periodic credits FROM the funder appear on the same account (funders don't send credits for MCA unless it's a new advance)
+3. PAYMENT DECREASES when no new draw is taken
+4. PAYMENT INCREASES after a new draw
+5. NO FIXED PAYBACK AMOUNT or factor rate (LOCs have revolving balances)
+6. Funder is on the KNOWN LOC FUNDERS list above
+
+WHEN LOC IS DETECTED, set these fields:
+• position_type: "loc" (NOT "mca")
+• Do NOT include in total_mca_weekly or total_mca_monthly calculations
+• DO include in total_debt_service_monthly
+• If draw balance is detectable from credits minus payments, set current_draw_balance
+• LOC positions should NOT trigger: stacking violations, anti-stacking analysis, specified percentage calculations, or factor rate calculations
+
+NOTE: OnDeck can be either MCA or LOC. If OnDeck shows FIXED payment amounts with no draw deposits, classify as MCA. If OnDeck shows VARIABLE payments or draw deposits, classify as LOC.
+
 CRITICAL RULE — SAME FUNDER, MULTIPLE POSITIONS:
 If you see debits from the same payee at DIFFERENT amounts on the SAME dates or same week, those are SEPARATE positions ONLY IF the payment amounts differ by more than $500. If two debits from the same funder have the SAME amount (within $500), they are the SAME position — do NOT create duplicates.
 
@@ -319,6 +346,7 @@ If you cannot find an explicit "Average Daily Balance" line, you MUST calculate 
     {
       "funder_name": "string — append (Position A), (Position B) if same funder has multiple",
       "bank_debit_description": "string — exact ACH descriptor from bank",
+      "position_type": "mca|loc — default 'mca'. Set to 'loc' for lines of credit (see LOC DETECTION rules above)",
       "payment_amount": 0.00,
       "payment_amount_current": 0.00,
       "payment_amount_original": 0.00,
@@ -333,6 +361,7 @@ If you cannot find an explicit "Average Daily Balance" line, you MUST calculate 
       "advance_deposit_amount": 0.00,
       "advance_deposit_date": "YYYY-MM-DD or null",
       "days_from_deposit_to_payments": 0,
+      "current_draw_balance": "0.00 or null — for LOC positions only, estimated current draw balance",
       "pulls_from_accounts": ["account labels"],
       "pattern_description": "string",
       "confidence": "high|medium|low",
@@ -547,6 +576,7 @@ function deduplicatePositions(positions) {
 
   // Step 1: Filter out positions below minimum thresholds
   // Paid-off positions are exempt from the occurrence threshold
+  // LOC positions are exempt from MCA-specific minimum thresholds
   // Potential overcharges (same funder name as another position) are kept for merge step
   const funderNames = positions.map(p => normalize(p.funder_name));
   const filtered = positions.filter((p, idx) => {
@@ -554,7 +584,11 @@ function deduplicatePositions(positions) {
     const weeklyAmt = toWeekly(amt, p.frequency);
     const occurrences = p.payments_detected || 0;
     const isPaidOff = (p.status || '').toLowerCase() === 'paid_off';
+    const isLOC = (p.position_type || '').toLowerCase() === 'loc';
     const nameNorm = funderNames[idx];
+
+    // LOC positions skip MCA minimum thresholds (they have variable payments)
+    if (isLOC) return true;
 
     // Minimum $500/week to be MCA
     if (weeklyAmt < 500 && weeklyAmt > 0) {
@@ -888,25 +922,35 @@ function recalcMCAMetrics(analysis) {
   const metrics = analysis?.calculated_metrics || {};
   const revenue = analysis?.revenue || {};
 
+  const toWeeklyAmt = (p) => {
+    const amt = p.payment_amount_current || p.payment_amount || 0;
+    const freq = (p.frequency || '').toLowerCase();
+    if (freq === 'daily') return amt * 5;
+    if (freq === 'bi-weekly') return amt / 2;
+    if (freq === 'monthly') return amt / 4.33;
+    return amt; // default weekly
+  };
+
   // Only sum active positions — STRICTLY filter by status === 'active'
   // Positions with status 'paid_off', 'paid off', or any non-active status are excluded
   const activePositions = positions.filter(p => {
     const status = (p.status || '').toLowerCase().replace(/[_\s]+/g, '');
     return status === 'active' || status === '';
   });
-  const totalWeekly = activePositions.reduce((sum, p) => {
-    const amt = p.payment_amount_current || p.payment_amount || 0;
-    const freq = (p.frequency || '').toLowerCase();
-    if (freq === 'daily') return sum + amt * 5;
-    if (freq === 'bi-weekly') return sum + amt / 2;
-    if (freq === 'monthly') return sum + amt / 4.33;
-    return sum + amt; // default weekly
-  }, 0);
 
-  metrics.total_mca_weekly = Math.round(totalWeekly * 100) / 100;
-  metrics.total_mca_monthly = Math.round(totalWeekly * 4.33 * 100) / 100;
+  // Separate MCA vs LOC positions
+  const activeMCA = activePositions.filter(p => (p.position_type || 'mca').toLowerCase() !== 'loc');
+  const activeLOC = activePositions.filter(p => (p.position_type || 'mca').toLowerCase() === 'loc');
 
-  // Recalculate DSR
+  const mcaWeekly = activeMCA.reduce((sum, p) => sum + toWeeklyAmt(p), 0);
+  const locWeekly = activeLOC.reduce((sum, p) => sum + toWeeklyAmt(p), 0);
+
+  metrics.total_mca_weekly = Math.round(mcaWeekly * 100) / 100;
+  metrics.total_mca_monthly = Math.round(mcaWeekly * 4.33 * 100) / 100;
+  metrics.total_loc_weekly = Math.round(locWeekly * 100) / 100;
+  metrics.total_loc_monthly = Math.round(locWeekly * 4.33 * 100) / 100;
+
+  // Recalculate DSR — MCA only (LOC tracked separately)
   const monthlyRevenue = revenue.monthly_average_revenue || revenue.net_verified_revenue || 1;
   const cogsRate = revenue.cogs_rate || 0.40;
   const grossProfit = monthlyRevenue * (1 - cogsRate);
@@ -919,12 +963,13 @@ function recalcMCAMetrics(analysis) {
   else if (metrics.dsr_percent < 65) metrics.dsr_posture = 'critical';
   else metrics.dsr_posture = 'unsustainable';
 
-  // Free cash
+  // Free cash — include BOTH MCA and LOC in total debt service
+  const totalMCAandLOC = metrics.total_mca_monthly + metrics.total_loc_monthly;
   const opex = analysis?.expense_categories?.total_operating_expenses || 0;
   const otherDebt = (analysis?.other_debt_service || []).reduce((s, d) => s + (d.monthly_total || 0), 0);
-  metrics.free_cash_after_mca = Math.round((monthlyRevenue - metrics.total_mca_monthly) * 100) / 100;
-  metrics.true_free_cash = Math.round((monthlyRevenue - metrics.total_mca_monthly - otherDebt - opex) * 100) / 100;
-  metrics.total_debt_service_monthly = Math.round((metrics.total_mca_monthly + otherDebt) * 100) / 100;
+  metrics.free_cash_after_mca = Math.round((monthlyRevenue - totalMCAandLOC) * 100) / 100;
+  metrics.true_free_cash = Math.round((monthlyRevenue - totalMCAandLOC - otherDebt - opex) * 100) / 100;
+  metrics.total_debt_service_monthly = Math.round((totalMCAandLOC + otherDebt) * 100) / 100;
 
   analysis.calculated_metrics = metrics;
   return analysis;

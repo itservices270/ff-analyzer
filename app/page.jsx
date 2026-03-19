@@ -463,8 +463,9 @@ function buildCSV(a, activePositions, totalMCAMonthly, dsr, totalOtherDebt, tota
     ['excluded_transfers', r.excluded_transfers, ''],
     ['monthly_outgo', a.expense_categories.total_operating_expenses, ''],
     ['avg_daily_balance', m.avg_daily_balance, ''],
-    ['total_mca_debt_service', m.total_mca_monthly, 'Monthly MCA payments only'],
-    ['total_debt_service_monthly', m.total_debt_service_monthly, 'MCA + loans + other'],
+    ['total_mca_debt_service', m.total_mca_monthly, 'Monthly MCA payments only (excludes LOC)'],
+    ['total_loc_debt_service', m.total_loc_monthly || 0, 'Monthly LOC payments'],
+    ['total_debt_service_monthly', m.total_debt_service_monthly, 'MCA + LOC + loans + other'],
     ['free_cash_after_mca', m.free_cash_after_mca, ''],
     ['dsr_percent', m.dsr_percent, 'Debt Service Ratio'],
     ['dsr_posture', a.negotiation_intel?.dsr_posture, ''],
@@ -474,7 +475,8 @@ function buildCSV(a, activePositions, totalMCAMonthly, dsr, totalOtherDebt, tota
     ['ending_balance', b.ending_balance, ''],
     ['trend_direction', m.trend_direction, ''],
     ['weeks_to_insolvency', m.weeks_to_insolvency ?? 'N/A', ''],
-    ['detected_mca_positions', (activePositions || a.mca_positions || []).length, 'Active positions included in UW Calc'],
+    ['detected_mca_positions', (activePositions || a.mca_positions || []).filter(p => (p.position_type || 'mca').toLowerCase() !== 'loc').length, 'Active MCA positions included in UW Calc'],
+    ['detected_loc_positions', (activePositions || a.mca_positions || []).filter(p => (p.position_type || 'mca').toLowerCase() === 'loc').length, 'Active LOC positions'],
     ['total_other_debt_monthly', totalOtherDebt || 0, 'SBA + equipment + credit cards (active)'],
     ['total_dsr_all_debt', totalDSR || 0, 'MCA + all other debt / revenue'],
     ['true_free_cash', trueFree || 0, 'Revenue - MCA - other debt - opex'],
@@ -685,19 +687,23 @@ function MCATab({ a, positions, setPositions, excludedIds, setExcludedIds, other
   const nonExcluded = positions.filter(p => !excludedIds.includes(p._id));
   const activePositions = nonExcluded.filter(p => p.status !== 'paid_off');
   const paidOffPositions = nonExcluded.filter(p => p.status === 'paid_off');
+  const activeMCAPositions = activePositions.filter(p => (p.position_type || 'mca').toLowerCase() !== 'loc');
+  const activeLOCPositions = activePositions.filter(p => (p.position_type || 'mca').toLowerCase() === 'loc');
   const excludedPositions = positions.filter(p => excludedIds.includes(p._id));
   const other = a.other_debt_service || [];
   const revenue = calcAdjustedRevenue(a, depositOverrides);
 
-  const totalMCAMonthly = activePositions.reduce((s, p) => s + (p.estimated_monthly_total || 0), 0);
+  const totalMCAMonthly = activeMCAPositions.reduce((s, p) => s + (p.estimated_monthly_total || 0), 0);
+  const totalLOCMonthly = activeLOCPositions.reduce((s, p) => s + (p.estimated_monthly_total || 0), 0);
   const activeOtherDebt = other.filter((_, i) => !(otherExcludedIds || []).includes(i));
   const totalOtherMonthly = activeOtherDebt.reduce((s, o) => s + (o.monthly_total || 0), 0);
-  const totalAllDebt = totalMCAMonthly + totalOtherMonthly;
+  const totalAllDebt = totalMCAMonthly + totalLOCMonthly + totalOtherMonthly;
   const dsrPercent = (totalAllDebt / revenue) * 100;
   const mcaOnlyDSR = (totalMCAMonthly / revenue) * 100;
+  const locDSR = (totalLOCMonthly / revenue) * 100;
 
-  // Payment compliance: contract vs actual cross-reference
-  const compliance = buildPaymentCompliance(activePositions, agreementResults, a.monthly_breakdown);
+  // Payment compliance: contract vs actual cross-reference (MCA only — LOCs have variable payments)
+  const compliance = buildPaymentCompliance(activeMCAPositions, agreementResults, a.monthly_breakdown);
   const complianceMap = {};
   compliance.forEach(c => { complianceMap[c._id] = c; });
 
@@ -755,17 +761,17 @@ function MCATab({ a, positions, setPositions, excludedIds, setExcludedIds, other
       <div style={S.row}>
         <div style={{ ...S.stat, flex: 1 }}>
           <div style={S.statLabel}>Active Positions</div>
-          <div style={S.statValue('#EAD068')}>{activePositions.length} active{paidOffPositions.length > 0 && <span style={{ fontSize: 13, color: 'rgba(232,232,240,0.4)' }}> · {paidOffPositions.length} paid off</span>}</div>
+          <div style={S.statValue('#EAD068')}>{activeMCAPositions.length} MCA{activeLOCPositions.length > 0 && <span style={{ color: '#64b5f6' }}> · {activeLOCPositions.length} LOC</span>}{paidOffPositions.length > 0 && <span style={{ fontSize: 13, color: 'rgba(232,232,240,0.4)' }}> · {paidOffPositions.length} paid off</span>}</div>
         </div>
         <div style={{ ...S.stat, flex: 1 }}>
           <div style={S.statLabel}>Monthly MCA Total</div>
           <div style={S.statValue('#ef9a9a')}>{fmt(totalMCAMonthly)}</div>
-          <div style={S.statSub}>Active positions only</div>
+          <div style={S.statSub}>{activeLOCPositions.length > 0 ? `MCA only · LOC ${fmt(totalLOCMonthly)}` : 'Active positions only'}</div>
         </div>
         <div style={{ ...S.stat, flex: 1 }}>
           <div style={S.statLabel}>Total DSR (All Debt)</div>
           <div style={S.statValue(dsrPercent > 50 ? '#ef5350' : dsrPercent > 35 ? '#ff9800' : dsrPercent > 25 ? '#ffd54f' : '#4caf50')}>{fmtP(dsrPercent)}</div>
-          <div style={S.statSub}>MCA {fmtP(mcaOnlyDSR)} + Other {fmtP(dsrPercent - mcaOnlyDSR)}</div>
+          <div style={S.statSub}>MCA {fmtP(mcaOnlyDSR)}{locDSR > 0 && ` + LOC ${fmtP(locDSR)}`} + Other {fmtP(dsrPercent - mcaOnlyDSR - locDSR)}</div>
         </div>
       </div>
 
@@ -788,7 +794,10 @@ function MCATab({ a, positions, setPositions, excludedIds, setExcludedIds, other
                 <div style={{ fontSize: 11, color: 'rgba(232,232,240,0.45)', marginBottom: 4 }}>Originated: {originationMap[p._id]}</div>
               )}
               <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
-                <span style={S.tag(p.flag === 'undisclosed' ? 'red' : p.flag === 'default_modified' ? 'red' : p.flag === 'modified' ? 'amber' : p.flag === 'manual' ? 'cyan' : 'teal')}>{p.flag === 'default_modified' ? '⚠ default modified' : p.flag === 'manual' ? '＋ manual' : p.flag || 'standard'}</span>
+                {(p.position_type || 'mca').toLowerCase() === 'loc'
+                  ? <span style={{ ...S.tag('cyan'), background: 'rgba(100,181,246,0.15)', color: '#64b5f6', borderColor: 'rgba(100,181,246,0.4)' }}>LINE OF CREDIT</span>
+                  : <span style={S.tag(p.flag === 'undisclosed' ? 'red' : p.flag === 'default_modified' ? 'red' : p.flag === 'modified' ? 'amber' : p.flag === 'manual' ? 'cyan' : 'teal')}>{p.flag === 'default_modified' ? '⚠ default modified' : p.flag === 'manual' ? '＋ manual' : p.flag || 'standard'}</span>
+                }
                 {(p.isEdited || p.isManual) && <span style={S.tag('cyan')}>(edited)</span>}
                 <span style={S.tag(p.confidence === 'high' ? 'green' : p.confidence === 'medium' ? 'amber' : p.confidence === 'manual' ? 'cyan' : 'grey')}>{p.confidence === 'manual' ? 'manual entry' : (p.confidence || 'medium') + ' confidence'}</span>
                 <span style={S.tag('grey')}>{p.frequency}</span>
@@ -818,7 +827,7 @@ function MCATab({ a, positions, setPositions, excludedIds, setExcludedIds, other
                 </div>
               ) : (
                 <div style={{ textAlign: 'right' }}>
-                  <div style={{ fontSize: 20, color: '#ef9a9a' }}>{fmt(p.estimated_monthly_total)}<span style={{ fontSize: 12, color: 'rgba(232,232,240,0.4)' }}>/mo</span></div>
+                  <div style={{ fontSize: 20, color: (p.position_type || 'mca').toLowerCase() === 'loc' ? '#64b5f6' : '#ef9a9a' }}>{fmt(p.estimated_monthly_total)}<span style={{ fontSize: 12, color: 'rgba(232,232,240,0.4)' }}>/mo</span></div>
                   <div style={{ fontSize: 13, color: 'rgba(232,232,240,0.5)' }}>{fmt(p.payment_amount_current || p.payment_amount)} × {p.payments_detected} pmts</div>
                 </div>
               )}
@@ -861,6 +870,16 @@ function MCATab({ a, positions, setPositions, excludedIds, setExcludedIds, other
             <div style={{ background: 'rgba(249,168,37,0.06)', border: '1px solid rgba(249,168,37,0.15)', borderRadius: 6, padding: '8px 12px', marginBottom: 10, fontSize: 12, color: 'rgba(232,232,240,0.5)' }}>
               <span style={{ color: '#ffd54f' }}>⚡ Fuzzy Match</span>
               <span style={{ marginLeft: 8 }}>Bank descriptor: <code style={{ background: 'rgba(0,0,0,0.3)', padding: '2px 6px', borderRadius: 4, fontSize: 11 }}>{p.fuzzy_match_source}</code></span>
+            </div>
+          )}
+          {/* LOC draw balance */}
+          {(p.position_type || 'mca').toLowerCase() === 'loc' && (
+            <div style={{ background: 'rgba(100,181,246,0.08)', border: '1px solid rgba(100,181,246,0.2)', borderRadius: 6, padding: '8px 12px', marginBottom: 10, fontSize: 12, color: 'rgba(232,232,240,0.55)' }}>
+              <span style={{ color: '#64b5f6' }}>📋 Line of Credit</span>
+              <span style={{ marginLeft: 8 }}>
+                {p.current_draw_balance ? <>Draw balance: <span style={{ color: '#64b5f6' }}>{fmt(p.current_draw_balance)}</span></> : 'Draw balance not detected'}
+                {' · '}Not included in MCA debt service · Tracked separately in DSR
+              </span>
             </div>
           )}
           {/* Advance deposit correlation */}
