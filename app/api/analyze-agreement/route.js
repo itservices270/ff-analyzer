@@ -101,6 +101,20 @@ The prior balance payoff is often listed on the funding instructions page, closi
 RULE 4 — SPECIFIED PERCENTAGE:
 Read the specified percentage (also called "specified receivable percentage" or "specified daily/weekly percentage") directly from the contract. This is usually stated as a percentage like "49%" or "7.7%" or "11.5%". It represents the percentage of the merchant's receivables that the funder is entitled to. Do NOT confuse this with the factor rate or holdback percentage.
 
+RULE 5 — UCC LIEN DETECTION (CRITICAL — DO NOT MISS):
+Search the ENTIRE agreement for ANY of these indicators of a UCC lien or security interest:
+• "UCC" or "UCC-1" or "UCC filing" anywhere in the document
+• "Uniform Commercial Code" (full phrase)
+• "financing statement" or "continuation statement"
+• "lien on assets" or "lien on all assets"
+• "security interest" or "security agreement"
+• "grant a security interest" or "hereby grants"
+• "collateral" (when referring to merchant's assets)
+• "all assets" or "all personal property" (in a security context)
+If ANY of these appear, set ucc_lien.has_ucc to true and extract the clause details.
+Most MCA agreements contain UCC language — if you find ZERO UCC references, double-check the entire document before reporting has_ucc: false.
+Also add a "ucc_blanket" entry to problematic_clauses if a blanket UCC is found.
+
 Return ONLY valid JSON, no markdown, no preamble. Use null for any field not found.
 
 {
@@ -191,6 +205,14 @@ Return ONLY valid JSON, no markdown, no preamble. Use null for any field not fou
     "severity": "standard|aggressive|potentially_unenforceable",
     "notes": "string"
   }],
+
+  "ucc_lien": {
+    "has_ucc": false,
+    "ucc_type": "blanket|specific|null — blanket covers all assets, specific covers only receivables",
+    "ucc_filing_reference": "UCC-1 filing number if mentioned, or null",
+    "ucc_clause_summary": "brief summary of UCC/lien/security interest language, or null",
+    "ucc_note": "string or null"
+  },
 
   "problematic_clauses": [{
     "clause_type": "coj|personal_guarantee|ucc_blanket|venue|jury_waiver|counterclaim_waiver|mac_clause|anti_stacking|attorney_fees|non_solicitation|other",

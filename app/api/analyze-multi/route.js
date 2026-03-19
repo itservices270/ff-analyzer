@@ -747,8 +747,11 @@ function deduplicatePositions(positions) {
 }
 
 // ─── POST-PROCESSING: Fix excluded_mca_proceeds ─────────────────────────────
-// Only keep deposits excluded if source name matches a known MCA funder.
-// Everything else is revenue — regardless of what type the AI assigned.
+// Only keep deposits excluded if:
+// 1. Source name matches a known MCA funder, AND
+// 2. Amount is consistent with a lump-sum advance wire (not a recurring payment)
+// Recurring weekly/daily payments from funders are NOT proceeds — they are
+// already captured as MCA debt service debits (credits from returned ACH, etc.)
 function fixExcludedMCAProceeds(analysis) {
   if (!analysis?.revenue?.revenue_sources) return analysis;
 
@@ -759,19 +762,53 @@ function fixExcludedMCAProceeds(analysis) {
     'square capital' // Note: "Square Capital" IS an MCA funder, not Square payments
   ];
 
+  // Determine typical MCA payment amounts so we can distinguish
+  // recurring ACH returns from lump-sum advance wires
+  const mcaPaymentAmounts = (analysis.mca_positions || [])
+    .map(p => p.payment_amount_current || p.payment_amount || 0)
+    .filter(a => a > 0);
+
   const sources = analysis.revenue.revenue_sources;
 
-  // Scan ALL excluded sources — regardless of type (loan, wire, mca_advance, etc.)
-  // Only keep excluded if source name matches a known MCA funder
+  // Scan ALL excluded sources — reclassify anything that shouldn't be excluded
   for (const src of sources) {
     if (!src.is_excluded) continue;
     const name = (src.name || '').toLowerCase();
     const isFunder = knownFunders.some(f => name.includes(f));
+    const amount = src.total || src.monthly_avg || 0;
+
     if (!isFunder) {
       // Not a known funder — this is revenue, reclassify
       src.is_excluded = false;
       src.type = 'ach_credit';
       src.note = (src.note || '') + ' [CORRECTED: not a known MCA funder — reclassified as revenue]';
+      continue;
+    }
+
+    // IS a known funder — but is this a lump-sum advance or a recurring payment?
+    // Advance wires are large one-time amounts (typically $50K+)
+    // Recurring returned ACH credits match the MCA debit amount
+    const isLikelyRecurring = mcaPaymentAmounts.some(pmt =>
+      Math.abs(amount - pmt) < 500 || // Matches a known payment amount
+      (amount > 0 && amount < 25000 && src.type !== 'loan') // Small recurring credit
+    );
+
+    // Lump-sum advance indicators:
+    // - Amount > $25,000 (typical minimum advance)
+    // - Type is explicitly 'loan' or 'wire'
+    // - Contains 'wire' in the name/note
+    const noteAndName = `${name} ${(src.note || '').toLowerCase()}`;
+    const isLumpSum = amount >= 25000 ||
+      src.type === 'loan' ||
+      noteAndName.includes('wire') ||
+      noteAndName.includes('advance') ||
+      noteAndName.includes('funding');
+
+    if (isLikelyRecurring && !isLumpSum) {
+      // This is a recurring credit (returned ACH, etc.), not an advance wire
+      src.is_excluded = false;
+      src.type = 'ach_credit';
+      src.note = (src.note || '') + ' [CORRECTED: recurring funder credit, not advance wire — reclassified as non-excluded]';
     }
   }
 
@@ -794,8 +831,12 @@ function fixExcludedMCAProceeds(analysis) {
 }
 
 // ─── POST-PROCESSING: Fix weeks_to_insolvency ───────────────────────────────
-// Formula: weeks = avg_daily_balance * 30 / (monthly_mca - monthly_revenue)
-// Only calculate if true_free_cash is negative (spending more than earning)
+// Two scenarios:
+// 1. Revenue > MCA burden but true_free_cash < 0 (OpEx + debt > revenue):
+//    weeks = ADB / weekly_burn where weekly_burn = abs(true_free_cash) × 12 / 52
+// 2. Revenue < MCA burden (deeply insolvent from MCA alone):
+//    weeks = ADB / weekly_burn (same formula, higher burn rate)
+// 3. true_free_cash >= 0: merchant is sustainable, no insolvency calculation
 function fixInsolvencyCalc(analysis) {
   const metrics = analysis?.calculated_metrics;
   const balance = analysis?.balance_summary;
@@ -806,19 +847,35 @@ function fixInsolvencyCalc(analysis) {
   const monthlyRevenue = analysis?.revenue?.monthly_average_revenue || 0;
   const trueFree = metrics.true_free_cash;
 
-  // Only calculate insolvency if the business is truly cash-flow negative
+  // Check if MCA burden alone exceeds revenue
+  const dailyMCA = monthlyMCA / 30;
+  const dailyRevenue = monthlyRevenue / 30;
+
   if (trueFree !== undefined && trueFree !== null && trueFree < 0) {
-    const monthlyBurn = monthlyMCA - monthlyRevenue;
-    if (monthlyBurn > 0 && avgDailyBalance > 0) {
-      // weeks = (ADB * 30) / monthly_burn_rate / 4.33
-      const monthsToInsolvency = (avgDailyBalance * 30) / monthlyBurn;
-      metrics.weeks_to_insolvency = Math.round(monthsToInsolvency * 4.33 * 10) / 10;
+    // Business is cash-flow negative — calculate weeks until ADB hits zero
+    // weekly_burn = abs(true_free_cash) annualized then divided by 52
+    const annualBurn = Math.abs(trueFree) * 12;
+    const weeklyBurn = annualBurn / 52;
+
+    if (weeklyBurn > 0 && avgDailyBalance > 0) {
+      const weeks = avgDailyBalance / weeklyBurn;
+      metrics.weeks_to_insolvency = Math.round(weeks * 10) / 10;
+      // Add context: is this MCA-driven or OpEx-driven?
+      if (dailyRevenue > dailyMCA) {
+        metrics.insolvency_note = `~${metrics.weeks_to_insolvency} weeks at current burn rate (revenue covers MCA but not total obligations)`;
+      } else {
+        metrics.insolvency_note = `~${metrics.weeks_to_insolvency} weeks at current burn rate (MCA burden exceeds revenue)`;
+      }
     } else {
       metrics.weeks_to_insolvency = null;
+      metrics.insolvency_note = avgDailyBalance <= 0 ? 'ADB is zero — already insolvent' : null;
     }
   } else {
-    // Revenue exceeds MCA burden — not insolvent
+    // Revenue exceeds all obligations — sustainable
     metrics.weeks_to_insolvency = null;
+    if (dailyRevenue > dailyMCA) {
+      metrics.insolvency_note = 'Sustainable at current revenue';
+    }
   }
 
   return analysis;
