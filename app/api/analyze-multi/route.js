@@ -163,6 +163,44 @@ WHEN LOC IS DETECTED, set these fields:
 
 NOTE: OnDeck can be either MCA or LOC. If OnDeck shows FIXED payment amounts with no draw deposits, classify as MCA. If OnDeck shows VARIABLE payments or draw deposits, classify as LOC.
 
+## TRUE MCA / TRUE SPLIT DETECTION — REVENUE-BASED PERCENTAGE SPLITS
+
+True splits are the original MCA structure where the funder takes a percentage directly from processor settlements, NOT via fixed ACH debits. Rare but critical — especially for Texas deals where 2nd+ position ACH is restricted by law.
+
+TRUE SPLIT DETECTION SIGNALS (if 2+ signals match, classify as true_split):
+1. DAILY PAYMENT AMOUNTS VARY proportionally with daily sales deposits — never the same amount twice
+2. PAYMENT SOURCE IS THE PROCESSOR, not a funder ACH (appears as a reduction in processor settlement amount)
+3. PAYMENT PERCENTAGE IS CONSISTENT even if dollar amount varies — e.g. always ~10% of that day's deposits
+4. NO FIXED ACH DEBIT from a funder — the split happens upstream at the processor level
+5. May appear as TWO entries on the same day: gross processor deposit + funder split deduction
+6. Processor remittance shows net-after-split, not gross
+
+KNOWN TRUE SPLIT CONTEXTS:
+• Texas 2nd+ position deals (state law restricts fixed ACH on stacked positions)
+• Older MCA agreements (pre-2018 style)
+• Some Rapid Finance and smaller regional funders
+• Any agreement stating "specified percentage of future receivables" with NO fixed payment amount
+
+WHEN TRUE SPLIT DETECTED, set these fields:
+• position_type: "true_split"
+• estimated_split_percentage: the percentage of daily receipts (e.g. 10, 15, 20)
+• avg_daily_payment: average of the variable daily payments across all statements
+• estimated_weekly_equivalent: avg_daily_payment × 5 (for DSR calculation)
+• estimated_monthly_total: avg_daily_payment × 22 (business days per month)
+• Do NOT flag as "payment modified" — the variation is intentional and reflects daily revenue fluctuation
+• Do NOT flag as phantom/suspicious position
+• Note: "True split — payment varies with revenue. Built-in reconciliation by nature."
+
+DSR CALCULATION FOR TRUE SPLITS:
+• Use avg_daily_payment × 22 for monthly burden (NOT a fixed weekly amount)
+• Include in total_mca_monthly (true splits ARE MCA, just revenue-based)
+• Flag as "estimated — true split" in DSR breakdown
+
+IMPORTANT DISTINCTION FROM LOC:
+• LOC = variable payments from a LINE OF CREDIT (revolving debt, draw deposits)
+• True Split = variable payments from a PERCENTAGE-BASED MCA (revenue split, no ACH)
+• LOC is excluded from MCA totals. True splits are INCLUDED in MCA totals.
+
 CRITICAL RULE — SAME FUNDER, MULTIPLE POSITIONS:
 If you see debits from the same payee at DIFFERENT amounts on the SAME dates or same week, those are SEPARATE positions ONLY IF the payment amounts differ by more than $500. If two debits from the same funder have the SAME amount (within $500), they are the SAME position — do NOT create duplicates.
 
@@ -346,7 +384,7 @@ If you cannot find an explicit "Average Daily Balance" line, you MUST calculate 
     {
       "funder_name": "string — append (Position A), (Position B) if same funder has multiple",
       "bank_debit_description": "string — exact ACH descriptor from bank",
-      "position_type": "mca|loc — default 'mca'. Set to 'loc' for lines of credit (see LOC DETECTION rules above)",
+      "position_type": "mca|loc|true_split — default 'mca'. Set to 'loc' for lines of credit, 'true_split' for revenue-percentage splits (see detection rules above)",
       "payment_amount": 0.00,
       "payment_amount_current": 0.00,
       "payment_amount_original": 0.00,
@@ -362,6 +400,9 @@ If you cannot find an explicit "Average Daily Balance" line, you MUST calculate 
       "advance_deposit_date": "YYYY-MM-DD or null",
       "days_from_deposit_to_payments": 0,
       "current_draw_balance": "0.00 or null — for LOC positions only, estimated current draw balance",
+      "estimated_split_percentage": "0 or null — for true_split positions only, e.g. 10 means 10% of daily receipts",
+      "avg_daily_payment": "0.00 or null — for true_split positions only, average of variable daily payments",
+      "estimated_weekly_equivalent": "0.00 or null — for true_split positions only, avg_daily_payment × 5",
       "pulls_from_accounts": ["account labels"],
       "pattern_description": "string",
       "confidence": "high|medium|low",
@@ -587,8 +628,10 @@ function deduplicatePositions(positions) {
     const isLOC = (p.position_type || '').toLowerCase() === 'loc';
     const nameNorm = funderNames[idx];
 
-    // LOC positions skip MCA minimum thresholds (they have variable payments)
-    if (isLOC) return true;
+    const isTrueSplit = (p.position_type || '').toLowerCase() === 'true_split';
+
+    // LOC and True Split positions skip MCA minimum thresholds (they have variable payments)
+    if (isLOC || isTrueSplit) return true;
 
     // Minimum $500/week to be MCA
     if (weeklyAmt < 500 && weeklyAmt > 0) {
@@ -938,17 +981,33 @@ function recalcMCAMetrics(analysis) {
     return status === 'active' || status === '';
   });
 
-  // Separate MCA vs LOC positions
-  const activeMCA = activePositions.filter(p => (p.position_type || 'mca').toLowerCase() !== 'loc');
+  // Separate MCA vs LOC vs True Split positions
+  const activeMCA = activePositions.filter(p => {
+    const t = (p.position_type || 'mca').toLowerCase();
+    return t !== 'loc' && t !== 'true_split';
+  });
   const activeLOC = activePositions.filter(p => (p.position_type || 'mca').toLowerCase() === 'loc');
+  const activeTrueSplit = activePositions.filter(p => (p.position_type || 'mca').toLowerCase() === 'true_split');
 
   const mcaWeekly = activeMCA.reduce((sum, p) => sum + toWeeklyAmt(p), 0);
   const locWeekly = activeLOC.reduce((sum, p) => sum + toWeeklyAmt(p), 0);
 
-  metrics.total_mca_weekly = Math.round(mcaWeekly * 100) / 100;
-  metrics.total_mca_monthly = Math.round(mcaWeekly * 4.33 * 100) / 100;
+  // True splits use avg_daily_payment × 5 for weekly equivalent (revenue-based, not fixed)
+  const trueSplitWeekly = activeTrueSplit.reduce((sum, p) => {
+    if (p.estimated_weekly_equivalent) return sum + p.estimated_weekly_equivalent;
+    if (p.avg_daily_payment) return sum + p.avg_daily_payment * 5;
+    return sum + toWeeklyAmt(p); // fallback to standard calc
+  }, 0);
+
+  // True splits ARE MCA (revenue-based), so include in MCA totals
+  const totalMCAWeekly = mcaWeekly + trueSplitWeekly;
+
+  metrics.total_mca_weekly = Math.round(totalMCAWeekly * 100) / 100;
+  metrics.total_mca_monthly = Math.round(totalMCAWeekly * 4.33 * 100) / 100;
   metrics.total_loc_weekly = Math.round(locWeekly * 100) / 100;
   metrics.total_loc_monthly = Math.round(locWeekly * 4.33 * 100) / 100;
+  metrics.total_true_split_weekly = Math.round(trueSplitWeekly * 100) / 100;
+  metrics.total_true_split_monthly = Math.round(trueSplitWeekly * 4.33 * 100) / 100;
 
   // Recalculate DSR — MCA only (LOC tracked separately)
   const monthlyRevenue = revenue.monthly_average_revenue || revenue.net_verified_revenue || 1;

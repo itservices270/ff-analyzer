@@ -687,13 +687,15 @@ function MCATab({ a, positions, setPositions, excludedIds, setExcludedIds, other
   const nonExcluded = positions.filter(p => !excludedIds.includes(p._id));
   const activePositions = nonExcluded.filter(p => p.status !== 'paid_off');
   const paidOffPositions = nonExcluded.filter(p => p.status === 'paid_off');
-  const activeMCAPositions = activePositions.filter(p => (p.position_type || 'mca').toLowerCase() !== 'loc');
+  const activeMCAPositions = activePositions.filter(p => { const t = (p.position_type || 'mca').toLowerCase(); return t !== 'loc' && t !== 'true_split'; });
   const activeLOCPositions = activePositions.filter(p => (p.position_type || 'mca').toLowerCase() === 'loc');
+  const activeTrueSplitPositions = activePositions.filter(p => (p.position_type || 'mca').toLowerCase() === 'true_split');
   const excludedPositions = positions.filter(p => excludedIds.includes(p._id));
   const other = a.other_debt_service || [];
   const revenue = calcAdjustedRevenue(a, depositOverrides);
 
-  const totalMCAMonthly = activeMCAPositions.reduce((s, p) => s + (p.estimated_monthly_total || 0), 0);
+  const totalMCAMonthly = activeMCAPositions.reduce((s, p) => s + (p.estimated_monthly_total || 0), 0)
+    + activeTrueSplitPositions.reduce((s, p) => s + (p.estimated_monthly_total || (p.avg_daily_payment || 0) * 22 || 0), 0);
   const totalLOCMonthly = activeLOCPositions.reduce((s, p) => s + (p.estimated_monthly_total || 0), 0);
   const activeOtherDebt = other.filter((_, i) => !(otherExcludedIds || []).includes(i));
   const totalOtherMonthly = activeOtherDebt.reduce((s, o) => s + (o.monthly_total || 0), 0);
@@ -761,7 +763,7 @@ function MCATab({ a, positions, setPositions, excludedIds, setExcludedIds, other
       <div style={S.row}>
         <div style={{ ...S.stat, flex: 1 }}>
           <div style={S.statLabel}>Active Positions</div>
-          <div style={S.statValue('#EAD068')}>{activeMCAPositions.length} MCA{activeLOCPositions.length > 0 && <span style={{ color: '#64b5f6' }}> · {activeLOCPositions.length} LOC</span>}{paidOffPositions.length > 0 && <span style={{ fontSize: 13, color: 'rgba(232,232,240,0.4)' }}> · {paidOffPositions.length} paid off</span>}</div>
+          <div style={S.statValue('#EAD068')}>{activeMCAPositions.length} MCA{activeTrueSplitPositions.length > 0 && <span style={{ color: '#ce93d8' }}> · {activeTrueSplitPositions.length} Split</span>}{activeLOCPositions.length > 0 && <span style={{ color: '#64b5f6' }}> · {activeLOCPositions.length} LOC</span>}{paidOffPositions.length > 0 && <span style={{ fontSize: 13, color: 'rgba(232,232,240,0.4)' }}> · {paidOffPositions.length} paid off</span>}</div>
         </div>
         <div style={{ ...S.stat, flex: 1 }}>
           <div style={S.statLabel}>Monthly MCA Total</div>
@@ -796,6 +798,8 @@ function MCATab({ a, positions, setPositions, excludedIds, setExcludedIds, other
               <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
                 {(p.position_type || 'mca').toLowerCase() === 'loc'
                   ? <span style={{ ...S.tag('cyan'), background: 'rgba(100,181,246,0.15)', color: '#64b5f6', borderColor: 'rgba(100,181,246,0.4)' }}>LINE OF CREDIT</span>
+                  : (p.position_type || 'mca').toLowerCase() === 'true_split'
+                  ? <span style={{ ...S.tag('cyan'), background: 'rgba(206,147,216,0.15)', color: '#ce93d8', borderColor: 'rgba(206,147,216,0.4)' }}>TRUE SPLIT</span>
                   : <span style={S.tag(p.flag === 'undisclosed' ? 'red' : p.flag === 'default_modified' ? 'red' : p.flag === 'modified' ? 'amber' : p.flag === 'manual' ? 'cyan' : 'teal')}>{p.flag === 'default_modified' ? '⚠ default modified' : p.flag === 'manual' ? '＋ manual' : p.flag || 'standard'}</span>
                 }
                 {(p.isEdited || p.isManual) && <span style={S.tag('cyan')}>(edited)</span>}
@@ -827,7 +831,7 @@ function MCATab({ a, positions, setPositions, excludedIds, setExcludedIds, other
                 </div>
               ) : (
                 <div style={{ textAlign: 'right' }}>
-                  <div style={{ fontSize: 20, color: (p.position_type || 'mca').toLowerCase() === 'loc' ? '#64b5f6' : '#ef9a9a' }}>{fmt(p.estimated_monthly_total)}<span style={{ fontSize: 12, color: 'rgba(232,232,240,0.4)' }}>/mo</span></div>
+                  <div style={{ fontSize: 20, color: (p.position_type || 'mca').toLowerCase() === 'loc' ? '#64b5f6' : (p.position_type || 'mca').toLowerCase() === 'true_split' ? '#ce93d8' : '#ef9a9a' }}>{fmt(p.estimated_monthly_total)}<span style={{ fontSize: 12, color: 'rgba(232,232,240,0.4)' }}>/mo{(p.position_type || 'mca').toLowerCase() === 'true_split' ? ' (est)' : ''}</span></div>
                   <div style={{ fontSize: 13, color: 'rgba(232,232,240,0.5)' }}>{fmt(p.payment_amount_current || p.payment_amount)} × {p.payments_detected} pmts</div>
                 </div>
               )}
@@ -879,6 +883,17 @@ function MCATab({ a, positions, setPositions, excludedIds, setExcludedIds, other
               <span style={{ marginLeft: 8 }}>
                 {p.current_draw_balance ? <>Draw balance: <span style={{ color: '#64b5f6' }}>{fmt(p.current_draw_balance)}</span></> : 'Draw balance not detected'}
                 {' · '}Not included in MCA debt service · Tracked separately in DSR
+              </span>
+            </div>
+          )}
+          {/* True Split info */}
+          {(p.position_type || 'mca').toLowerCase() === 'true_split' && (
+            <div style={{ background: 'rgba(206,147,216,0.08)', border: '1px solid rgba(206,147,216,0.2)', borderRadius: 6, padding: '8px 12px', marginBottom: 10, fontSize: 12, color: 'rgba(232,232,240,0.55)' }}>
+              <span style={{ color: '#ce93d8' }}>📊 True Split — Revenue-Based MCA</span>
+              <span style={{ marginLeft: 8 }}>
+                {p.estimated_split_percentage ? <><span style={{ color: '#ce93d8' }}>~{p.estimated_split_percentage}%</span> of daily receipts</> : 'Split % not detected'}
+                {p.avg_daily_payment ? <> · Avg daily: <span style={{ color: '#ce93d8' }}>{fmt(p.avg_daily_payment)}</span></> : ''}
+                {' · '}Payment varies with revenue · Built-in reconciliation
               </span>
             </div>
           )}
