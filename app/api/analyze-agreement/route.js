@@ -101,6 +101,13 @@ The prior balance payoff is often listed on the funding instructions page, closi
 RULE 4 — SPECIFIED PERCENTAGE:
 Read the specified percentage (also called "specified receivable percentage" or "specified daily/weekly percentage") directly from the contract. This is usually stated as a percentage like "49%" or "7.7%" or "11.5%". It represents the percentage of the merchant's receivables that the funder is entitled to. Do NOT confuse this with the factor rate or holdback percentage.
 
+REVERSE MCA / FIXED INSTALLMENT EXCEPTION:
+If the agreement is a reverse MCA (funder advances money periodically to the merchant, merchant repays via fixed installments) and there is NO specified percentage of receivables — the funder uses fixed payment amounts instead of a revenue percentage — then set:
+• specified_percentage: "N/A — Fixed Installment"
+• In financial_terms, set specified_receivable_percentage: 0
+• Add a note in extraction_notes: "Reverse MCA — uses fixed installment payments, not a percentage of receivables"
+This commonly applies to UFCE / First Gate Finance LLC agreements, which specify a fixed daily/weekly payment amount rather than a percentage of future receivables. Do NOT leave specified_percentage as null or blank — always set it to "N/A — Fixed Installment" when no percentage exists in a reverse MCA contract.
+
 RULE 5 — UCC LIEN DETECTION (CRITICAL — DO NOT MISS):
 Search the ENTIRE agreement for ANY of these indicators of a UCC lien or security interest:
 • "UCC" or "UCC-1" or "UCC filing" anywhere in the document

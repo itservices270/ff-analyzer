@@ -66,9 +66,11 @@ TRUE REVENUE — ALWAYS COUNT (for home care / healthcare businesses):
 EXCLUDE FROM HOME CARE REVENUE (NOT income):
 • Any credit from a known reverse MCA funder (UFCE, Greenbox, SOS Capital, etc.) → type: "reverse_mca_advance", is_excluded: true. These are LOAN PROCEEDS, not revenue.
 • "HOMEWELL SEN2024 DES:CASH CONC" or similar franchise cash concentration entries → type: "transfer", is_excluded: true. This is the FRANCHISOR pulling money OUT, not revenue IN.
-• "RETURN OF POSTED CHECK / ITEM" → returned debits, not revenue.
-• "BKOFAMERICA BC FR CHKG" or similar inter-account transfers → type: "transfer", is_excluded: true.
-• Any Zelle deposit from an owner/principal name with memo referencing personal loan to business → type: "transfer", is_excluded: true.
+• "RETURN OF POSTED CHECK / ITEM" or "RETURN POSTED ITEM" or "RETURNED ITEM" or any credit containing "RETURN" + "ITEM" or "RETURN" + "CHECK" → type: "returned_item", is_excluded: true. These are bounced checks/debits returning to the account, NOT revenue. Sum ALL returned items and exclude them.
+• "BKOFAMERICA BC FR CHKG" or any inter-account transfer between the merchant's own bank accounts (look for "BC FR", "TRANSFER FROM", "XFER FROM", same-bank credit with matching debit pattern) → type: "transfer", is_excluded: true.
+• Any Zelle deposit from an owner/principal name or guarantor name (match against guarantor names in the file) → type: "owner_loan", is_excluded: true. Owner loans to the business are NOT revenue — they are capital injections.
+• Any deposit labeled "LOAN" from an individual (not a funder) → type: "owner_loan", is_excluded: true.
+• Inter-account transfers between the merchant's own accounts at the same bank → type: "transfer", is_excluded: true. Look for credits that match debits of the same amount on the same or adjacent day from the same bank.
 
 NOT MCA — DO NOT CLASSIFY AS MCA POSITIONS (for home care businesses):
 • "BDB DIRECTAX INC DES:TAX COL" → payroll tax collection, NOT MCA
@@ -106,9 +108,16 @@ REVERSE MCA DETECTION RULE:
 If the SAME ACH originator (matched by company ID, phone number, or name) appears as BOTH a credit deposit AND a debit withdrawal in the same or adjacent statement periods → this is a REVERSE MCA.
 Additional signal: Credit entries labeled DC, DISBURSE, ADVANCE, ACH CR from an entity that also debits the account.
 
+CRITICAL — UFCE REVERSE MCA CREDIT EXCLUSION:
+UFCE credits appear as "UFCE [phone] DES:DC" (DC = Disbursement Credit). These are ADVANCE PROCEEDS from the reverse MCA, NOT revenue.
+• Every "UFCE" credit with "DES:DC" or "DC" transaction code = type: "reverse_mca_advance", is_excluded: true
+• UFCE debits appear as "UFCE [phone] DES:P" (P = Payment) or "DES:T" (T = monthly fee)
+• If you see UFCE credits in the deposits and UFCE debits in withdrawals, ALL UFCE credits are advance disbursements — exclude every single one from revenue
+• Failing to exclude UFCE DES:DC credits will overstate revenue by $5K-$20K per occurrence
+
 When a reverse MCA is detected:
 • Set position_type: "reverse_mca"
-• ALL credit deposits from this funder must be classified as type: "reverse_mca_advance", is_excluded: true
+• ALL credit deposits from this funder must be classified as type: "reverse_mca_advance", is_excluded: true — this includes EVERY credit with "DES:DC", "DES:DISBURSE", "DES:ADVANCE", or any ACH credit from the funder
 • These credits are LOAN PROCEEDS, not business revenue — failing to exclude them dramatically overstates revenue
 • Track: total_advances_received (sum of all credits from this funder), total_payments_made (sum of all debits)
 
@@ -286,6 +295,18 @@ DEDUPLICATION RULE: Before finalizing mca_positions, check for duplicates:
 • Merchant Marketplace: "Merchant Market8882711420" — see above for multiple position handling
 • OnDeck Capital: "ONDECK CAPITAL" — weekly
 • Newtek: "Newtek S Bus Fin" — daily/weekly
+• Itria Ventures: "Itria Ven-Mercha" — see below for multiple position handling
+
+### Itria Ventures — MULTIPLE POSITION DETECTION:
+Itria Ventures commonly runs multiple simultaneous positions on the same merchant. The ACH descriptor includes a Trans# (transaction reference number) that distinguishes positions:
+• Different Trans# reference numbers = DIFFERENT positions — never combine them
+• Example: "Itria Ven-Mercha Trans#12345" at $2,100/wk = Position A
+• Example: "Itria Ven-Mercha Trans#67890" at $1,800/wk = Position B
+• Even if both Trans# references show the SAME payment amount, different Trans# = different positions
+• The payment frequency is typically 3x/week (Mon-Wed-Fri), so multiply per-payment amount × 3 to get weekly equivalent
+• If you see multiple distinct Trans# series in Itria debits, output SEPARATE position objects for each Trans# series
+• Label them "Itria Ventures (Position A)", "Itria Ventures (Position B)", etc.
+• Include the Trans# reference in the notes field for each position
 
 ### NOT-MCA EXCLUSIONS (do NOT classify as MCA positions):
 • FleetCor: "FLEETCOR FUNDING" — fleet fuel cards. Classify as vehicle_fleet expense, NOT MCA.
@@ -313,6 +334,15 @@ Do NOT mark as active unless payments appear in the most recent month.
 • If total_paid_to_date is unknown, estimate: weekly_payment × estimated_weeks_remaining
 • Cross-check: if your calculated balance exceeds the purchased_amount, you made an arithmetic error — recalculate
 • Example: TBF at $16,312.50/wk, started ~Nov 2025, ~24 weeks remaining ≈ $391,500 balance (NOT $848,250)
+
+## IRREGULAR PAYMENT HANDLING (OnDeck and similar):
+Some funders (especially OnDeck) have payment amounts that vary slightly from week to week due to interest recalculation, partial weeks, or payment timing. When a funder's payments are NOT a fixed amount:
+• payment_amount_current = the MOST RECENT CONSISTENT payment amount (the amount that appears most frequently in the last 30 days, i.e., the MODE, not the average)
+• Do NOT average all historical payments — this produces a misleading number that doesn't match any actual debit
+• If the most recent 3+ payments are all the same amount, use that amount as payment_amount_current
+• If payments truly vary every time (no consistent amount), use the most recent payment as payment_amount_current and note: "Variable payment — using most recent amount"
+• For balance estimation with irregular payments: use payment_amount_current × estimated_weeks_remaining, NOT an averaged amount
+• Example: OnDeck debits of $4,200, $4,200, $4,150, $4,200, $3,800 → payment_amount_current = $4,200 (mode), NOT $4,110 (average)
 
 ## POSITION SEPARATION RULES (MANDATORY):
 • The Merchant Marketplace commonly has MULTIPLE separate positions with DIFFERENT weekly payment amounts
@@ -823,6 +853,7 @@ function fixExcludedMCAProceeds(analysis) {
     'libertas', 'forward fin', 'merchant marketplace', 'tmm',
     'bizfi', 'credibly', 'kapitus', 'yellowstone', 'rapid', 'can capital',
     'square capital', // Note: "Square Capital" IS an MCA funder, not Square payments
+    'itria', 'suncoast',
     // Reverse MCA funders
     'ufce', 'greenbox', 'sos capital', 'stream capital', 'expansion cap',
     '1west', 'mantis', 'everest', 'velocity cap', 'cresthill', 'reliant funding'
