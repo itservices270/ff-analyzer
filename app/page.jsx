@@ -2,6 +2,7 @@
 import React, { useState, useEffect, useCallback, useRef, useMemo } from 'react';
 import { INDUSTRY_PROFILES, buildIndustryPromptBlock } from './data/industry-profiles';
 import NegotiationChat from './components/NegotiationChat';
+import { scoreAllPositions, detectSameDayStack, calculateAdjustedTAD } from '../lib/scoringEngine';
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 const fmt = (n) => '$' + (parseFloat(n) || 0).toLocaleString('en-US', { minimumFractionDigits: 0, maximumFractionDigits: 0 });
@@ -687,15 +688,17 @@ function MCATab({ a, positions, setPositions, excludedIds, setExcludedIds, other
   const nonExcluded = positions.filter(p => !excludedIds.includes(p._id));
   const activePositions = nonExcluded.filter(p => p.status !== 'paid_off');
   const paidOffPositions = nonExcluded.filter(p => p.status === 'paid_off');
-  const activeMCAPositions = activePositions.filter(p => { const t = (p.position_type || 'mca').toLowerCase(); return t !== 'loc' && t !== 'true_split'; });
+  const activeMCAPositions = activePositions.filter(p => { const t = (p.position_type || 'mca').toLowerCase(); return t !== 'loc' && t !== 'true_split' && t !== 'reverse_mca'; });
   const activeLOCPositions = activePositions.filter(p => (p.position_type || 'mca').toLowerCase() === 'loc');
   const activeTrueSplitPositions = activePositions.filter(p => (p.position_type || 'mca').toLowerCase() === 'true_split');
+  const activeReverseMCAPositions = activePositions.filter(p => (p.position_type || 'mca').toLowerCase() === 'reverse_mca');
   const excludedPositions = positions.filter(p => excludedIds.includes(p._id));
   const other = a.other_debt_service || [];
   const revenue = calcAdjustedRevenue(a, depositOverrides);
 
   const totalMCAMonthly = activeMCAPositions.reduce((s, p) => s + (p.estimated_monthly_total || 0), 0)
-    + activeTrueSplitPositions.reduce((s, p) => s + (p.estimated_monthly_total || (p.avg_daily_payment || 0) * 22 || 0), 0);
+    + activeTrueSplitPositions.reduce((s, p) => s + (p.estimated_monthly_total || (p.avg_daily_payment || 0) * 22 || 0), 0)
+    + activeReverseMCAPositions.reduce((s, p) => s + (p.estimated_monthly_total || 0), 0);
   const totalLOCMonthly = activeLOCPositions.reduce((s, p) => s + (p.estimated_monthly_total || 0), 0);
   const activeOtherDebt = other.filter((_, i) => !(otherExcludedIds || []).includes(i));
   const totalOtherMonthly = activeOtherDebt.reduce((s, o) => s + (o.monthly_total || 0), 0);
@@ -703,6 +706,24 @@ function MCATab({ a, positions, setPositions, excludedIds, setExcludedIds, other
   const dsrPercent = (totalAllDebt / revenue) * 100;
   const mcaOnlyDSR = (totalMCAMonthly / revenue) * 100;
   const locDSR = (totalLOCMonthly / revenue) * 100;
+
+  // Funder intelligence scoring
+  const scoredPositions = useMemo(() => {
+    const agMap = {};
+    (agreementResults || []).forEach(ar => {
+      const d = ar.analysis || ar;
+      if (d.funder_name) agMap[d.funder_name] = d;
+    });
+    return scoreAllPositions(activePositions, agMap);
+  }, [activePositions, agreementResults]);
+  const sameDayStacks = useMemo(() => detectSameDayStack(activePositions), [activePositions]);
+
+  // Build funder intel lookup by _id
+  const funderIntelMap = useMemo(() => {
+    const map = {};
+    scoredPositions.forEach(sp => { if (sp._id && sp.funderIntel) map[sp._id] = sp.funderIntel; });
+    return map;
+  }, [scoredPositions]);
 
   // Payment compliance: contract vs actual cross-reference (MCA only — LOCs have variable payments)
   const compliance = buildPaymentCompliance(activeMCAPositions, agreementResults, a.monthly_breakdown);
@@ -763,7 +784,7 @@ function MCATab({ a, positions, setPositions, excludedIds, setExcludedIds, other
       <div style={S.row}>
         <div style={{ ...S.stat, flex: 1 }}>
           <div style={S.statLabel}>Active Positions</div>
-          <div style={S.statValue('#EAD068')}>{activeMCAPositions.length} MCA{activeTrueSplitPositions.length > 0 && <span style={{ color: '#ce93d8' }}> · {activeTrueSplitPositions.length} Split</span>}{activeLOCPositions.length > 0 && <span style={{ color: '#64b5f6' }}> · {activeLOCPositions.length} LOC</span>}{paidOffPositions.length > 0 && <span style={{ fontSize: 13, color: 'rgba(232,232,240,0.4)' }}> · {paidOffPositions.length} paid off</span>}</div>
+          <div style={S.statValue('#EAD068')}>{activeMCAPositions.length} MCA{activeReverseMCAPositions.length > 0 && <span style={{ color: '#ffb74d' }}> · {activeReverseMCAPositions.length} Rev</span>}{activeTrueSplitPositions.length > 0 && <span style={{ color: '#ce93d8' }}> · {activeTrueSplitPositions.length} Split</span>}{activeLOCPositions.length > 0 && <span style={{ color: '#64b5f6' }}> · {activeLOCPositions.length} LOC</span>}{paidOffPositions.length > 0 && <span style={{ fontSize: 13, color: 'rgba(232,232,240,0.4)' }}> · {paidOffPositions.length} paid off</span>}</div>
         </div>
         <div style={{ ...S.stat, flex: 1 }}>
           <div style={S.statLabel}>Monthly MCA Total</div>
@@ -783,6 +804,23 @@ function MCATab({ a, positions, setPositions, excludedIds, setExcludedIds, other
         <span style={{ fontSize: 11, color: 'rgba(232,232,240,0.35)' }}>Excluded positions are hidden from UW Calculator export</span>
       </div>
 
+      {/* Same-Day Stack Warning */}
+      {sameDayStacks.length > 0 && sameDayStacks.map((stack, i) => (
+        <div key={i} style={{ background: 'rgba(255,183,77,0.08)', border: '1px solid rgba(255,183,77,0.25)', borderRadius: 8, padding: '10px 14px', marginBottom: 12, fontSize: 12 }}>
+          <div style={{ color: '#ffb74d', fontWeight: 600, marginBottom: 4 }}>⚠️ SAME-DAY STACK DETECTED</div>
+          <div style={{ color: 'rgba(232,232,240,0.6)', lineHeight: 1.6 }}>
+            <strong>{stack.funderA}</strong> and <strong>{stack.funderB}</strong> both advanced funds within {stack.daysDiff} business day{stack.daysDiff !== 1 ? 's' : ''} ({stack.dateA} and {stack.dateB}).
+          </div>
+          <div style={{ color: 'rgba(232,232,240,0.4)', fontSize: 11, marginTop: 6, lineHeight: 1.5, fontStyle: 'italic' }}>
+            Internal intelligence (not for funder communication):<br/>
+            • Neither funder had accurate DSR at underwriting<br/>
+            • Both anti-stacking clauses potentially void — mutual violation<br/>
+            • ISO conduct flag — simultaneous approvals suggest coordinated timing<br/>
+            • Enforceability reduced for both positions
+          </div>
+        </div>
+      ))}
+
       {activePositions.length === 0 && paidOffPositions.length === 0 && (
         <div style={{ color: 'rgba(232,232,240,0.4)', fontSize: 13, padding: '16px 0' }}>No MCA positions detected</div>
       )}
@@ -800,6 +838,8 @@ function MCATab({ a, positions, setPositions, excludedIds, setExcludedIds, other
                   ? <span style={{ ...S.tag('cyan'), background: 'rgba(100,181,246,0.15)', color: '#64b5f6', borderColor: 'rgba(100,181,246,0.4)' }}>LINE OF CREDIT</span>
                   : (p.position_type || 'mca').toLowerCase() === 'true_split'
                   ? <span style={{ ...S.tag('cyan'), background: 'rgba(206,147,216,0.15)', color: '#ce93d8', borderColor: 'rgba(206,147,216,0.4)' }}>TRUE SPLIT</span>
+                  : (p.position_type || 'mca').toLowerCase() === 'reverse_mca'
+                  ? <span style={{ ...S.tag('amber'), background: 'rgba(255,183,77,0.15)', color: '#ffb74d', borderColor: 'rgba(255,183,77,0.4)' }}>⚠️ REVERSE MCA</span>
                   : <span style={S.tag(p.flag === 'undisclosed' ? 'red' : p.flag === 'default_modified' ? 'red' : p.flag === 'modified' ? 'amber' : p.flag === 'manual' ? 'cyan' : 'teal')}>{p.flag === 'default_modified' ? '⚠ default modified' : p.flag === 'manual' ? '＋ manual' : p.flag || 'standard'}</span>
                 }
                 {(p.isEdited || p.isManual) && <span style={S.tag('cyan')}>(edited)</span>}
@@ -831,7 +871,7 @@ function MCATab({ a, positions, setPositions, excludedIds, setExcludedIds, other
                 </div>
               ) : (
                 <div style={{ textAlign: 'right' }}>
-                  <div style={{ fontSize: 20, color: (p.position_type || 'mca').toLowerCase() === 'loc' ? '#64b5f6' : (p.position_type || 'mca').toLowerCase() === 'true_split' ? '#ce93d8' : '#ef9a9a' }}>{fmt(p.estimated_monthly_total)}<span style={{ fontSize: 12, color: 'rgba(232,232,240,0.4)' }}>/mo{(p.position_type || 'mca').toLowerCase() === 'true_split' ? ' (est)' : ''}</span></div>
+                  <div style={{ fontSize: 20, color: (p.position_type || 'mca').toLowerCase() === 'loc' ? '#64b5f6' : (p.position_type || 'mca').toLowerCase() === 'true_split' ? '#ce93d8' : (p.position_type || 'mca').toLowerCase() === 'reverse_mca' ? '#ffb74d' : '#ef9a9a' }}>{fmt(p.estimated_monthly_total)}<span style={{ fontSize: 12, color: 'rgba(232,232,240,0.4)' }}>/mo{(p.position_type || 'mca').toLowerCase() === 'true_split' ? ' (est)' : ''}</span></div>
                   <div style={{ fontSize: 13, color: 'rgba(232,232,240,0.5)' }}>{fmt(p.payment_amount_current || p.payment_amount)} × {p.payments_detected} pmts</div>
                 </div>
               )}
@@ -897,6 +937,18 @@ function MCATab({ a, positions, setPositions, excludedIds, setExcludedIds, other
               </span>
             </div>
           )}
+          {/* Reverse MCA info */}
+          {(p.position_type || 'mca').toLowerCase() === 'reverse_mca' && (
+            <div style={{ background: 'rgba(255,183,77,0.08)', border: '1px solid rgba(255,183,77,0.2)', borderRadius: 6, padding: '8px 12px', marginBottom: 10, fontSize: 12, color: 'rgba(232,232,240,0.55)' }}>
+              <span style={{ color: '#ffb74d' }}>⚠️ Reverse MCA — Revenue Loan</span>
+              <span style={{ marginLeft: 8 }}>
+                {p.total_advances_received ? <>Advances received: <span style={{ color: '#ffb74d' }}>{fmt(p.total_advances_received)}</span></> : ''}
+                {p.total_payments_made ? <> · Paid back: <span style={{ color: '#81c784' }}>{fmt(p.total_payments_made)}</span></> : ''}
+                {p.advance_stopped ? <> · <span style={{ color: '#ef9a9a' }}>Advances STOPPED</span></> : <> · <span style={{ color: '#ffb74d' }}>Advances active</span></>}
+                {' · '}No reconciliation clause · Funder credits excluded from revenue
+              </span>
+            </div>
+          )}
           {/* Advance deposit correlation */}
           {p.advance_deposit_date && p.advance_deposit_amount > 0 && (
             <div style={{ background: 'rgba(0,229,255,0.06)', border: '1px solid rgba(0,229,255,0.15)', borderRadius: 6, padding: '8px 12px', marginBottom: 10, fontSize: 12, color: 'rgba(232,232,240,0.55)' }}>
@@ -959,6 +1011,47 @@ function MCATab({ a, positions, setPositions, excludedIds, setExcludedIds, other
           {(p.first_payment_date || p.last_payment_date) && (
             <div style={{ fontSize: 11, color: 'rgba(232,232,240,0.35)', marginTop: 6 }}>{p.first_payment_date} → {(!p.last_payment_date || p.last_payment_date === p.first_payment_date || p.last_payment_date === 'present') && p.status !== 'paid_off' ? 'present' : p.last_payment_date}</div>
           )}
+          {/* Funder Intelligence */}
+          {(() => {
+            const fi = funderIntelMap[p._id];
+            if (!fi) return null;
+            const q = fi.quadrant;
+            const qColors = { red: '#ef5350', orange: '#ff9800', amber: '#ffd54f', green: '#4caf50' };
+            return (
+              <details style={{ marginTop: 8, marginBottom: 8 }}>
+                <summary style={{ cursor: 'pointer', fontSize: 12, color: 'rgba(232,232,240,0.5)', userSelect: 'none', listStyle: 'none', display: 'flex', alignItems: 'center', gap: 6 }}>
+                  <span style={{ fontSize: 10, transition: 'transform 0.2s', display: 'inline-block' }}>▶</span>
+                  <span>Funder Intelligence</span>
+                  <span style={{ marginLeft: 'auto', fontSize: 11, padding: '2px 8px', borderRadius: 4, background: `${qColors[q.color]}22`, color: qColors[q.color], border: `1px solid ${qColors[q.color]}44` }}>{q.label}</span>
+                </summary>
+                <div style={{ background: 'rgba(255,255,255,0.02)', border: '1px solid rgba(255,255,255,0.06)', borderRadius: 6, padding: '10px 12px', marginTop: 6, fontSize: 12 }}>
+                  <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: 10, marginBottom: 8 }}>
+                    <div>
+                      <div style={{ fontSize: 10, color: 'rgba(232,232,240,0.4)', marginBottom: 2 }}>Enforceability</div>
+                      <div style={{ fontSize: 16, color: fi.enforceability >= 6 ? '#ef9a9a' : '#81c784' }}>{fi.enforceability}<span style={{ fontSize: 11, color: 'rgba(232,232,240,0.3)' }}>/10</span></div>
+                    </div>
+                    <div>
+                      <div style={{ fontSize: 10, color: 'rgba(232,232,240,0.4)', marginBottom: 2 }}>Aggressiveness</div>
+                      <div style={{ fontSize: 16, color: fi.aggressiveness >= 6 ? '#ef9a9a' : '#81c784' }}>{fi.aggressiveness}<span style={{ fontSize: 11, color: 'rgba(232,232,240,0.3)' }}>/10</span></div>
+                    </div>
+                    <div>
+                      <div style={{ fontSize: 10, color: 'rgba(232,232,240,0.4)', marginBottom: 2 }}>Recovery Stake</div>
+                      <div style={{ fontSize: 16, color: fi.recoveryStake >= 6 ? '#ef9a9a' : '#81c784' }}>{fi.recoveryStake}<span style={{ fontSize: 11, color: 'rgba(232,232,240,0.3)' }}>/10</span></div>
+                    </div>
+                  </div>
+                  <div style={{ fontSize: 11, color: qColors[q.color], marginBottom: 6 }}>{q.description}</div>
+                  {fi.funderRecord?.funderIntelGrade && (
+                    <div style={{ fontSize: 11, color: 'rgba(232,232,240,0.4)', marginBottom: 4 }}>FunderIntel Grade: {fi.funderRecord.funderIntelGrade}</div>
+                  )}
+                  {fi.knownBehavior && fi.knownBehavior.length > 0 && (
+                    <div style={{ fontSize: 11, color: 'rgba(232,232,240,0.4)', lineHeight: 1.5, marginTop: 4 }}>
+                      {fi.knownBehavior.map((b, i) => <div key={i}>• {b}</div>)}
+                    </div>
+                  )}
+                </div>
+              </details>
+            );
+          })()}
           {/* Enrollment checkbox */}
           {p.status !== 'paid_off' && (
             <div style={{ marginTop: 10, background: 'rgba(0,229,255,0.04)', border: '1px solid rgba(0,229,255,0.12)', borderRadius: 6, padding: '8px 12px' }}>
@@ -1494,6 +1587,40 @@ function NegotiationTab({ a, positions, excludedIds, otherExcludedIds, depositOv
                 "The average free cash figure reflects gross revenue minus scheduled MCA payments. It does not account for extraordinary cash events, payment timing gaps, returned items, or the compounding effect of {(a.mca_positions||[]).length} simultaneous daily/weekly pulls. The bank statement ending balance of {fmtD(endBal)} and {totalDaysNeg} days in negative territory during the statement period is objective proof of operational insolvency — not a projection, but a documented reality. A merchant cannot be 'flush with cash' and simultaneously overdrawn."
               </div>
             </div>
+          </div>
+        );
+      })()}
+
+      {/* Deal Sequencing — Funder Intelligence */}
+      {(() => {
+        const agMap = {};
+        (agreementResults || []).forEach(ar => {
+          const d = ar.analysis || ar;
+          if (d.funder_name) agMap[d.funder_name] = d;
+        });
+        const scored = scoreAllPositions(activePositions, agMap);
+        const qColors = { red: '#ef5350', orange: '#ff9800', amber: '#ffd54f', green: '#4caf50' };
+        if (scored.length === 0) return null;
+        return (
+          <div style={S.card}>
+            <div style={S.sectionTitle}>Deal Sequencing — Recommended Negotiation Order</div>
+            <div style={{ fontSize: 11, color: 'rgba(232,232,240,0.4)', marginBottom: 10 }}>Ranked by enforceability × aggressiveness × recovery stake composite scoring</div>
+            {scored.map((sp, i) => {
+              const fi = sp.funderIntel;
+              if (!fi) return null;
+              const q = fi.quadrant;
+              return (
+                <div key={sp._id || i} style={{ display: 'flex', alignItems: 'center', gap: 12, padding: '8px 0', borderBottom: '1px solid rgba(255,255,255,0.04)' }}>
+                  <div style={{ width: 28, height: 28, borderRadius: '50%', background: `${qColors[q.color]}22`, border: `1px solid ${qColors[q.color]}44`, display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 13, color: qColors[q.color], fontWeight: 600, flexShrink: 0 }}>{i + 1}</div>
+                  <div style={{ flex: 1, minWidth: 0 }}>
+                    <div style={{ fontSize: 13, color: '#e8e8f0' }}>{sp.funder_name}</div>
+                    <div style={{ fontSize: 11, color: 'rgba(232,232,240,0.4)' }}>{q.description}</div>
+                  </div>
+                  <div style={{ fontSize: 11, padding: '3px 10px', borderRadius: 4, background: `${qColors[q.color]}15`, color: qColors[q.color], border: `1px solid ${qColors[q.color]}33`, whiteSpace: 'nowrap', flexShrink: 0 }}>{q.label}</div>
+                  <div style={{ fontSize: 12, color: 'rgba(232,232,240,0.5)', textAlign: 'right', flexShrink: 0, width: 40 }}>{fi.composite.toFixed(1)}</div>
+                </div>
+              );
+            })}
           </div>
         );
       })()}

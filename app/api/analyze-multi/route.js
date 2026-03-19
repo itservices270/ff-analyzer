@@ -54,6 +54,64 @@ TRUE REVENUE — ALWAYS COUNT (never exclude these):
 • "ARAMARK" → Food service operator. TRUE REVENUE.
 • "FIRST DATA" → Card processing settlement. TRUE REVENUE.
 
+## HOME CARE / HEALTHCARE BUSINESS REVENUE RULES:
+
+TRUE REVENUE — ALWAYS COUNT (for home care / healthcare businesses):
+• "HomeWell Care Se DES:Settlement" → franchisor commission/settlement payments. TRUE REVENUE.
+• "MERCHANT BANKCD DES:DEPOSIT" → card processing (net of chargebacks). TRUE REVENUE.
+• "TRIWEST VA VT6 DES:HCCLAIMPMT" → VA healthcare claim payments. TRUE REVENUE.
+• Any "[insurer] DES:HCCLAIMPMT" → health insurance claim reimbursements. TRUE REVENUE.
+• "Viventium HCM Pa DES:DD CR" → payroll reimbursement credits. TRUE REVENUE.
+
+EXCLUDE FROM HOME CARE REVENUE (NOT income):
+• Any credit from a known reverse MCA funder (UFCE, Greenbox, SOS Capital, etc.) → type: "reverse_mca_advance", is_excluded: true. These are LOAN PROCEEDS, not revenue.
+• "HOMEWELL SEN2024 DES:CASH CONC" or similar franchise cash concentration entries → type: "transfer", is_excluded: true. This is the FRANCHISOR pulling money OUT, not revenue IN.
+• "RETURN OF POSTED CHECK / ITEM" → returned debits, not revenue.
+• "BKOFAMERICA BC FR CHKG" or similar inter-account transfers → type: "transfer", is_excluded: true.
+• Any Zelle deposit from an owner/principal name with memo referencing personal loan to business → type: "transfer", is_excluded: true.
+
+NOT MCA — DO NOT CLASSIFY AS MCA POSITIONS (for home care businesses):
+• "BDB DIRECTAX INC DES:TAX COL" → payroll tax collection, NOT MCA
+• "VIVENTIUM HCM DES:BILLING" → HR software billing, NOT MCA
+• "QUINABLE INC DEP DES:PAYMENTS" → staffing/agency payments, NOT MCA
+• "Tapcheck Inc" → earned wage access, NOT MCA
+• "WISE US INC DES:WISE" → on-call staffing payments, NOT MCA
+• "Paradigm Senior DES:Bill.com" → vendor/referral fee, NOT MCA
+• "AMTRUST NA DES:PAYMENT" → insurance premium, NOT MCA
+• "AFLAC COLUMBUS DES:ACHPMT" → insurance premium, NOT MCA
+• "LEGALSHIELD" → legal subscription, NOT MCA
+• "LIGHTSTREAM DES:LOAN PMTS" → personal auto/equipment loan, NOT MCA (classify as other_debt_service)
+• "FIRST CITIZENS DES:PAYMENTS" → personal loan/equipment, NOT MCA (classify as other_debt_service)
+
+DSR NOTE FOR HOME CARE:
+When calculating DSR for home care businesses, add a flag_and_alert with severity: "warning" and message: "Home care business — payroll typically represents 60-70% of gross revenue. DSR on gross revenue may understate true burden on free cash flow after labor costs."
+
+## REVERSE MCA DETECTION — EXCLUDE ADVANCE CREDITS FROM REVENUE:
+
+KNOWN REVERSE MCA FUNDERS (detect by ACH descriptor):
+• UFCE / United First Capital Experts: credit "UFCE" (DC=advance), debit "UFCE" (P=payment, T=$79.99 monthly fee). Actual lender: First Gate Finance LLC.
+• Greenbox Capital: credit/debit "GREENBOX"
+• SOS Capital: credit/debit "SOS CAPITAL"
+• Stream Capital: credit/debit "STREAM CAPITAL"
+• Expansion Capital Group: credit/debit "EXPANSION CAP"
+• 1West Capital: credit/debit "1WEST"
+• Libertas Funding: credit/debit "LIBERTAS"
+• Mantis Funding: credit/debit "MANTIS"
+• Everest Business Funding: credit/debit "EVEREST"
+• Velocity Capital Group: credit/debit "VELOCITY CAP"
+• Cresthill Capital: credit/debit "CRESTHILL"
+• Reliant Funding: credit/debit "RELIANT FUNDING"
+
+REVERSE MCA DETECTION RULE:
+If the SAME ACH originator (matched by company ID, phone number, or name) appears as BOTH a credit deposit AND a debit withdrawal in the same or adjacent statement periods → this is a REVERSE MCA.
+Additional signal: Credit entries labeled DC, DISBURSE, ADVANCE, ACH CR from an entity that also debits the account.
+
+When a reverse MCA is detected:
+• Set position_type: "reverse_mca"
+• ALL credit deposits from this funder must be classified as type: "reverse_mca_advance", is_excluded: true
+• These credits are LOAN PROCEEDS, not business revenue — failing to exclude them dramatically overstates revenue
+• Track: total_advances_received (sum of all credits from this funder), total_payments_made (sum of all debits)
+
 EXCLUSIONS — NEVER COUNT AS REVENUE:
 • MCA advance wire proceeds: Large credits labeled with funder names (MERCHANT MARKETPLACE, THE MERCHANT MARKETP, TBF, TBF GRP, ROWAN ADVANCE, ONDECK, NEWTEK, etc.) — these are ADVANCE PROCEEDS, not revenue
 • ANY credit containing the keywords: "WIRE", "ADVANCE", "GRP", "FUNDING", "CAPITAL", "LOAN", "PROCEEDS" — classify as type "loan" with is_excluded: true unless it clearly matches a known revenue processor (Square, Cantaloupe, USA Technologies, etc.)
@@ -384,7 +442,7 @@ If you cannot find an explicit "Average Daily Balance" line, you MUST calculate 
     {
       "funder_name": "string — append (Position A), (Position B) if same funder has multiple",
       "bank_debit_description": "string — exact ACH descriptor from bank",
-      "position_type": "mca|loc|true_split — default 'mca'. Set to 'loc' for lines of credit, 'true_split' for revenue-percentage splits (see detection rules above)",
+      "position_type": "mca|loc|true_split|reverse_mca — default 'mca'. Set to 'loc' for lines of credit, 'true_split' for revenue-percentage splits, 'reverse_mca' for reverse MCAs where funder both credits AND debits the account",
       "payment_amount": 0.00,
       "payment_amount_current": 0.00,
       "payment_amount_original": 0.00,
@@ -403,6 +461,10 @@ If you cannot find an explicit "Average Daily Balance" line, you MUST calculate 
       "estimated_split_percentage": "0 or null — for true_split positions only, e.g. 10 means 10% of daily receipts",
       "avg_daily_payment": "0.00 or null — for true_split positions only, average of variable daily payments",
       "estimated_weekly_equivalent": "0.00 or null — for true_split positions only, avg_daily_payment × 5",
+      "total_advances_received": "0.00 or null — for reverse_mca only, sum of all credit deposits from this funder",
+      "total_payments_made": "0.00 or null — for reverse_mca only, sum of all debit payments to this funder",
+      "advance_stopped": "false — for reverse_mca only, true if no credits from funder in most recent month",
+      "estimated_factor_rate": "0.00 or null — for reverse_mca only, from agreement or default 1.4",
       "pulls_from_accounts": ["account labels"],
       "pattern_description": "string",
       "confidence": "high|medium|low",
@@ -629,9 +691,10 @@ function deduplicatePositions(positions) {
     const nameNorm = funderNames[idx];
 
     const isTrueSplit = (p.position_type || '').toLowerCase() === 'true_split';
+    const isReverseMCA = (p.position_type || '').toLowerCase() === 'reverse_mca';
 
-    // LOC and True Split positions skip MCA minimum thresholds (they have variable payments)
-    if (isLOC || isTrueSplit) return true;
+    // LOC, True Split, and Reverse MCA positions skip MCA minimum thresholds
+    if (isLOC || isTrueSplit || isReverseMCA) return true;
 
     // Minimum $500/week to be MCA
     if (weeklyAmt < 500 && weeklyAmt > 0) {
@@ -759,7 +822,10 @@ function fixExcludedMCAProceeds(analysis) {
     'tbf', 'rowan', 'merchant market', 'ondeck', 'newtek', 'fundkite',
     'libertas', 'forward fin', 'merchant marketplace', 'tmm',
     'bizfi', 'credibly', 'kapitus', 'yellowstone', 'rapid', 'can capital',
-    'square capital' // Note: "Square Capital" IS an MCA funder, not Square payments
+    'square capital', // Note: "Square Capital" IS an MCA funder, not Square payments
+    // Reverse MCA funders
+    'ufce', 'greenbox', 'sos capital', 'stream capital', 'expansion cap',
+    '1west', 'mantis', 'everest', 'velocity cap', 'cresthill', 'reliant funding'
   ];
 
   // Determine typical MCA payment amounts so we can distinguish
