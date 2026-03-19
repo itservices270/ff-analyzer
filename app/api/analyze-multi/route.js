@@ -293,7 +293,7 @@ IMPORTANT DISTINCTION FROM LOC:
 
 Not all MCA positions debit weekly. Misidentifying frequency will double or halve the debt service calculation.
 
-To detect payment frequency, count how many times per month a funder debits the account:
+To detect payment frequency for EACH distinct payment amount from a funder, count how many times per month that specific amount appears:
 • ~20-22x/month → daily (Mon-Fri business days)
 • ~4x/month → weekly (standard)
 • ~2x/month → biweekly (every 2 weeks)
@@ -301,23 +301,33 @@ To detect payment frequency, count how many times per month a funder debits the 
 
 For biweekly positions:
 • Set frequency: "biweekly"
-• payment_amount = the per-occurrence payment amount (average if alternating)
-• estimated_monthly_total = sum of ALL actual monthly debits (typically 2 debits/month)
+• payment_amount = the per-occurrence fixed amount
+• estimated_monthly_total = payment_amount × 2 (biweekly = 2 occurrences/month)
 • For DSR: use estimated_monthly_total directly, NOT payment_amount × 4.33
 
-For alternating payment amounts on same funder at same frequency:
-• This is ONE position with an alternating payment schedule — do NOT split into two positions
-• Set payment_amount to the average of the two alternating amounts
-• Example: Itria $865.38 and $951.92 alternating biweekly = ONE position, avg $908.65, biweekly
+## CRITICAL RULE — MCA PAYMENT AMOUNTS ARE ALWAYS FIXED:
+
+A single MCA position ALWAYS debits the exact same dollar amount every time. Payment amounts NEVER vary for a single position. This is a fundamental rule of how MCAs work.
+
+If you see TWO DIFFERENT amounts from the same funder, they are TWO SEPARATE POSITIONS — each with its own fixed amount. Do NOT average them, do NOT treat them as one position with "alternating" payments.
+
+The ONLY exceptions where payment amounts vary:
+1. Lines of credit (position_type: "loc" — variable draws)
+2. True splits (position_type: "true_split" — revenue-percentage based)
+
+For ALL standard MCA positions (position_type: "mca" or "reverse_mca"):
+• Each unique payment amount = one separate position
+• Determine frequency for each amount independently by counting occurrences per month
 
 CRITICAL RULE — SAME FUNDER, MULTIPLE POSITIONS:
-If you see debits from the same payee at DIFFERENT amounts on the SAME dates or same week, those are SEPARATE positions ONLY IF the payment amounts differ by more than $500. If two debits from the same funder have the SAME amount (within $500), they are the SAME position — do NOT create duplicates.
+MCA payment amounts are ALWAYS fixed per position. If you see debits from the same funder at TWO DIFFERENT amounts, they are TWO SEPARATE POSITIONS — regardless of how close the amounts are.
 
 DEDUPLICATION RULE: Before finalizing mca_positions, check for duplicates:
-- If two entries have the same funder name (fuzzy match) AND payment amounts within $500 → MERGE into one position, keeping the one with more payments_detected
-- Only create separate positions for the same funder when amounts are MEANINGFULLY different (>$500 apart)
+- If two entries have the same funder name AND the EXACT same payment amount (within $1) → MERGE into one position, keeping the one with more payments_detected
+- If two entries have the same funder name BUT DIFFERENT payment amounts (even $50 apart) → keep as SEPARATE positions
 - Example: Two "TBF GRP" entries both at $16,312.50/week = ONE position (merge them)
-- Example: "Merchant Market" at $11,693/week AND "Merchant Market" at $9,764/week = TWO positions (different amounts)
+- Example: "Merchant Market" at $11,693/week AND "Merchant Market" at $9,764/week = TWO positions
+- Example: "Itria Ven-Mercha" at $865.38 AND $951.92 = TWO positions (different fixed amounts)
 
 ### Merchant Marketplace / The Merchant Marketplace Holdings Corp:
 • Bank debit payee: "Merchant Market8882711420" (note phone number embedded)
@@ -339,41 +349,30 @@ DEDUPLICATION RULE: Before finalizing mca_positions, check for duplicates:
 • Newtek: "Newtek S Bus Fin" — daily/weekly
 • Itria Ventures: "Itria Ven-Mercha" — see below for multiple position handling
 
-### Itria Ventures — MULTIPLE POSITION DETECTION (CRITICAL — READ CAREFULLY):
-Itria Ventures funds merchants with MULTIPLE simultaneous positions. The ACH descriptor format is:
-"Itria Ven-Mercha DES:AP Payment ID:Trans#XXXXXXX INDN:[merchant] CO ID:XXXXXXXXXX"
+### Itria Ventures — MULTIPLE POSITION DETECTION (CRITICAL):
+Itria Ventures commonly funds merchants with MULTIPLE simultaneous positions.
+ACH descriptor: "Itria Ven-Mercha DES:AP Payment ID:Trans#XXXXXXX INDN:[merchant] CO ID:XXXXXXXXXX"
 
-STEP-BY-STEP POSITION SEPARATION:
+POSITION SEPARATION BY AMOUNT (simple rule):
+1. Find ALL unique debit amounts from Itria Ven-Mercha across all months
+2. Each unique amount = ONE SEPARATE POSITION (MCA payments are always fixed per position)
+3. For each unique amount, count occurrences per month to determine frequency:
+   • ~2x/month = biweekly → estimated_monthly_total = amount × 2
+   • ~4x/month = weekly → estimated_monthly_total = amount × 4.33
 
-STEP 1: Extract the Trans# number from EVERY Itria debit entry across ALL months.
-  Example: "ID:Trans#3055805" → Trans# is 3055805
+Example from this dataset:
+  Itria Ventures (Position A): $865.38 per debit, appears ~2x/month = biweekly
+    payment_amount: 865.38, frequency: "biweekly"
+    estimated_monthly_total: 865.38 × 2 = $1,730.76/month
 
-STEP 2: Sort all Trans# numbers numerically.
+  Itria Ventures (Position B): $951.92 per debit, appears ~2x/month = biweekly
+    payment_amount: 951.92, frequency: "biweekly"
+    estimated_monthly_total: 951.92 × 2 = $1,903.84/month
 
-STEP 3: Look for GAPS in the Trans# sequence.
-  A gap of more than 10,000 between sequential Trans# numbers indicates DIFFERENT positions.
-  Numbers close together (gap < 5,000) = same position.
-  Example from actual data:
-    Trans# 3055805, 3060300, 3061418, 3065832, 3066963, 3071553, 3072757, 3076981
-    → These are close together (gaps ~4,000-5,000) = ALL ONE POSITION (Position A)
-    Trans# 3105191, 3106541, 3108966 (or similar numbers with a gap of ~30,000+ from the above)
-    → The gap between ~3076981 and ~3105191 is ~28,000 = DIFFERENT POSITION (Position B)
-
-STEP 4: For each distinct Trans# cluster, calculate the weekly payment:
-  Position A: amounts alternate between $865.38 and $951.92 on successive debits
-    This alternating pattern is ONE position — do NOT split it by amount
-    Weekly total = sum of all Position A debits in a typical week (usually 2 debits from this position per week)
-  Position B: debits at a different consistent amount (~$865-1,300 per debit)
-    Weekly total = sum of all Position B debits in a typical week
-
-STEP 5: Create SEPARATE position entries for each Trans# cluster:
-  "Itria Ventures (Position A)" — alternating $865/$952, Trans# series 305xxxx-307xxxx
-  "Itria Ventures (Position B)" — separate Trans# series 310xxxx+, ~$1,300/week
-
-DO NOT aggregate all Itria debits into a single position — you MUST output TWO positions.
-DO NOT split Position A's alternating $865/$952 pattern into two positions — same Trans# range = one position.
-Both positions' weekly payments must be included in total_mca_weekly and DSR calculation.
-Include the Trans# range in the notes field for each position.
+DO NOT combine $865.38 and $951.92 into one position — they are different amounts = different positions.
+DO NOT average the two amounts into one position.
+Both positions MUST appear as separate entries in mca_positions.
+Combined Itria monthly debt service: ~$3,635/month.
 
 ### NOT-MCA EXCLUSIONS (do NOT classify as MCA positions):
 • FleetCor: "FLEETCOR FUNDING" — fleet fuel cards. Classify as vehicle_fleet expense, NOT MCA.
@@ -869,11 +868,17 @@ function deduplicatePositions(positions) {
 
       // Find an existing kept position with similar amount (within $500)
       // Only merge if BOTH have the same status (don't merge active with paid_off)
+      // NEVER merge biweekly positions with different amounts — each amount is a separate position
       const posStatus = (pos.status || 'active').toLowerCase();
+      const posFreq = (pos.frequency || '').toLowerCase().replace(/[-_\s]/g, '');
       const match = kept.find(k => {
         const kAmt = k.payment_amount_current || k.payment_amount || 0;
         const kStatus = (k.status || 'active').toLowerCase();
-        return Math.abs(amt - kAmt) <= 500 && kStatus === posStatus;
+        const kFreq = (k.frequency || '').toLowerCase().replace(/[-_\s]/g, '');
+        // For biweekly positions, only merge if amounts are EXACTLY equal (within $1)
+        // because each distinct biweekly amount is a separate MCA position
+        const threshold = (posFreq === 'biweekly' || kFreq === 'biweekly') ? 1 : 500;
+        return Math.abs(amt - kAmt) <= threshold && kStatus === posStatus;
       });
 
       if (match) {

@@ -287,10 +287,14 @@ function postProcessAnalysis(analysis) {
       for (const pos of subPositions) {
         const amt = pos.payment_amount_current || pos.payment_amount || 0;
         const posStatus = (pos.status || 'active').toLowerCase();
+        const posFreq = (pos.frequency || '').toLowerCase().replace(/[-_\s]/g, '');
         const match = kept.find(k => {
           const kAmt = k.payment_amount_current || k.payment_amount || 0;
           const kStatus = (k.status || 'active').toLowerCase();
-          return Math.abs(amt - kAmt) <= 500 && kStatus === posStatus;
+          const kFreq = (k.frequency || '').toLowerCase().replace(/[-_\s]/g, '');
+          // Biweekly positions: only merge if amounts are exactly equal (within $1)
+          const threshold = (posFreq === 'biweekly' || kFreq === 'biweekly') ? 1 : 500;
+          return Math.abs(amt - kAmt) <= threshold && kStatus === posStatus;
         });
         if (match) {
           const matchPayments = match.payments_detected || 0;
