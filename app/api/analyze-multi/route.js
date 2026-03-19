@@ -108,17 +108,38 @@ REVERSE MCA DETECTION RULE:
 If the SAME ACH originator (matched by company ID, phone number, or name) appears as BOTH a credit deposit AND a debit withdrawal in the same or adjacent statement periods → this is a REVERSE MCA.
 Additional signal: Credit entries labeled DC, DISBURSE, ADVANCE, ACH CR from an entity that also debits the account.
 
-CRITICAL — UFCE REVERSE MCA CREDIT EXCLUSION:
-UFCE credits appear as "UFCE [phone] DES:DC" (DC = Disbursement Credit). These are ADVANCE PROCEEDS from the reverse MCA, NOT revenue.
-• Every "UFCE" credit with "DES:DC" or "DC" transaction code = type: "reverse_mca_advance", is_excluded: true
-• UFCE debits appear as "UFCE [phone] DES:P" (P = Payment) or "DES:T" (T = monthly fee)
-• If you see UFCE credits in the deposits and UFCE debits in withdrawals, ALL UFCE credits are advance disbursements — exclude every single one from revenue
-• Failing to exclude UFCE DES:DC credits will overstate revenue by $5K-$20K per occurrence
+CRITICAL — UFCE ENTRY CLASSIFICATION (CREDITS vs DEBITS ARE INDEPENDENT):
+UFCE entries have THREE distinct transaction codes. Credits and debits are on OPPOSITE sides of the ledger and must be classified independently:
+
+UFCE [phone] DES:DC → This is a CREDIT (deposit) = advance disbursement from the reverse MCA
+  Action: EXCLUDE from revenue (type: "reverse_mca_advance", is_excluded: true)
+  Add to excluded_mca_proceeds total
+  Each DC credit must appear as a SEPARATE entry in revenue_sources with is_excluded: true, type: "loan", and its own date and amount
+  Typical amounts: $7,117.80 (most common), $7,322.30, $6,681.80, $5,596.00
+  These appear in the DEPOSITS section of the statement — do NOT miss them
+
+UFCE [phone] DES:P → This is a DEBIT (withdrawal) = weekly MCA payment
+  Action: COUNT as MCA debt service — this is a regular weekly payment like any other MCA
+  Include in the UFCE position's payment_amount, payments_detected, estimated_monthly_total
+  Do NOT exclude, do NOT reduce, do NOT reclassify
+  This debit MUST appear in total_mca_weekly and total_mca_monthly calculations
+
+UFCE [phone] DES:T → This is a DEBIT (withdrawal) = monthly account management fee ($79.99)
+  Action: COUNT as MCA-related expense (add to position fees or other_debt_service)
+  Do NOT confuse with the weekly P payment
+
+RULE: Revenue exclusion applies to the INCOME SIDE (credits/deposits) ONLY.
+      Debt service counting applies to the PAYMENT SIDE (debits/withdrawals) ONLY.
+      Excluding a UFCE credit from revenue does NOT affect counting UFCE debits as debt service.
+      These are completely independent classifications.
 
 When a reverse MCA is detected:
 • Set position_type: "reverse_mca"
 • ALL credit deposits from this funder must be classified as type: "reverse_mca_advance", is_excluded: true — this includes EVERY credit with "DES:DC", "DES:DISBURSE", "DES:ADVANCE", or any ACH credit from the funder
+• Add ALL excluded credits to excluded_mca_proceeds (sum their amounts)
+• Each excluded credit MUST appear individually in the revenue_sources array with: type: "loan", is_excluded: true, name: "[funder name] advance", date: the deposit date, total: the credit amount
 • These credits are LOAN PROCEEDS, not business revenue — failing to exclude them dramatically overstates revenue
+• ALL debit entries from this funder are MCA PAYMENTS — they must STILL be counted as debt service
 • Track: total_advances_received (sum of all credits from this funder), total_payments_made (sum of all debits)
 
 EXCLUSIONS — NEVER COUNT AS REVENUE:
@@ -297,16 +318,33 @@ DEDUPLICATION RULE: Before finalizing mca_positions, check for duplicates:
 • Newtek: "Newtek S Bus Fin" — daily/weekly
 • Itria Ventures: "Itria Ven-Mercha" — see below for multiple position handling
 
-### Itria Ventures — MULTIPLE POSITION DETECTION:
-Itria Ventures commonly runs multiple simultaneous positions on the same merchant. The ACH descriptor includes a Trans# (transaction reference number) that distinguishes positions:
-• Different Trans# reference numbers = DIFFERENT positions — never combine them
-• Example: "Itria Ven-Mercha Trans#12345" at $2,100/wk = Position A
-• Example: "Itria Ven-Mercha Trans#67890" at $1,800/wk = Position B
-• Even if both Trans# references show the SAME payment amount, different Trans# = different positions
-• The payment frequency is typically 3x/week (Mon-Wed-Fri), so multiply per-payment amount × 3 to get weekly equivalent
-• If you see multiple distinct Trans# series in Itria debits, output SEPARATE position objects for each Trans# series
-• Label them "Itria Ventures (Position A)", "Itria Ventures (Position B)", etc.
-• Include the Trans# reference in the notes field for each position
+### Itria Ventures — MULTIPLE POSITION DETECTION (CRITICAL):
+Itria Ventures commonly runs multiple simultaneous positions on the same merchant. The ACH descriptor format is:
+"Itria Ven-Mercha DES:AP Payment ID:Trans#XXXXXXX INDN:[merchant] CO ID:XXXXXXXXXX"
+
+The Trans# number is the KEY to separating positions:
+STEP 1: Extract ALL distinct Trans# values from every Itria debit entry across all months
+STEP 2: Group debits by Trans# — each unique Trans# is a SEPARATE position
+STEP 3: Within each Trans# group, calculate the weekly payment total
+
+IMPORTANT — ALTERNATING PAYMENT AMOUNTS:
+Itria positions often alternate between two payment amounts on the same Trans# series.
+Example: Trans#1234567 debits alternate $865.38 / $951.92 / $865.38 / $951.92
+This alternating pattern is ONE position (same Trans#), NOT two positions.
+The weekly equivalent = sum of all debits in a typical week (usually 3 debits Mon/Wed/Fri).
+
+EXPECTED PATTERN FOR MULTI-POSITION MERCHANTS:
+• Itria Ventures (Position A): Trans# series XXXXXXX, alternating ~$865/$952 per debit, 3x/week = ~$2,700/week
+• Itria Ventures (Position B): Trans# series YYYYYYY (DIFFERENT number), ~$430/debit, 3x/week = ~$1,300/week
+• Both positions debit from the same account with the same "Itria Ven-Mercha" descriptor
+• The ONLY way to tell them apart is the Trans# in the payment ID field
+
+DO NOT aggregate all Itria debits into a single position.
+DO NOT assume alternating amounts ($865/$952) are different positions — check the Trans# first.
+Each distinct Trans# group = one position object in the output.
+Label them "Itria Ventures (Position A)", "Itria Ventures (Position B)", etc.
+Include the Trans# reference in the notes field for each position.
+Both positions' weekly payments must be included in total_mca_weekly and DSR calculation.
 
 ### NOT-MCA EXCLUSIONS (do NOT classify as MCA positions):
 • FleetCor: "FLEETCOR FUNDING" — fleet fuel cards. Classify as vehicle_fleet expense, NOT MCA.
@@ -591,7 +629,18 @@ If avg_daily_balance is 0, set weeks_to_insolvency to null.
 Do NOT default to 2 weeks. A business doing $500K+ monthly revenue with $200K MCA burden is NOT 2 weeks from insolvency.
 
 ## EXCLUDED MCA PROCEEDS — STRICT RULES:
-excluded_mca_proceeds must ONLY include actual MCA advance wire deposits from known funders.
+excluded_mca_proceeds must include ALL advance deposits from MCA funders, including:
+• Standard MCA wire deposits (one-time large credits from TMM, TBF, ROWAN, ONDECK, etc.)
+• Reverse MCA periodic advance credits (recurring credits like UFCE DES:DC entries)
+Sum ALL of these into excluded_mca_proceeds.
+
+REVERSE MCA ADVANCES IN EXCLUDED_MCA_PROCEEDS (CRITICAL):
+For reverse MCAs (UFCE, Greenbox, SOS Capital, etc.), the advance credits arrive as RECURRING deposits, not one-time wires. Each individual DES:DC credit is an advance disbursement and MUST be:
+1. Listed as a SEPARATE entry in revenue_sources with type: "loan", is_excluded: true
+2. SUMMED into excluded_mca_proceeds total
+Example: If UFCE sends 4 credits of $7,117.80 in one month = $28,471.20 of excluded_mca_proceeds from UFCE alone.
+Do NOT silently drop these — every UFCE DC credit across all months must be counted.
+
 NEVER classify these as MCA proceeds regardless of amount:
 • THREE SQUARE MAR / THREE SQUARE → Square card processing = REVENUE
 • LE-USA TECHNOL / USA TECHNOL → USA Technologies = REVENUE
@@ -599,10 +648,11 @@ NEVER classify these as MCA proceeds regardless of amount:
 • FERRARA CANDY → Vendor rebate = REVENUE
 • ADVANTECH CORP → Vendor rebate = REVENUE
 • Any deposit from a payment processor or customer = REVENUE
-Only these patterns indicate MCA advance proceeds:
+Patterns that indicate MCA advance proceeds (add to excluded_mca_proceeds):
 • Wire credits explicitly labeled with funder names (TMM, TBF, ROWAN, ONDECK, etc.)
 • Credits containing "WIRE" + a funder name
 • Large lump sums appearing 5-7 days before new MCA debit series starts
+• Reverse MCA periodic advance credits (UFCE DES:DC, Greenbox credits, etc.) — these are recurring but are STILL advance proceeds
 
 ## CRITICAL RULES SUMMARY:
 
