@@ -310,7 +310,7 @@ function postProcessAnalysis(analysis) {
             overchargeTarget.double_pull = true;
             overchargeTarget.double_pull_amounts = [...(overchargeTarget.double_pull_amounts || []), amt];
             overchargeTarget.double_pull_dates = [...(overchargeTarget.double_pull_dates || []), ...(pos.double_pull_dates || [pos.first_payment_date || 'unknown'])];
-            overchargeTarget.notes = (overchargeTarget.notes || '') + ` | Overpull: $${amt.toFixed(2)} vs expected $${(overchargeTarget.payment_amount_current || overchargeTarget.payment_amount || 0).toFixed(2)}`;
+            overchargeTarget.notes = (overchargeTarget.notes || '') + ` | Overpull: $${(parseFloat(amt) || 0).toFixed(2)} vs expected $${(parseFloat(overchargeTarget.payment_amount_current || overchargeTarget.payment_amount) || 0).toFixed(2)}`;
           } else {
             kept.push(pos);
           }
@@ -1024,17 +1024,17 @@ function MCATab({ a, positions, setPositions, excludedIds, setExcludedIds, other
                 </div>
                 {pc.contractStatus === 'overpull' && (
                   <div style={{ marginTop: 6, fontSize: 11, color: '#ef9a9a', lineHeight: 1.5 }}>
-                    Funder is pulling {fmt(Math.abs(pc.contractDelta))} ({Math.abs(pc.contractDeltaPct).toFixed(1)}%) more than contractual amount
+                    Funder is pulling {fmt(Math.abs(pc.contractDelta))} ({(parseFloat(Math.abs(pc.contractDeltaPct)) || 0).toFixed(1)}%) more than contractual amount
                   </div>
                 )}
                 {pc.contractStatus === 'underpull' && (
                   <div style={{ marginTop: 6, fontSize: 11, color: '#ffd54f', lineHeight: 1.5 }}>
-                    Funder is pulling {fmt(Math.abs(pc.contractDelta))} ({Math.abs(pc.contractDeltaPct).toFixed(1)}%) less than contractual amount — may indicate reconciliation
+                    Funder is pulling {fmt(Math.abs(pc.contractDelta))} ({(parseFloat(Math.abs(pc.contractDeltaPct)) || 0).toFixed(1)}%) less than contractual amount — may indicate reconciliation
                   </div>
                 )}
                 {pc.paymentChanged && (
                   <div style={{ marginTop: 4, fontSize: 11, color: '#ffd54f' }}>
-                    Payment changed from {fmt(pc.priorWeekly)}/wk to {fmt(pc.latestWeekly)}/wk ({pc.paymentChangePct > 0 ? '+' : ''}{pc.paymentChangePct.toFixed(1)}%)
+                    Payment changed from {fmt(pc.priorWeekly)}/wk to {fmt(pc.latestWeekly)}/wk ({pc.paymentChangePct > 0 ? '+' : ''}{(parseFloat(pc.paymentChangePct) || 0).toFixed(1)}%)
                   </div>
                 )}
               </div>
@@ -1650,7 +1650,7 @@ function NegotiationTab({ a, positions, excludedIds, otherExcludedIds, depositOv
                     <div style={{ fontSize: 11, color: 'rgba(232,232,240,0.4)' }}>{q.description}</div>
                   </div>
                   <div style={{ fontSize: 11, padding: '3px 10px', borderRadius: 4, background: `${qColors[q.color]}15`, color: qColors[q.color], border: `1px solid ${qColors[q.color]}33`, whiteSpace: 'nowrap', flexShrink: 0 }}>{q.label}</div>
-                  <div style={{ fontSize: 12, color: 'rgba(232,232,240,0.5)', textAlign: 'right', flexShrink: 0, width: 40 }}>{fi.composite.toFixed(1)}</div>
+                  <div style={{ fontSize: 12, color: 'rgba(232,232,240,0.5)', textAlign: 'right', flexShrink: 0, width: 40 }}>{(parseFloat(fi.composite) || 0).toFixed(1)}</div>
                 </div>
               );
             })}
@@ -2293,7 +2293,7 @@ function NegotiationEmailEngine({ fTiers, revenue, a, totalWeeklyBurden, enrolle
       ? `YOUR POSITIONS WITH ${ft.name.toUpperCase()}:\nWe have identified ${ft._advances.length} active advances with your organization:\n${ft._advances.map((adv, i) => `  Advance ${i + 1}: Balance ${f$(adv.balance)} · ${f$(adv.weekly)}/wk${adv.agreementDate ? ` (originated ${adv.agreementDate})` : ''}`).join('\n')}\n\nCOMBINED POSITION:\n`
       : '';
 
-    const proposalBlock = `${positionBreakdown}YOUR POSITION${ft._advCount > 1 ? ' (COMBINED)' : ''}:\nYour Current Weekly Payment:    ${currentLabel}\nProposed Weekly Payment:        ${f$(tier.weeklyPayment)}\nWeekly Reduction:               ${f$(tier.reductionDollars)} less per week\nPayment Reduction:              ${tier.reductionPct.toFixed(1)}%\nProposed Term:                  ${tier.proposedTermWeeks} weeks\nTotal Repayment:                ${f$(ft.balance)} — 100% of your balance\nPayments Begin:                 Within 72 hours of agreement${overpullNote}`;
+    const proposalBlock = `${positionBreakdown}YOUR POSITION${ft._advCount > 1 ? ' (COMBINED)' : ''}:\nYour Current Weekly Payment:    ${currentLabel}\nProposed Weekly Payment:        ${f$(tier.weeklyPayment)}\nWeekly Reduction:               ${f$(tier.reductionDollars)} less per week\nPayment Reduction:              ${(parseFloat(tier.reductionPct) || 0).toFixed(1)}%\nProposed Term:                  ${tier.proposedTermWeeks} weeks\nTotal Repayment:                ${f$(ft.balance)} — 100% of your balance\nPayments Begin:                 Within 72 hours of agreement${overpullNote}`;
 
     const defaultRecovery = Math.round(ft.balance * 0.35);
     const defaultNet = Math.round(defaultRecovery * 0.7);
@@ -2389,9 +2389,9 @@ function NegotiationEmailEngine({ fTiers, revenue, a, totalWeeklyBurden, enrolle
                       <div style={{ fontSize: 12, fontWeight: 700, color: negTierColors[ti], marginBottom: 8 }}>{negTierLabels[ti]}</div>
                       <div style={{ fontSize: 11, color: 'rgba(232,232,240,0.6)', lineHeight: 1.8, marginBottom: 10 }}>
                         <div>Payment: <strong style={{ color: negTierColors[ti] }}>{fmtD(t.weeklyPayment)}/wk</strong></div>
-                        <div>Reduction: <strong>{t.reductionPct.toFixed(1)}%</strong> ({fmtD(t.reductionDollars)} less)</div>
+                        <div>Reduction: <strong>{(parseFloat(t.reductionPct) || 0).toFixed(1)}%</strong> ({fmtD(t.reductionDollars)} less)</div>
                         <div>Term: <strong>{t.proposedTermWeeks} wks</strong> ({Math.round(t.proposedTermWeeks / 4.33)} mo)</div>
-                        <div>Extension: +{t.extensionPct.toFixed(0)}%</div>
+                        <div>Extension: +{(parseFloat(t.extensionPct) || 0).toFixed(0)}%</div>
                         <div>Repayment: <strong style={{ color: '#4caf50' }}>{fmt(selFt.balance)}</strong></div>
                       </div>
                       <button onClick={() => { const txt = generateEmail(negFunderId, ti); navigator.clipboard.writeText(txt); setCopiedEmail(`${negFunderId}-${ti}`); setTimeout(() => setCopiedEmail(null), 2000); }} style={{ ...S.btn('primary'), padding: '6px 12px', fontSize: 11, width: '100%' }}>
@@ -2568,7 +2568,7 @@ function AgreementsTab({ agreementResults }) {
             <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(160px, 1fr))', gap: 10, marginBottom: 12 }}>
               <div><div style={S.statLabel}>Purchase Price</div><div style={{ fontSize: 15, color: '#00e5ff' }}>{fmt(purchasePrice)}</div></div>
               <div><div style={S.statLabel}>Payback Amount</div><div style={{ fontSize: 15, color: '#ef9a9a' }}>{fmt(purchasedAmt)}</div></div>
-              <div><div style={S.statLabel}>Factor Rate</div><div style={{ fontSize: 15, color: '#e8e8f0' }}>{factorRate ? factorRate.toFixed(2) : '—'}</div></div>
+              <div><div style={S.statLabel}>Factor Rate</div><div style={{ fontSize: 15, color: '#e8e8f0' }}>{factorRate ? (parseFloat(factorRate) || 0).toFixed(2) : '—'}</div></div>
               <div><div style={S.statLabel}>Weekly Payment</div><div style={{ fontSize: 15, color: '#ffd54f' }}>{fmtD(weeklyPayment)}</div></div>
               <div><div style={S.statLabel}>Specified %</div><div style={{ fontSize: 15, color: '#e8e8f0' }}>{specifiedPct ? specifiedPct + '%' : '—'}</div></div>
               <div><div style={S.statLabel}>Origination Fee</div><div style={{ fontSize: 15, color: '#e8e8f0' }}>{fmt(originationFee)}</div></div>
@@ -2851,7 +2851,7 @@ function CrossReferenceTab({ crossRefResult, crossRefError, agreementResults, po
                     </div>
                     {c.paymentChanged && (
                       <div style={{ marginTop: 8, fontSize: 12, color: '#ffd54f', padding: '6px 10px', background: 'rgba(249,168,37,0.06)', borderRadius: 6 }}>
-                        Payment changed from {fmt(c.priorWeekly)}/wk to {fmt(c.latestWeekly)}/wk ({c.paymentChangePct > 0 ? '+' : ''}{c.paymentChangePct.toFixed(1)}%)
+                        Payment changed from {fmt(c.priorWeekly)}/wk to {fmt(c.latestWeekly)}/wk ({c.paymentChangePct > 0 ? '+' : ''}{(parseFloat(c.paymentChangePct) || 0).toFixed(1)}%)
                       </div>
                     )}
                   </div>
@@ -2926,7 +2926,7 @@ function CrossReferenceTab({ crossRefResult, crossRefError, agreementResults, po
                 <div><div style={S.statLabel}>Revenue Gap</div><div style={{ fontSize: 13, color: c.revenue_discrepancy_pct > 0 ? '#ef5350' : c.revenue_discrepancy_pct < 0 ? '#ffd54f' : '#4caf50' }}>{c.revenue_discrepancy_pct > 0 ? `+${fmtP(c.revenue_discrepancy_pct)} overstated` : c.revenue_discrepancy_pct < 0 ? `${fmtP(c.revenue_discrepancy_pct)} below actual` : 'Match'}</div></div>
                 <div><div style={S.statLabel}>Contract Withhold</div><div style={{ fontSize: 13, color: '#e8e8f0' }}>{fmtP(c.contracted_withhold_pct)}</div></div>
                 <div><div style={S.statLabel}>Actual Withhold</div><div style={{ fontSize: 13, color: c.actual_withhold_pct > c.contracted_withhold_pct ? '#ef5350' : '#e8e8f0' }}>{fmtP(c.actual_withhold_pct)}</div></div>
-                <div><div style={S.statLabel}>True Factor Rate</div><div style={{ fontSize: 13, color: c.true_factor_rate > 1.5 ? '#ef5350' : '#e8e8f0' }}>{c.true_factor_rate?.toFixed(2) || '—'}</div></div>
+                <div><div style={S.statLabel}>True Factor Rate</div><div style={{ fontSize: 13, color: c.true_factor_rate > 1.5 ? '#ef5350' : '#e8e8f0' }}>{c.true_factor_rate ? (parseFloat(c.true_factor_rate) || 0).toFixed(2) : '—'}</div></div>
               </div>
               {(c.underwriting_failures || []).length > 0 && (
                 <div style={{ marginTop: 8 }}>
@@ -3827,10 +3827,10 @@ NOTE: All revenue figures are bank-statement verified — not merchant-reported 
 Your Current Weekly Payment:    ${currentWeeklyLabel}
 Proposed Weekly Payment:        ${f$(tier.weeklyPayment)}
 Weekly Reduction:               ${f$(tier.reductionDollars)} less per week
-Payment Reduction:              ${tier.reductionPct.toFixed(1)}%
+Payment Reduction:              ${(parseFloat(tier.reductionPct) || 0).toFixed(1)}%
 Your Original Term:             ${ft2.originalTermWeeks} weeks
 Proposed Term:                  ${tier.proposedTermWeeks} weeks
-Term Extension:                 +${tier.extensionPct.toFixed(1)}% longer
+Term Extension:                 +${(parseFloat(tier.extensionPct) || 0).toFixed(1)}% longer
 Total Repayment:                ${f$(ft2.balance)} — 100% of your balance
 Payments Begin:                 Within 72 hours of agreement${overpullNote}`;
 
@@ -3912,7 +3912,7 @@ ${statsBlock}
 
 ${proposalBlock}
 
-This offer represents a ${((tier.weeklyPayment - email1Tier.weeklyPayment) / email1Tier.weeklyPayment * 100).toFixed(0)}% increase in weekly payment over our opening proposal and reduces your term from ${email1Tier.proposedTermWeeks} to ${tier.proposedTermWeeks} weeks.
+This offer represents a ${(parseFloat((tier.weeklyPayment - email1Tier.weeklyPayment) / email1Tier.weeklyPayment * 100) || 0).toFixed(0)}% increase in weekly payment over our opening proposal and reduces your term from ${email1Tier.proposedTermWeeks} to ${tier.proposedTermWeeks} weeks.
 
 ${comparisonBlock}
 
@@ -3972,7 +3972,7 @@ ${signature}`;
       ...(activeTier.offers || []).map(o => `  • ${o.name}: ${fmt(o.actualPayment)}/${o.frequency} for ${o.term} wks (${fmtP(o.reduction * 100)} reduction)`),
       ``,
       `ISO Commission (${isoPoints} pts): ${fmt(isoFeeTotal)}`,
-      `Factor Rate: ${factorRate.toFixed(3)}`,
+      `Factor Rate: ${(parseFloat(factorRate) || 0).toFixed(3)}`,
       `Total Payback to FF: ${fmt(totalPayback)}`,
     ];
     navigator.clipboard.writeText(lines.join('\n'));
@@ -4151,9 +4151,9 @@ ${signature}`;
                       <div style={{ fontSize: 12, fontWeight: 700, color: negTierColors[ti], marginBottom: 8 }}>{negTierLabels[ti]}</div>
                       <div style={{ fontSize: 11, color: 'rgba(232,232,240,0.6)', lineHeight: 1.8, marginBottom: 10 }}>
                         <div>Payment: <strong style={{ color: negTierColors[ti] }}>{fmtD(t.weeklyPayment)}/wk</strong></div>
-                        <div>Reduction: <strong>{t.reductionPct.toFixed(1)}%</strong> ({fmtD(t.reductionDollars)} less)</div>
+                        <div>Reduction: <strong>{(parseFloat(t.reductionPct) || 0).toFixed(1)}%</strong> ({fmtD(t.reductionDollars)} less)</div>
                         <div>Term: <strong>{t.proposedTermWeeks} wks</strong> ({Math.round(t.proposedTermWeeks / 4.33)} mo)</div>
-                        <div>Extension: +{t.extensionPct.toFixed(0)}%</div>
+                        <div>Extension: +{(parseFloat(t.extensionPct) || 0).toFixed(0)}%</div>
                         <div>Repayment: <strong style={{ color: '#4caf50' }}>{fmt(t.totalRepayment)}</strong></div>
                       </div>
                       <div style={{ display: 'flex', gap: 6 }}>
