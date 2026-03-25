@@ -4832,8 +4832,7 @@ export default function FFAnalyzer() {
   const [chatOpen, setChatOpen] = useState(false);
   const inputRef = useRef(null);
 
-  const [dealId, setDealId] = useState(null);
-  const TABS = ['📊 Revenue', '📈 Trend', '🏦 MCA Positions', '⚠️ Risk', '📋 Agreements', '🔄 Cross-Ref', '🤝 Negotiation Intel', '💰 Pricing', '📇 Funder Intel', '🎯 Confidence', '⬇️ Export'];
+  const TABS = ['📊 Revenue', '📈 Trend', '🏦 MCA Positions', '⚠️ Risk', '📋 Agreements', '🔄 Cross-Ref', '🤝 Negotiation', '💰 Pricing', '📇 Funder Intel', '🎯 Confidence', '⬇️ Export'];
 
   // ─── Agreement state ─────────────────────────────────────────
   const [uploadedAgreements, setUploadedAgreements] = useState([]);
@@ -5719,7 +5718,7 @@ export default function FFAnalyzer() {
             {activeTab === 4 && <AgreementsTab agreementResults={agreementResults} />}
             {activeTab === 5 && <CrossReferenceTab crossRefResult={crossRefResult} crossRefError={crossRefError} agreementResults={agreementResults} positions={positions} a={result.analysis} />}
             {activeTab === 6 && <NegotiationTab a={result.analysis} positions={positions} excludedIds={excludedIds} otherExcludedIds={otherExcludedIds} depositOverrides={depositOverrides} agreementResults={agreementResults} enrolledPositions={enrolledPositions} />}
-            {activeTab === 7 && <PricingTab a={result.analysis} positions={positions} excludedIds={excludedIds} otherExcludedIds={otherExcludedIds} depositOverrides={depositOverrides} agreementResults={agreementResults} enrolledPositions={enrolledPositions} dealId={dealId} setDealId={setDealId} />}
+            {activeTab === 7 && <PricingTab a={result.analysis} positions={positions} excludedIds={excludedIds} otherExcludedIds={otherExcludedIds} depositOverrides={depositOverrides} agreementResults={agreementResults} enrolledPositions={enrolledPositions} />}
             {activeTab === 8 && <FunderIntelTab positions={positions} agreementResults={agreementResults} />}
             {activeTab === 9 && <ConfidenceTab a={result.analysis} positions={positions} excludedIds={excludedIds} depositOverrides={depositOverrides} agreementResults={agreementResults} />}
             {activeTab === 10 && <ExportTab a={result.analysis} fileName={result.file_name || 'analysis'} positions={positions} excludedIds={excludedIds} otherExcludedIds={otherExcludedIds} depositOverrides={depositOverrides} agreementResults={agreementResults} enrolledPositions={enrolledPositions} />}
