@@ -1,7 +1,7 @@
 'use client';
 import React, { useState, useMemo, useCallback } from 'react';
 import { scoreAllPositions } from '../../lib/scoringEngine';
-import { autoScorePosition, lookupFunder, getCompositeScore, getRecoveryStakeScore } from '../../lib/funder-intel';
+import { autoScorePosition, getCompositeScore, getRecoveryStakeScore } from '../../lib/funder-intel';
 import { getGraduatedCommissionRate, calculateTierAllocations } from '../../lib/pricing-engine';
 
 // ─── Formatting helpers ──────────────────────────────────────────────────────
@@ -96,6 +96,9 @@ const S = {
 // PricingTab
 // ═════════════════════════════════════════════════════════════════════════════
 export default function PricingTab({ a, positions, excludedIds, otherExcludedIds, depositOverrides, agreementResults, enrolledPositions }) {
+  // ── Safety guard ──
+  if (!a) return <div style={{ padding: 40, textAlign: 'center', color: 'rgba(232,232,240,0.4)' }}>No analysis data available.</div>;
+
   // ── Get ALL positions, then filter to enrolled only ──
   const allPositions = (positions || a.mca_positions || []).filter(p => !(excludedIds || []).includes(p._id));
   const activePositions = allPositions.filter(p => {
@@ -199,17 +202,19 @@ export default function PricingTab({ a, positions, excludedIds, otherExcludedIds
     return dedupEnrolled.map(dp => {
       const key = normalizeFunderKey(dp.funder_name);
       const overrides = positionOverrides[key];
-      if (!overrides) return dp;
-      const newBal = overrides.balance && parseFloat(overrides.balance) > 0 ? parseFloat(overrides.balance) : dp._balance;
-      const newWeekly = overrides.weekly && parseFloat(overrides.weekly) > 0 ? parseFloat(overrides.weekly) : dp._totalWeekly;
+      const origBalance = dp._balance || 0;
+      const origWeekly = dp._totalWeekly || 0;
+      if (!overrides) return { ...dp, _origBalance: origBalance, _origWeekly: origWeekly, _hasBalanceOverride: false, _hasWeeklyOverride: false };
+      const hasBal = !!(overrides.balance && parseFloat(overrides.balance) > 0);
+      const hasWk = !!(overrides.weekly && parseFloat(overrides.weekly) > 0);
       return {
         ...dp,
-        _balance: newBal,
-        _totalWeekly: newWeekly,
-        _hasBalanceOverride: !!(overrides.balance && parseFloat(overrides.balance) > 0),
-        _hasWeeklyOverride: !!(overrides.weekly && parseFloat(overrides.weekly) > 0),
-        _origBalance: dp._balance,
-        _origWeekly: dp._totalWeekly,
+        _balance: hasBal ? parseFloat(overrides.balance) : origBalance,
+        _totalWeekly: hasWk ? parseFloat(overrides.weekly) : origWeekly,
+        _hasBalanceOverride: hasBal,
+        _hasWeeklyOverride: hasWk,
+        _origBalance: origBalance,
+        _origWeekly: origWeekly,
       };
     });
   }, [dedupEnrolled, positionOverrides]);
@@ -381,7 +386,7 @@ export default function PricingTab({ a, positions, excludedIds, otherExcludedIds
       };
     });
 
-    const maxTerm = Math.max(...funderTiers.flatMap(ft => ft.tiers.map(t => t.proposedTermWeeks)).filter(t => t < 9999), 0);
+    const maxTerm = Math.max(...funderTiers.flatMap(ft => (ft.tiers || []).map(t => t.proposedTermWeeks || 0)).filter(t => t > 0 && t < 9999), 0);
 
     return { tad, funderTiers, maxTerm, warnings, totalLocked };
   }, [
@@ -571,8 +576,8 @@ export default function PricingTab({ a, positions, excludedIds, otherExcludedIds
       <div style={S.section}>Offer Tier Grid</div>
       <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 10, marginBottom: 20 }}>
         {tierDefs.map((td, ti) => {
-          const tierTotalToFunders = funderTiers.reduce((s, ft) => s + ft.tiers[ti].weeklyPayment, 0);
-          const tierMaxTerm = Math.max(...funderTiers.map(ft => ft.tiers[ti].proposedTermWeeks).filter(t => t < 9999), 0);
+          const tierTotalToFunders = funderTiers.reduce((s, ft) => s + (ft.tiers?.[ti]?.weeklyPayment || 0), 0);
+          const tierMaxTerm = Math.max(...funderTiers.map(ft => ft.tiers?.[ti]?.proposedTermWeeks || 0).filter(t => t > 0 && t < 9999), 0);
           return (
             <div key={ti} style={{ background: `${tierColors[ti]}0a`, border: `1px solid ${tierColors[ti]}44`, borderRadius: 10, padding: 16, textAlign: 'center' }}>
               <div style={{ fontSize: 13, fontWeight: 700, color: tierColors[ti], marginBottom: 4 }}>{td.label}</div>
@@ -626,7 +631,7 @@ export default function PricingTab({ a, positions, excludedIds, otherExcludedIds
                       type="number"
                       value={positionOverrides[fKey]?.balance ?? ''}
                       onChange={e => setOverride(ft.name, 'balance', e.target.value)}
-                      placeholder={String(Math.round(ft._origBalance))}
+                      placeholder={String(Math.round(ft._origBalance || 0))}
                       style={{
                         width: 95, padding: '2px 5px', borderRadius: 4, fontSize: 11, fontWeight: 700, fontFamily: 'inherit',
                         background: ft._hasBalanceOverride ? 'rgba(124,58,237,0.12)' : 'rgba(0,0,0,0.25)',
@@ -643,7 +648,7 @@ export default function PricingTab({ a, positions, excludedIds, otherExcludedIds
                       type="number"
                       value={positionOverrides[fKey]?.weekly ?? ''}
                       onChange={e => setOverride(ft.name, 'weekly', e.target.value)}
-                      placeholder={String(Math.round(ft._origWeekly))}
+                      placeholder={String(Math.round(ft._origWeekly || 0))}
                       style={{
                         width: 80, padding: '2px 5px', borderRadius: 4, fontSize: 11, fontWeight: 700, fontFamily: 'inherit',
                         background: ft._hasWeeklyOverride ? 'rgba(124,58,237,0.12)' : 'rgba(0,0,0,0.25)',
@@ -653,7 +658,7 @@ export default function PricingTab({ a, positions, excludedIds, otherExcludedIds
                     />/wk
                     {ft._hasWeeklyOverride && <span style={{ fontSize: 8, color: '#7c3aed', fontWeight: 700, letterSpacing: 0.3 }} title={`Analyzer: ${fmt(ft._origWeekly)}/wk`}>{'✎'}</span>}
                   </span>
-                  {!isLocked && <span>Share: <strong style={{ color: '#00e5ff' }}>{((ft.adjustedShare || ft.sharePct) * 100).toFixed(1)}%</strong></span>}
+                  {!isLocked && <span>Share: <strong style={{ color: '#00e5ff' }}>{(((ft.adjustedShare || ft.sharePct || 0)) * 100).toFixed(1)}%</strong></span>}
                   {(ft._hasBalanceOverride || ft._hasWeeklyOverride) && (
                     <span style={{ fontSize: 8, background: 'rgba(124,58,237,0.15)', color: '#b388ff', padding: '1px 6px', borderRadius: 3, fontWeight: 700, letterSpacing: 0.3, textTransform: 'uppercase' }}>manual override</span>
                   )}
@@ -694,7 +699,7 @@ export default function PricingTab({ a, positions, excludedIds, otherExcludedIds
 
               {/* Original term bar */}
               <div style={{ fontSize: 11, color: 'rgba(232,232,240,0.5)', marginBottom: 10, padding: '6px 10px', background: 'rgba(0,0,0,0.2)', borderRadius: 6 }}>
-                Original Term: <strong style={{ color: 'rgba(232,232,240,0.8)' }}>{ft.originalTermWeeks} wks</strong> (~{Math.round(ft.originalTermWeeks / 4.33)} months)
+                Original Term: <strong style={{ color: 'rgba(232,232,240,0.8)' }}>{ft.originalTermWeeks || 0} wks</strong> (~{Math.round((ft.originalTermWeeks || 0) / 4.33)} months)
                 {ft.contractWeekly > 0 && <span style={{ marginLeft: 8 }}>{'\u00b7'} Contract: {fmtD(ft.contractWeekly)}/wk</span>}
               </div>
 
@@ -706,7 +711,7 @@ export default function PricingTab({ a, positions, excludedIds, otherExcludedIds
                       Funder Intelligence {isUnknownFunder ? '(Unmatched)' : '(Auto-Scored)'}
                     </div>
                     <div style={{ fontSize: 11, color: '#EAD068', fontWeight: 700 }}>
-                      Composite: {intel.composite.toFixed(2)}
+                      Composite: {(intel.composite || 0).toFixed(2)}
                     </div>
                   </div>
 
@@ -747,7 +752,7 @@ export default function PricingTab({ a, positions, excludedIds, otherExcludedIds
 
               {/* 4-tier grid */}
               <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 8 }}>
-                {ft.tiers.map((t, ti) => (
+                {(ft.tiers || []).map((t, ti) => (
                   <div key={ti} style={{
                     background: isLocked ? 'rgba(234,208,104,0.05)' : `${tierColors[ti]}08`,
                     border: `1px solid ${isLocked ? 'rgba(234,208,104,0.2)' : `${tierColors[ti]}33`}`,
@@ -760,8 +765,8 @@ export default function PricingTab({ a, positions, excludedIds, otherExcludedIds
                         <div style={{ color: '#EAD068', fontSize: 10 }}>(locked)</div>
                       ) : (
                         <>
-                          <div>{ft.originalTermWeeks} {'\u2192'} <strong>{t.proposedTermWeeks < 9999 ? t.proposedTermWeeks : '\u221E'} wks</strong></div>
-                          <div style={{ color: '#888', fontSize: 10 }}>+{t.extensionWeeks} wks ({(parseFloat(t.extensionPct) || 0).toFixed(0)}%)</div>
+                          <div>{ft.originalTermWeeks || 0} {'\u2192'} <strong>{(t.proposedTermWeeks || 0) < 9999 ? (t.proposedTermWeeks || 0) : '\u221E'} wks</strong></div>
+                          <div style={{ color: '#888', fontSize: 10 }}>+{t.extensionWeeks || 0} wks ({(parseFloat(t.extensionPct) || 0).toFixed(0)}%)</div>
                         </>
                       )}
                       <div style={{ fontSize: 10 }}>
