@@ -162,9 +162,9 @@ export default function PricingTab({ a, positions, excludedIds, otherExcludedIds
   const adb = a.balance_summary?.avg_daily_balance || a.calculated_metrics?.avg_daily_balance || 0;
   const biz = a.business_name || 'Business';
 
-  // ── Totals ──
-  const totalBalance = dedupEnrolled.reduce((s, dp) => s + dp._balance, 0);
-  const totalCurrentWeekly = dedupEnrolled.reduce((s, dp) => s + dp._totalWeekly, 0);
+  // ── Totals (from effective positions with overrides applied) ──
+  const totalBalance = effectivePositions.reduce((s, dp) => s + dp._balance, 0);
+  const totalCurrentWeekly = effectivePositions.reduce((s, dp) => s + dp._totalWeekly, 0);
   const currentDSR = revenue > 0 ? ((totalCurrentWeekly * 4.33) / revenue) * 100 : 0;
 
   // ── Deal Controls state ──
@@ -175,6 +175,44 @@ export default function PricingTab({ a, positions, excludedIds, otherExcludedIds
 
   // ── Locked positions state: { [funderKey]: { locked: true, payment: number } } ──
   const [lockedPositions, setLockedPositions] = useState({});
+
+  // ── Position overrides state: { [funderKey]: { balance?: string, weekly?: string } } ──
+  const [positionOverrides, setPositionOverrides] = useState({});
+
+  const setOverride = useCallback((funderName, field, value) => {
+    const key = normalizeFunderKey(funderName);
+    setPositionOverrides(prev => {
+      const existing = prev[key] || {};
+      const next = { ...existing, [field]: value };
+      // If both fields are empty/cleared, remove the override entirely
+      if (!next.balance && !next.weekly) {
+        const rest = { ...prev };
+        delete rest[key];
+        return rest;
+      }
+      return { ...prev, [key]: next };
+    });
+  }, []);
+
+  // ── Apply overrides to deduplicated positions ──
+  const effectivePositions = useMemo(() => {
+    return dedupEnrolled.map(dp => {
+      const key = normalizeFunderKey(dp.funder_name);
+      const overrides = positionOverrides[key];
+      if (!overrides) return dp;
+      const newBal = overrides.balance && parseFloat(overrides.balance) > 0 ? parseFloat(overrides.balance) : dp._balance;
+      const newWeekly = overrides.weekly && parseFloat(overrides.weekly) > 0 ? parseFloat(overrides.weekly) : dp._totalWeekly;
+      return {
+        ...dp,
+        _balance: newBal,
+        _totalWeekly: newWeekly,
+        _hasBalanceOverride: !!(overrides.balance && parseFloat(overrides.balance) > 0),
+        _hasWeeklyOverride: !!(overrides.weekly && parseFloat(overrides.weekly) > 0),
+        _origBalance: dp._balance,
+        _origWeekly: dp._totalWeekly,
+      };
+    });
+  }, [dedupEnrolled, positionOverrides]);
 
   const toggleLock = useCallback((funderName) => {
     const key = normalizeFunderKey(funderName);
@@ -202,7 +240,7 @@ export default function PricingTab({ a, positions, excludedIds, otherExcludedIds
 
   const funderIntelMap = useMemo(() => {
     const map = {};
-    dedupEnrolled.forEach(dp => {
+    effectivePositions.forEach(dp => {
       const key = normalizeFunderKey(dp.funder_name);
       const overrides = scoreOverrides[key];
       if (overrides) {
@@ -226,7 +264,7 @@ export default function PricingTab({ a, positions, excludedIds, otherExcludedIds
       }
     });
     return map;
-  }, [JSON.stringify(dedupEnrolled.map(dp => dp.funder_name + dp._balance)), JSON.stringify(scoreOverrides)]);
+  }, [JSON.stringify(effectivePositions.map(dp => dp.funder_name + dp._balance)), JSON.stringify(scoreOverrides)]);
 
   const updateScore = useCallback((funderName, field, value) => {
     const key = normalizeFunderKey(funderName);
@@ -276,13 +314,13 @@ export default function PricingTab({ a, positions, excludedIds, otherExcludedIds
 
   // ── Pricing with locked position carve-out ──
   const pricingResult = useMemo(() => {
-    if (dedupEnrolled.length === 0 || totalBalance <= 0) return { tad: 0, funderTiers: [], maxTerm: 0, warnings: [], totalLocked: 0 };
+    if (effectivePositions.length === 0 || totalBalance <= 0) return { tad: 0, funderTiers: [], maxTerm: 0, warnings: [], totalLocked: 0 };
 
     // TAD = targetMerchantWeekly - FF margin (ISO sits on top, never reduces TAD)
     const tad = Math.max(targetMerchantWeekly - ffMargin, 0);
 
     // Prepare positions with lock status and effective weekly
-    const preparedPositions = dedupEnrolled.map(dp => {
+    const preparedPositions = effectivePositions.map(dp => {
       const agMatch = dp._agMatch || matchAgreementToPosition(dp.funder_name, agreementResults);
       const contractWeekly = getContractWeekly(agMatch);
       const effectiveWeekly = (contractWeekly && contractWeekly > 0) ? contractWeekly : dp._totalWeekly;
@@ -336,6 +374,10 @@ export default function PricingTab({ a, positions, excludedIds, otherExcludedIds
         scoringIntel,
         isLocked: ft.isLocked || false,
         lockedPayment: ft.lockedPayment || 0,
+        _hasBalanceOverride: ft._hasBalanceOverride || false,
+        _hasWeeklyOverride: ft._hasWeeklyOverride || false,
+        _origBalance: ft._origBalance || ft._balance,
+        _origWeekly: ft._origWeekly || ft._totalWeekly,
       };
     });
 
@@ -343,7 +385,7 @@ export default function PricingTab({ a, positions, excludedIds, otherExcludedIds
 
     return { tad, funderTiers, maxTerm, warnings, totalLocked };
   }, [
-    JSON.stringify(dedupEnrolled.map(dp => dp._balance + dp.funder_name)),
+    JSON.stringify(effectivePositions.map(dp => dp._balance + dp._totalWeekly + dp.funder_name)),
     targetMerchantWeekly, ffMargin, enforcementWeighting,
     JSON.stringify(scoreMap), JSON.stringify(lockedPositions),
     JSON.stringify(funderIntelMap), totalBalance,
@@ -392,7 +434,7 @@ export default function PricingTab({ a, positions, excludedIds, otherExcludedIds
             { label: 'Gross Profit', value: fmt(grossProfit), color: '#4caf50' },
             { label: 'Avg Daily Bal', value: fmt(adb), color: '#e8e8f0' },
             { label: 'Current DSR', value: fmtP(currentDSR), color: currentDSR > 40 ? '#ef5350' : currentDSR > 25 ? '#f59e0b' : '#4caf50' },
-            { label: 'Active Positions', value: String(dedupEnrolled.length), color: '#00e5ff' },
+            { label: 'Active Positions', value: String(effectivePositions.length), color: '#00e5ff' },
             { label: 'Weekly Burden', value: fmt(totalCurrentWeekly), color: '#ef5350' },
           ].map((s, i) => (
             <div key={i} style={{ textAlign: 'center' }}>
@@ -576,10 +618,45 @@ export default function PricingTab({ a, positions, excludedIds, otherExcludedIds
                     <span style={{ fontSize: 9, background: 'rgba(245,158,11,0.2)', color: '#f59e0b', padding: '2px 6px', borderRadius: 4, fontWeight: 700 }}>Manual Review</span>
                   )}
                 </div>
-                <div style={{ display: 'flex', gap: 12, fontSize: 11, color: 'rgba(232,232,240,0.4)', alignItems: 'center' }}>
-                  <span>Balance: <strong style={{ color: '#ef9a9a' }}>{fmt(ft.balance)}</strong></span>
-                  <span>Current: <strong style={{ color: 'rgba(232,232,240,0.7)' }}>{fmt(ft.originalWeekly)}/wk</strong></span>
+                <div style={{ display: 'flex', gap: 10, fontSize: 11, color: 'rgba(232,232,240,0.4)', alignItems: 'center', flexWrap: 'wrap' }}>
+                  {/* Editable Balance */}
+                  <span style={{ display: 'inline-flex', alignItems: 'center', gap: 3 }}>
+                    Balance:
+                    <input
+                      type="number"
+                      value={positionOverrides[fKey]?.balance ?? ''}
+                      onChange={e => setOverride(ft.name, 'balance', e.target.value)}
+                      placeholder={String(Math.round(ft._origBalance))}
+                      style={{
+                        width: 95, padding: '2px 5px', borderRadius: 4, fontSize: 11, fontWeight: 700, fontFamily: 'inherit',
+                        background: ft._hasBalanceOverride ? 'rgba(124,58,237,0.12)' : 'rgba(0,0,0,0.25)',
+                        border: `1px solid ${ft._hasBalanceOverride ? 'rgba(124,58,237,0.4)' : 'rgba(255,255,255,0.1)'}`,
+                        color: ft._hasBalanceOverride ? '#b388ff' : '#ef9a9a',
+                      }}
+                    />
+                    {ft._hasBalanceOverride && <span style={{ fontSize: 8, color: '#7c3aed', fontWeight: 700, letterSpacing: 0.3 }} title={`Analyzer: ${fmt(ft._origBalance)}`}>{'✎'}</span>}
+                  </span>
+                  {/* Editable Current Weekly */}
+                  <span style={{ display: 'inline-flex', alignItems: 'center', gap: 3 }}>
+                    Current:
+                    <input
+                      type="number"
+                      value={positionOverrides[fKey]?.weekly ?? ''}
+                      onChange={e => setOverride(ft.name, 'weekly', e.target.value)}
+                      placeholder={String(Math.round(ft._origWeekly))}
+                      style={{
+                        width: 80, padding: '2px 5px', borderRadius: 4, fontSize: 11, fontWeight: 700, fontFamily: 'inherit',
+                        background: ft._hasWeeklyOverride ? 'rgba(124,58,237,0.12)' : 'rgba(0,0,0,0.25)',
+                        border: `1px solid ${ft._hasWeeklyOverride ? 'rgba(124,58,237,0.4)' : 'rgba(255,255,255,0.1)'}`,
+                        color: ft._hasWeeklyOverride ? '#b388ff' : 'rgba(232,232,240,0.7)',
+                      }}
+                    />/wk
+                    {ft._hasWeeklyOverride && <span style={{ fontSize: 8, color: '#7c3aed', fontWeight: 700, letterSpacing: 0.3 }} title={`Analyzer: ${fmt(ft._origWeekly)}/wk`}>{'✎'}</span>}
+                  </span>
                   {!isLocked && <span>Share: <strong style={{ color: '#00e5ff' }}>{((ft.adjustedShare || ft.sharePct) * 100).toFixed(1)}%</strong></span>}
+                  {(ft._hasBalanceOverride || ft._hasWeeklyOverride) && (
+                    <span style={{ fontSize: 8, background: 'rgba(124,58,237,0.15)', color: '#b388ff', padding: '1px 6px', borderRadius: 3, fontWeight: 700, letterSpacing: 0.3, textTransform: 'uppercase' }}>manual override</span>
+                  )}
                   {/* Lock toggle button */}
                   <button
                     onClick={() => toggleLock(ft.name)}
