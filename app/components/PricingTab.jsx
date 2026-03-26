@@ -1,6 +1,8 @@
 'use client';
-import React, { useState, useMemo } from 'react';
-import { scoreAllPositions, calculateAdjustedTAD } from '../../lib/scoringEngine';
+import React, { useState, useMemo, useCallback } from 'react';
+import { scoreAllPositions } from '../../lib/scoringEngine';
+import { autoScorePosition, lookupFunder, getCompositeScore, getRecoveryStakeScore } from '../../lib/funder-intel';
+import { getGraduatedCommissionRate, calculateTierAllocations } from '../../lib/pricing-engine';
 
 // ─── Formatting helpers ──────────────────────────────────────────────────────
 const fmt = (n) => '$' + (parseFloat(n) || 0).toLocaleString('en-US', { minimumFractionDigits: 0, maximumFractionDigits: 0 });
@@ -60,27 +62,32 @@ function getContractWeekly(agMatch) {
   return null;
 }
 
-// ─── Graduated ISO Commission Rate ───────────────────────────────────────────
-function getGraduatedCommissionRate(points) {
-  if (points <= 0) return 0;
-  if (points > 15) points = 15;
-  let rate = 0;
-  rate += Math.min(points, 5) * 0.0075;
-  if (points > 5) rate += Math.min(points - 5, 5) * 0.01;
-  if (points > 10) rate += Math.min(points - 10, 5) * 0.0125;
-  return rate;
-}
-
 // ─── Position dedup helper ───────────────────────────────────────────────────
 function normalizeFunderKey(name) {
   return (name || '').toLowerCase().replace(/[^a-z0-9]/g, '').replace(/advance\d*|position[a-z]?|pos[a-z]?|\(.*?\)/g, '').trim();
+}
+
+// ─── Grade color helper ──────────────────────────────────────────────────────
+function gradeColor(grade) {
+  if (!grade) return 'rgba(232,232,240,0.5)';
+  const g = grade.toUpperCase();
+  if (g.startsWith('A')) return '#4caf50';
+  if (g.startsWith('B')) return '#00bcd4';
+  if (g.startsWith('C')) return '#f59e0b';
+  if (g.startsWith('D')) return '#ef5350';
+  return 'rgba(232,232,240,0.5)';
+}
+
+function tierLabel(tier) {
+  const map = { a_tier: 'A', b_tier: 'B', c_tier: 'C', d_tier: 'D', reverse_mca: 'R-MCA' };
+  return map[tier] || '?';
 }
 
 // ─── Shared inline style helpers ─────────────────────────────────────────────
 const S = {
   section: { fontSize: 13, letterSpacing: 1.5, textTransform: 'uppercase', color: 'rgba(232,232,240,0.5)', marginBottom: 12 },
   divider: { borderTop: '1px solid rgba(255,255,255,0.08)', margin: '16px 0' },
-  kpiBox: (color) => ({ background: 'rgba(0,0,0,0.2)', borderRadius: 8, padding: '8px 10px', textAlign: 'center', flex: 1, minWidth: 100 }),
+  kpiBox: () => ({ background: 'rgba(0,0,0,0.2)', borderRadius: 8, padding: '8px 10px', textAlign: 'center', flex: 1, minWidth: 100 }),
   kpiLabel: { fontSize: 9, color: 'rgba(232,232,240,0.4)', textTransform: 'uppercase', letterSpacing: 0.5, marginBottom: 4 },
   kpiValue: (color) => ({ fontSize: 15, fontWeight: 700, color }),
 };
@@ -90,7 +97,6 @@ const S = {
 // ═════════════════════════════════════════════════════════════════════════════
 export default function PricingTab({ a, positions, excludedIds, otherExcludedIds, depositOverrides, agreementResults, enrolledPositions }) {
   // ── Get ALL positions, then filter to enrolled only ──
-  // This mirrors how NegotiationTab finds enrolled positions
   const allPositions = (positions || a.mca_positions || []).filter(p => !(excludedIds || []).includes(p._id));
   const activePositions = allPositions.filter(p => {
     const status = (p.status || '').toLowerCase().replace(/[_\s]+/g, '');
@@ -99,7 +105,7 @@ export default function PricingTab({ a, positions, excludedIds, otherExcludedIds
 
   // Filter to enrolled positions using the same logic as MCA tab
   const enrolledActive = activePositions.filter(p => {
-    if (enrolledPositions === null) return true; // null = all enrolled
+    if (enrolledPositions === null) return true;
     if (!(enrolledPositions instanceof Set)) return true;
     return enrolledPositions.has(p._id);
   });
@@ -153,7 +159,6 @@ export default function PricingTab({ a, positions, excludedIds, otherExcludedIds
   const revenue = calcAdjustedRevenue(a, depositOverrides);
   const cogs = a.expense_categories?.inventory_cogs || 0;
   const grossProfit = revenue - cogs;
-  const opex = a.expense_categories?.total_operating_expenses || 0;
   const adb = a.balance_summary?.avg_daily_balance || a.calculated_metrics?.avg_daily_balance || 0;
   const biz = a.business_name || 'Business';
 
@@ -168,7 +173,70 @@ export default function PricingTab({ a, positions, excludedIds, otherExcludedIds
   const [ffMarginWeekly, setFfMarginWeekly] = useState('');
   const [enforcementWeighting, setEnforcementWeighting] = useState(false);
 
-  // ── Score positions (for enforceability weighting) ──
+  // ── Locked positions state: { [funderKey]: { locked: true, payment: number } } ──
+  const [lockedPositions, setLockedPositions] = useState({});
+
+  const toggleLock = useCallback((funderName) => {
+    const key = normalizeFunderKey(funderName);
+    setLockedPositions(prev => {
+      const existing = prev[key];
+      if (existing?.locked) {
+        const next = { ...prev };
+        delete next[key];
+        return next;
+      }
+      return { ...prev, [key]: { locked: true, payment: '' } };
+    });
+  }, []);
+
+  const setLockedPayment = useCallback((funderName, value) => {
+    const key = normalizeFunderKey(funderName);
+    setLockedPositions(prev => ({
+      ...prev,
+      [key]: { locked: true, payment: value },
+    }));
+  }, []);
+
+  // ── Funder Intel auto-scoring ──
+  const [scoreOverrides, setScoreOverrides] = useState({});
+
+  const funderIntelMap = useMemo(() => {
+    const map = {};
+    dedupEnrolled.forEach(dp => {
+      const key = normalizeFunderKey(dp.funder_name);
+      const overrides = scoreOverrides[key];
+      if (overrides) {
+        // User has overridden scores
+        const rs = overrides.recovery_stake ?? getRecoveryStakeScore(dp._balance);
+        const enf = overrides.enforceability ?? 5;
+        const agg = overrides.aggressiveness ?? 5;
+        map[key] = {
+          enforceability: enf,
+          aggressiveness: agg,
+          recovery_stake: rs,
+          composite: getCompositeScore(enf, agg, rs),
+          grade: overrides.grade || 'Unknown',
+          tier: overrides.tier || 'unknown',
+          display_name: overrides.display_name || dp.funder_name,
+          notes: overrides.notes || '',
+          auto_scored: overrides.auto_scored ?? false,
+        };
+      } else {
+        map[key] = autoScorePosition(dp.funder_name, dp._balance);
+      }
+    });
+    return map;
+  }, [JSON.stringify(dedupEnrolled.map(dp => dp.funder_name + dp._balance)), JSON.stringify(scoreOverrides)]);
+
+  const updateScore = useCallback((funderName, field, value) => {
+    const key = normalizeFunderKey(funderName);
+    setScoreOverrides(prev => {
+      const existing = prev[key] || funderIntelMap[key] || {};
+      return { ...prev, [key]: { ...existing, [field]: value } };
+    });
+  }, [funderIntelMap]);
+
+  // ── Score positions (for enforceability weighting — uses scoringEngine) ──
   const scoredPositions = useMemo(() => {
     if (!enforcementWeighting) return null;
     const agMap = {};
@@ -179,7 +247,6 @@ export default function PricingTab({ a, positions, excludedIds, otherExcludedIds
     return scoreAllPositions(enrolledActive, agMap);
   }, [enforcementWeighting, JSON.stringify(enrolledActive.map(p => p._id)), JSON.stringify(agreementResults?.map(a => a?.analysis?.funder_name))]);
 
-  // Score map by funder name
   const scoreMap = useMemo(() => {
     if (!scoredPositions) return {};
     const map = {};
@@ -193,10 +260,8 @@ export default function PricingTab({ a, positions, excludedIds, otherExcludedIds
   // ── Graduated commission ──
   const commissionRate = getGraduatedCommissionRate(isoPoints);
   const commissionTotal = totalBalance * commissionRate;
-  const commissionWeekly = (ffMarginWeekly ? 78 : 78); // amortized below with maxTerm
 
-  // ── TAD calculation (from target DSR) ──
-  // Target DSR determines merchant weekly → TAD = merchant weekly - FF margin - (ISO comm amortized)
+  // ── TAD calculation ──
   const targetMerchantWeekly = (revenue * (targetDSR / 100)) / 4.33;
   const ffMargin = ffMarginWeekly ? parseFloat(ffMarginWeekly) : 0;
 
@@ -209,61 +274,82 @@ export default function PricingTab({ a, positions, excludedIds, otherExcludedIds
   ];
   const tierColors = ['#00bcd4', '#7c3aed', '#f59e0b', '#22c55e'];
 
-  // ── Per-funder tiers (TAD isolated from ISO) ──
+  // ── Pricing with locked position carve-out ──
   const pricingResult = useMemo(() => {
-    if (dedupEnrolled.length === 0 || totalBalance <= 0) return { tad: 0, funderTiers: [], maxTerm: 0 };
-
-    const totalOrigWeeklyBurden = dedupEnrolled.reduce((s, dp) => s + dp._totalWeekly, 0);
+    if (dedupEnrolled.length === 0 || totalBalance <= 0) return { tad: 0, funderTiers: [], maxTerm: 0, warnings: [], totalLocked: 0 };
 
     // TAD = targetMerchantWeekly - FF margin (ISO sits on top, never reduces TAD)
     const tad = Math.max(targetMerchantWeekly - ffMargin, 0);
 
-    // Per-funder tier calculations
-    const funderTiers = dedupEnrolled.map(dp => {
+    // Prepare positions with lock status and effective weekly
+    const preparedPositions = dedupEnrolled.map(dp => {
       const agMatch = dp._agMatch || matchAgreementToPosition(dp.funder_name, agreementResults);
       const contractWeekly = getContractWeekly(agMatch);
       const effectiveWeekly = (contractWeekly && contractWeekly > 0) ? contractWeekly : dp._totalWeekly;
-      const originalTermWeeks = effectiveWeekly > 0 ? Math.ceil(dp._balance / effectiveWeekly) : 52;
-      const sharePct = dp._balance / totalBalance;
-
-      // If enforceability weighting enabled, adjust share
       const fKey = normalizeFunderKey(dp.funder_name);
-      const intel = scoreMap[fKey] || null;
-      let adjustedShare = sharePct;
-      if (enforcementWeighting && intel) {
-        const totalComposite = dedupEnrolled.reduce((s, d2) => {
-          const k2 = normalizeFunderKey(d2.funder_name);
-          return s + (scoreMap[k2]?.composite || 5);
-        }, 0);
-        const normalizedScore = (intel.composite || 5) / totalComposite;
-        adjustedShare = (sharePct * 0.60) + (normalizedScore * 0.40);
-      }
-
-      const tiers = tierDefs.map(td => {
-        const tierTAD = tad * td.pct;
-        const allocation = tierTAD * adjustedShare;
-        const proposedTermWeeks = allocation > 0 ? Math.ceil(dp._balance / allocation) : 9999;
-        const weeklyPayment = allocation;
-        const extensionWeeks = proposedTermWeeks - originalTermWeeks;
-        const extensionPct = originalTermWeeks > 0 ? ((proposedTermWeeks / originalTermWeeks) - 1) * 100 : 0;
-        const reductionDollars = effectiveWeekly - weeklyPayment;
-        const reductionPct = effectiveWeekly > 0 ? (reductionDollars / effectiveWeekly) * 100 : 0;
-        return { ...td, weeklyPayment, proposedTermWeeks, extensionWeeks, extensionPct, reductionDollars, reductionPct, allocation };
-      });
+      const lockInfo = lockedPositions[fKey];
+      const isLocked = lockInfo?.locked && lockInfo?.payment && parseFloat(lockInfo.payment) > 0;
+      const lockedPayment = isLocked ? parseFloat(lockInfo.payment) : 0;
 
       return {
-        name: dp.funder_name, balance: dp._balance, originalWeekly: dp._totalWeekly,
-        effectiveWeekly, contractWeekly, originalTermWeeks, sharePct, adjustedShare,
-        tiers, _advCount: dp._advCount, _advances: dp._advances, intel,
+        ...dp,
+        _effectiveWeekly: effectiveWeekly,
+        _contractWeekly: contractWeekly,
+        _isLocked: isLocked,
+        _lockedPayment: lockedPayment,
+        _agMatch: agMatch,
+      };
+    });
+
+    const tierPcts = tierDefs.map(td => td.pct);
+    const { funderTiers: rawTiers, warnings, totalLocked } = calculateTierAllocations(
+      preparedPositions, tad, tierPcts,
+      { enforcementWeighting, scoreMap }
+    );
+
+    // Attach labels and extra display data
+    const funderTiers = rawTiers.map(ft => {
+      const fKey = normalizeFunderKey(ft.funder_name);
+      const intel = funderIntelMap[fKey] || null;
+      const scoringIntel = scoreMap[fKey] || null;
+      const sharePct = totalBalance > 0 ? ft._balance / totalBalance : 0;
+
+      // Add tier labels
+      const tiers = ft.tiers.map((t, i) => ({
+        ...t,
+        ...tierDefs[i],
+      }));
+
+      return {
+        name: ft.funder_name,
+        balance: ft._balance,
+        originalWeekly: ft._totalWeekly,
+        effectiveWeekly: ft._effectiveWeekly || ft._totalWeekly,
+        contractWeekly: ft._contractWeekly || null,
+        originalTermWeeks: ft.originalTermWeeks,
+        sharePct,
+        adjustedShare: ft.adjustedShare || sharePct,
+        tiers,
+        _advCount: ft._advCount || 1,
+        _advances: ft._advances || [],
+        intel,
+        scoringIntel,
+        isLocked: ft.isLocked || false,
+        lockedPayment: ft.lockedPayment || 0,
       };
     });
 
     const maxTerm = Math.max(...funderTiers.flatMap(ft => ft.tiers.map(t => t.proposedTermWeeks)).filter(t => t < 9999), 0);
 
-    return { tad, funderTiers, maxTerm };
-  }, [JSON.stringify(dedupEnrolled.map(dp => dp._balance + dp.funder_name)), targetMerchantWeekly, ffMargin, enforcementWeighting, JSON.stringify(scoreMap), totalBalance]);
+    return { tad, funderTiers, maxTerm, warnings, totalLocked };
+  }, [
+    JSON.stringify(dedupEnrolled.map(dp => dp._balance + dp.funder_name)),
+    targetMerchantWeekly, ffMargin, enforcementWeighting,
+    JSON.stringify(scoreMap), JSON.stringify(lockedPositions),
+    JSON.stringify(funderIntelMap), totalBalance,
+  ]);
 
-  const { tad, funderTiers, maxTerm } = pricingResult;
+  const { tad, funderTiers, maxTerm, warnings, totalLocked } = pricingResult;
 
   // ISO commission amortized over max term
   const isoCommWeekly = maxTerm > 0 ? commissionTotal / maxTerm : 0;
@@ -277,6 +363,11 @@ export default function PricingTab({ a, positions, excludedIds, otherExcludedIds
   // Effective factor rate
   const totalMerchantPays = merchantPaysWeekly * maxTerm;
   const effectiveFactorRate = totalBalance > 0 ? totalMerchantPays / totalBalance : 0;
+
+  // Locked summary
+  const lockedCount = funderTiers.filter(ft => ft.isLocked).length;
+  const unlockedCount = funderTiers.filter(ft => !ft.isLocked).length;
+  const remainingTAD = Math.max(0, tad - totalLocked);
 
   if (enrolledActive.length === 0) {
     return (
@@ -364,12 +455,24 @@ export default function PricingTab({ a, positions, excludedIds, otherExcludedIds
               <input type="checkbox" checked={enforcementWeighting} onChange={e => setEnforcementWeighting(e.target.checked)} style={{ accentColor: '#EAD068', width: 16, height: 16 }} />
               <div>
                 <div style={{ fontSize: 12, color: enforcementWeighting ? '#EAD068' : 'rgba(232,232,240,0.5)', fontWeight: 600 }}>Enable Enforceability Weighting</div>
-                <div style={{ fontSize: 10, color: 'rgba(232,232,240,0.35)' }}>Adjusts TAD allocation using 3-axis composite scores</div>
+                <div style={{ fontSize: 10, color: 'rgba(232,232,240,0.35)' }}>Adjusts TAD allocation using 3-axis composite scores + funder intel</div>
               </div>
             </label>
           </div>
         </div>
       </div>
+
+      {/* ═══════════════ WARNINGS ═══════════════ */}
+      {warnings.length > 0 && warnings.map((w, wi) => (
+        <div key={wi} style={{
+          background: w.level === 'critical' ? 'rgba(239,83,80,0.1)' : 'rgba(245,158,11,0.1)',
+          border: `1px solid ${w.level === 'critical' ? 'rgba(239,83,80,0.4)' : 'rgba(245,158,11,0.4)'}`,
+          borderRadius: 8, padding: '10px 14px', marginBottom: 12, fontSize: 12,
+          color: w.level === 'critical' ? '#ef5350' : '#f59e0b', fontWeight: 600,
+        }}>
+          {w.level === 'critical' ? '🚨' : '⚠️'} {w.message}
+        </div>
+      ))}
 
       {/* ═══════════════ PRICING SUMMARY ═══════════════ */}
       <div style={S.section}>Pricing Summary</div>
@@ -381,7 +484,7 @@ export default function PricingTab({ a, positions, excludedIds, otherExcludedIds
             <div style={{ fontSize: 24, fontWeight: 800, color: '#ef5350' }}>{fmt(totalCurrentWeekly)}</div>
             <div style={{ fontSize: 11, color: 'rgba(232,232,240,0.4)' }}>DSR: {fmtP(currentDSR)}</div>
           </div>
-          <div style={{ fontSize: 28, color: reductionPct > 0 ? '#4caf50' : '#ef5350' }}>→</div>
+          <div style={{ fontSize: 28, color: reductionPct > 0 ? '#4caf50' : '#ef5350' }}>{'\u2192'}</div>
           <div style={{ textAlign: 'center' }}>
             <div style={{ fontSize: 9, color: 'rgba(232,232,240,0.4)', textTransform: 'uppercase', letterSpacing: 0.5, marginBottom: 4 }}>Merchant Pays FF</div>
             <div style={{ fontSize: 24, fontWeight: 800, color: '#00e5ff' }}>{fmtD(merchantPaysWeekly)}</div>
@@ -396,20 +499,29 @@ export default function PricingTab({ a, positions, excludedIds, otherExcludedIds
             { label: 'ISO Commission/wk', value: fmtD(isoCommWeekly), color: '#EAD068' },
             { label: 'FF Margin/wk', value: fmtD(ffFeeWeekly), color: '#CFA529' },
             { label: 'ISO Total', value: fmt(commissionTotal), color: '#EAD068' },
-            { label: 'Max Term', value: maxTerm < 9999 ? `${maxTerm} wks` : '—', color: '#e8e8f0' },
-            { label: 'Eff Factor Rate', value: effectiveFactorRate > 0 ? effectiveFactorRate.toFixed(3) : '—', color: '#7c3aed' },
+            { label: 'Max Term', value: maxTerm < 9999 ? `${maxTerm} wks` : '\u2014', color: '#e8e8f0' },
+            { label: 'Eff Factor Rate', value: effectiveFactorRate > 0 ? effectiveFactorRate.toFixed(3) : '\u2014', color: '#7c3aed' },
             { label: 'Payment Reduction', value: fmtP(reductionPct), color: reductionPct > 0 ? '#4caf50' : '#ef5350' },
           ].map((s, i) => (
-            <div key={i} style={S.kpiBox(s.color)}>
+            <div key={i} style={S.kpiBox()}>
               <div style={S.kpiLabel}>{s.label}</div>
               <div style={S.kpiValue(s.color)}>{s.value}</div>
             </div>
           ))}
         </div>
 
+        {/* Locked position summary */}
+        {lockedCount > 0 && (
+          <div style={{ marginTop: 10, fontSize: 11, textAlign: 'center', color: 'rgba(232,232,240,0.5)' }}>
+            <span style={{ color: '#EAD068' }}>{'🔒'} Locked: {lockedCount} ({fmtD(totalLocked)}/wk)</span>
+            <span style={{ margin: '0 10px' }}>|</span>
+            <span>Unlocked: {unlockedCount} ({fmtD(remainingTAD)}/wk remaining TAD)</span>
+          </div>
+        )}
+
         {/* Waterfall explanation */}
-        <div style={{ fontSize: 10, color: 'rgba(232,232,240,0.3)', marginTop: 10, textAlign: 'center' }}>
-          TAD (isolated): {fmtD(targetMerchantWeekly)} target − {fmtD(ffFeeWeekly)} FF margin = {fmtD(tad)} TAD · Merchant total: TAD + FF + ISO = {fmtD(merchantPaysWeekly)}/wk
+        <div style={{ fontSize: 10, color: 'rgba(232,232,240,0.3)', marginTop: 8, textAlign: 'center' }}>
+          TAD (isolated): {fmtD(targetMerchantWeekly)} target {'\u2212'} {fmtD(ffFeeWeekly)} FF margin = {fmtD(tad)} TAD {'\u00b7'} Merchant total: TAD + FF + ISO = {fmtD(merchantPaysWeekly)}/wk
         </div>
       </div>
 
@@ -435,57 +547,160 @@ export default function PricingTab({ a, positions, excludedIds, otherExcludedIds
       {/* ═══════════════ PER-POSITION BREAKDOWN ═══════════════ */}
       <div style={S.section}>Per-Position Breakdown</div>
       <div style={{ display: 'flex', flexDirection: 'column', gap: 12, marginBottom: 20 }}>
-        {funderTiers.map((ft, fi) => (
-          <div key={fi} style={{ background: 'rgba(0,229,255,0.04)', border: '1px solid rgba(0,229,255,0.12)', borderRadius: 10, padding: 16 }}>
-            {/* Header row */}
-            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
-              <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-                <span style={{ fontSize: 15, color: '#00e5ff', fontWeight: 700 }}>{ft.name}</span>
-                {ft._advCount > 1 && <span style={{ fontSize: 9, background: 'rgba(0,229,255,0.15)', color: '#00e5ff', padding: '1px 6px', borderRadius: 4, fontWeight: 700 }}>{ft._advCount} advances</span>}
-              </div>
-              <div style={{ display: 'flex', gap: 16, fontSize: 11, color: 'rgba(232,232,240,0.4)' }}>
-                <span>Balance: <strong style={{ color: '#ef9a9a' }}>{fmt(ft.balance)}</strong></span>
-                <span>Current: <strong style={{ color: 'rgba(232,232,240,0.7)' }}>{fmt(ft.originalWeekly)}/wk</strong></span>
-                <span>Share: <strong style={{ color: '#00e5ff' }}>{(ft.adjustedShare * 100).toFixed(1)}%</strong>{enforcementWeighting && ft.sharePct !== ft.adjustedShare && <span style={{ color: '#EAD068', fontSize: 9 }}> (was {(ft.sharePct * 100).toFixed(1)}%)</span>}</span>
-              </div>
-            </div>
+        {funderTiers.map((ft, fi) => {
+          const fKey = normalizeFunderKey(ft.name);
+          const lockInfo = lockedPositions[fKey];
+          const isLocked = ft.isLocked;
+          const intel = ft.intel;
+          const isUnknownFunder = intel && !intel.auto_scored;
 
-            {/* Original term bar */}
-            <div style={{ fontSize: 11, color: 'rgba(232,232,240,0.5)', marginBottom: 10, padding: '6px 10px', background: 'rgba(0,0,0,0.2)', borderRadius: 6 }}>
-              Original Term: <strong style={{ color: 'rgba(232,232,240,0.8)' }}>{ft.originalTermWeeks} wks</strong> (~{Math.round(ft.originalTermWeeks / 4.33)} months)
-              {ft.contractWeekly > 0 && <span style={{ marginLeft: 8 }}>· Contract: {fmtD(ft.contractWeekly)}/wk</span>}
-            </div>
+          return (
+            <div key={fi} style={{
+              background: isLocked ? 'rgba(234,208,104,0.06)' : 'rgba(0,229,255,0.04)',
+              border: `1px solid ${isLocked ? 'rgba(234,208,104,0.25)' : 'rgba(0,229,255,0.12)'}`,
+              borderRadius: 10, padding: 16,
+            }}>
+              {/* Header row */}
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                  {isLocked && <span style={{ fontSize: 14 }}>{'🔒'}</span>}
+                  <span style={{ fontSize: 15, color: isLocked ? '#EAD068' : '#00e5ff', fontWeight: 700 }}>{ft.name}</span>
+                  {ft._advCount > 1 && <span style={{ fontSize: 9, background: 'rgba(0,229,255,0.15)', color: '#00e5ff', padding: '1px 6px', borderRadius: 4, fontWeight: 700 }}>{ft._advCount} advances</span>}
+                  {isLocked && <span style={{ fontSize: 9, background: 'rgba(234,208,104,0.2)', color: '#EAD068', padding: '2px 8px', borderRadius: 4, fontWeight: 700, letterSpacing: 0.5, textTransform: 'uppercase' }}>Locked</span>}
+                  {enforcementWeighting && intel && (
+                    <span style={{ fontSize: 9, background: `${gradeColor(intel.grade)}22`, color: gradeColor(intel.grade), padding: '2px 8px', borderRadius: 4, fontWeight: 700 }}>
+                      {intel.grade} {'\u00b7'} Tier {tierLabel(intel.tier)}
+                    </span>
+                  )}
+                  {enforcementWeighting && isUnknownFunder && (
+                    <span style={{ fontSize: 9, background: 'rgba(245,158,11,0.2)', color: '#f59e0b', padding: '2px 6px', borderRadius: 4, fontWeight: 700 }}>Manual Review</span>
+                  )}
+                </div>
+                <div style={{ display: 'flex', gap: 12, fontSize: 11, color: 'rgba(232,232,240,0.4)', alignItems: 'center' }}>
+                  <span>Balance: <strong style={{ color: '#ef9a9a' }}>{fmt(ft.balance)}</strong></span>
+                  <span>Current: <strong style={{ color: 'rgba(232,232,240,0.7)' }}>{fmt(ft.originalWeekly)}/wk</strong></span>
+                  {!isLocked && <span>Share: <strong style={{ color: '#00e5ff' }}>{((ft.adjustedShare || ft.sharePct) * 100).toFixed(1)}%</strong></span>}
+                  {/* Lock toggle button */}
+                  <button
+                    onClick={() => toggleLock(ft.name)}
+                    style={{
+                      fontSize: 10, padding: '3px 10px', borderRadius: 5, cursor: 'pointer', fontFamily: 'inherit', fontWeight: 600,
+                      background: isLocked ? 'rgba(234,208,104,0.15)' : 'rgba(255,255,255,0.08)',
+                      border: `1px solid ${isLocked ? 'rgba(234,208,104,0.4)' : 'rgba(255,255,255,0.15)'}`,
+                      color: isLocked ? '#EAD068' : 'rgba(232,232,240,0.5)',
+                    }}
+                  >
+                    {isLocked ? '🔓 Unlock' : '🔒 Lock Payment'}
+                  </button>
+                </div>
+              </div>
 
-            {/* 4-tier grid */}
-            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 8 }}>
-              {ft.tiers.map((t, ti) => (
-                <div key={ti} style={{ background: `${tierColors[ti]}08`, border: `1px solid ${tierColors[ti]}33`, borderRadius: 8, padding: 10 }}>
-                  <div style={{ fontSize: 11, fontWeight: 700, color: tierColors[ti], marginBottom: 6, textTransform: 'uppercase', letterSpacing: 0.5 }}>{t.label}</div>
-                  <div style={{ fontSize: 11, color: 'rgba(232,232,240,0.6)', lineHeight: 1.9 }}>
-                    <div><strong style={{ color: tierColors[ti], fontSize: 13 }}>{fmtD(t.weeklyPayment)}/wk</strong></div>
-                    <div>{ft.originalTermWeeks} → <strong>{t.proposedTermWeeks} wks</strong></div>
-                    <div style={{ color: '#888', fontSize: 10 }}>+{t.extensionWeeks} wks ({(parseFloat(t.extensionPct) || 0).toFixed(0)}%)</div>
-                    <div>Reduction: <strong>{(parseFloat(t.reductionPct) || 0).toFixed(1)}%</strong></div>
+              {/* Lock payment input (when toggled) */}
+              {lockInfo?.locked && (
+                <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 10, padding: '8px 12px', background: 'rgba(234,208,104,0.06)', border: '1px solid rgba(234,208,104,0.15)', borderRadius: 6 }}>
+                  <label style={{ fontSize: 11, color: '#EAD068', fontWeight: 600, whiteSpace: 'nowrap' }}>Locked Weekly Payment:</label>
+                  <input
+                    type="number"
+                    value={lockInfo.payment}
+                    onChange={e => setLockedPayment(ft.name, e.target.value)}
+                    placeholder="$0.00"
+                    style={{ width: 160, padding: '6px 10px', borderRadius: 5, border: '1px solid rgba(234,208,104,0.3)', background: 'rgba(0,0,0,0.3)', color: '#EAD068', fontSize: 14, fontFamily: 'inherit', fontWeight: 700 }}
+                  />
+                  <span style={{ fontSize: 10, color: 'rgba(232,232,240,0.4)' }}>/wk</span>
+                  {isLocked && ft.lockedPayment > 0 && (
+                    <span style={{ fontSize: 10, color: 'rgba(232,232,240,0.4)', marginLeft: 8 }}>
+                      Term: {Math.ceil(ft.balance / ft.lockedPayment)} wks (~{Math.round(Math.ceil(ft.balance / ft.lockedPayment) / 4.33)} mo)
+                    </span>
+                  )}
+                </div>
+              )}
+
+              {/* Original term bar */}
+              <div style={{ fontSize: 11, color: 'rgba(232,232,240,0.5)', marginBottom: 10, padding: '6px 10px', background: 'rgba(0,0,0,0.2)', borderRadius: 6 }}>
+                Original Term: <strong style={{ color: 'rgba(232,232,240,0.8)' }}>{ft.originalTermWeeks} wks</strong> (~{Math.round(ft.originalTermWeeks / 4.33)} months)
+                {ft.contractWeekly > 0 && <span style={{ marginLeft: 8 }}>{'\u00b7'} Contract: {fmtD(ft.contractWeekly)}/wk</span>}
+              </div>
+
+              {/* Funder intel + three-axis scoring (when EW enabled) */}
+              {enforcementWeighting && intel && (
+                <div style={{ marginBottom: 10, padding: '10px 12px', background: isUnknownFunder ? 'rgba(245,158,11,0.06)' : 'rgba(234,208,104,0.06)', border: `1px solid ${isUnknownFunder ? 'rgba(245,158,11,0.2)' : 'rgba(234,208,104,0.15)'}`, borderRadius: 6 }}>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 6 }}>
+                    <div style={{ fontSize: 10, color: '#EAD068', fontWeight: 700, textTransform: 'uppercase', letterSpacing: 0.5 }}>
+                      Funder Intelligence {isUnknownFunder ? '(Unmatched)' : '(Auto-Scored)'}
+                    </div>
+                    <div style={{ fontSize: 11, color: '#EAD068', fontWeight: 700 }}>
+                      Composite: {intel.composite.toFixed(2)}
+                    </div>
                   </div>
-                </div>
-              ))}
-            </div>
 
-            {/* Three-axis scoring (when enforceability weighting enabled) */}
-            {enforcementWeighting && ft.intel && (
-              <div style={{ marginTop: 8, padding: '8px 10px', background: 'rgba(234,208,104,0.06)', border: '1px solid rgba(234,208,104,0.15)', borderRadius: 6 }}>
-                <div style={{ fontSize: 10, color: '#EAD068', fontWeight: 700, textTransform: 'uppercase', letterSpacing: 0.5, marginBottom: 4 }}>Three-Axis Score</div>
-                <div style={{ display: 'flex', gap: 16, fontSize: 11 }}>
-                  <div style={{ color: 'rgba(232,232,240,0.5)' }}>Enforceability: <strong style={{ color: ft.intel.enforceability >= 6 ? '#ef9a9a' : '#81c784' }}>{ft.intel.enforceability}/10</strong></div>
-                  <div style={{ color: 'rgba(232,232,240,0.5)' }}>Aggressiveness: <strong style={{ color: ft.intel.aggressiveness >= 6 ? '#ef9a9a' : '#81c784' }}>{ft.intel.aggressiveness}/10</strong></div>
-                  <div style={{ color: 'rgba(232,232,240,0.5)' }}>Recovery Stake: <strong style={{ color: '#e8e8f0' }}>{ft.intel.recoveryStake}/10</strong></div>
-                  <div style={{ color: 'rgba(232,232,240,0.5)' }}>Composite: <strong style={{ color: '#EAD068' }}>{ft.intel.composite.toFixed(1)}</strong></div>
-                  <div style={{ color: 'rgba(232,232,240,0.5)' }}>Quadrant: <strong style={{ color: '#7c3aed' }}>{ft.intel.quadrant}</strong></div>
+                  {/* Score dropdowns */}
+                  <div style={{ display: 'flex', gap: 14, marginBottom: 6, flexWrap: 'wrap' }}>
+                    {[
+                      { label: 'Enforceability', field: 'enforceability', value: intel.enforceability, highBad: true },
+                      { label: 'Aggressiveness', field: 'aggressiveness', value: intel.aggressiveness, highBad: true },
+                      { label: 'Recovery Stake', field: 'recovery_stake', value: intel.recovery_stake, highBad: false },
+                    ].map((axis, ai) => (
+                      <div key={ai} style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
+                        <span style={{ fontSize: 10, color: 'rgba(232,232,240,0.5)' }}>{axis.label}:</span>
+                        <select
+                          value={axis.value}
+                          onChange={e => updateScore(ft.name, axis.field, Number(e.target.value))}
+                          style={{
+                            background: 'rgba(0,0,0,0.3)', border: `1px solid ${isUnknownFunder ? 'rgba(245,158,11,0.4)' : 'rgba(234,208,104,0.2)'}`,
+                            color: axis.highBad ? (axis.value >= 7 ? '#ef9a9a' : axis.value >= 5 ? '#f59e0b' : '#81c784') : '#e8e8f0',
+                            fontSize: 12, fontWeight: 700, padding: '2px 4px', borderRadius: 4, fontFamily: 'inherit',
+                          }}
+                        >
+                          {Array.from({ length: 10 }, (_, i) => i + 1).map(v => (
+                            <option key={v} value={v}>{v}</option>
+                          ))}
+                        </select>
+                      </div>
+                    ))}
+                  </div>
+
+                  {/* Intel notes */}
+                  {intel.notes && (
+                    <div style={{ fontSize: 10, color: 'rgba(232,232,240,0.45)', lineHeight: 1.5, fontStyle: 'italic' }}>
+                      {intel.notes}
+                    </div>
+                  )}
                 </div>
+              )}
+
+              {/* 4-tier grid */}
+              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 8 }}>
+                {ft.tiers.map((t, ti) => (
+                  <div key={ti} style={{
+                    background: isLocked ? 'rgba(234,208,104,0.05)' : `${tierColors[ti]}08`,
+                    border: `1px solid ${isLocked ? 'rgba(234,208,104,0.2)' : `${tierColors[ti]}33`}`,
+                    borderRadius: 8, padding: 10,
+                  }}>
+                    <div style={{ fontSize: 11, fontWeight: 700, color: isLocked ? '#EAD068' : tierColors[ti], marginBottom: 6, textTransform: 'uppercase', letterSpacing: 0.5 }}>{t.label}</div>
+                    <div style={{ fontSize: 11, color: 'rgba(232,232,240,0.6)', lineHeight: 1.9 }}>
+                      <div><strong style={{ color: isLocked ? '#EAD068' : tierColors[ti], fontSize: 13 }}>{fmtD(t.weeklyPayment)}/wk</strong></div>
+                      {isLocked ? (
+                        <div style={{ color: '#EAD068', fontSize: 10 }}>(locked)</div>
+                      ) : (
+                        <>
+                          <div>{ft.originalTermWeeks} {'\u2192'} <strong>{t.proposedTermWeeks < 9999 ? t.proposedTermWeeks : '\u221E'} wks</strong></div>
+                          <div style={{ color: '#888', fontSize: 10 }}>+{t.extensionWeeks} wks ({(parseFloat(t.extensionPct) || 0).toFixed(0)}%)</div>
+                        </>
+                      )}
+                      <div style={{ fontSize: 10 }}>
+                        {isLocked ? (
+                          <span style={{ color: 'rgba(234,208,104,0.6)' }}>Term: {t.proposedTermWeeks} wks</span>
+                        ) : (
+                          <span>Reduction: <strong>{(parseFloat(t.reductionPct) || 0).toFixed(1)}%</strong></span>
+                        )}
+                      </div>
+                    </div>
+                  </div>
+                ))}
               </div>
-            )}
-          </div>
-        ))}
+            </div>
+          );
+        })}
       </div>
 
       {/* ═══════════════ GRADUATED COMMISSION REFERENCE TABLE ═══════════════ */}
@@ -504,7 +719,7 @@ export default function PricingTab({ a, positions, excludedIds, otherExcludedIds
             {Array.from({ length: 16 }, (_, pts) => {
               const rate = getGraduatedCommissionRate(pts);
               const isActive = pts === isoPoints;
-              const tier = pts === 0 ? '—' : pts <= 5 ? '1 (0.75%/pt)' : pts <= 10 ? '2 (1.00%/pt)' : '3 (1.25%/pt)';
+              const tier = pts === 0 ? '\u2014' : pts <= 5 ? '1 (0.75%/pt)' : pts <= 10 ? '2 (1.00%/pt)' : '3 (1.25%/pt)';
               return (
                 <tr key={pts} style={{ borderBottom: '1px solid rgba(255,255,255,0.04)', background: isActive ? 'rgba(234,208,104,0.08)' : 'transparent' }}>
                   <td style={{ padding: '5px 10px', color: isActive ? '#EAD068' : '#e8e8f0', fontWeight: isActive ? 700 : 400 }}>{pts}</td>
