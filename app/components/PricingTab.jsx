@@ -165,11 +165,6 @@ export default function PricingTab({ a, positions, excludedIds, otherExcludedIds
   const adb = a.balance_summary?.avg_daily_balance || a.calculated_metrics?.avg_daily_balance || 0;
   const biz = a.business_name || 'Business';
 
-  // ── Totals (from effective positions with overrides applied) ──
-  const totalBalance = effectivePositions.reduce((s, dp) => s + dp._balance, 0);
-  const totalCurrentWeekly = effectivePositions.reduce((s, dp) => s + dp._totalWeekly, 0);
-  const currentDSR = revenue > 0 ? ((totalCurrentWeekly * 4.33) / revenue) * 100 : 0;
-
   // ── Deal Controls state ──
   const [isoPoints, setIsoPoints] = useState(11);
   const [targetDSR, setTargetDSR] = useState(22);
@@ -218,6 +213,11 @@ export default function PricingTab({ a, positions, excludedIds, otherExcludedIds
       };
     });
   }, [dedupEnrolled, positionOverrides]);
+
+  // ── Totals (from effective positions with overrides applied) ──
+  const totalBalance = effectivePositions.reduce((s, dp) => s + dp._balance, 0);
+  const totalCurrentWeekly = effectivePositions.reduce((s, dp) => s + dp._totalWeekly, 0);
+  const currentDSR = revenue > 0 ? ((totalCurrentWeekly * 4.33) / revenue) * 100 : 0;
 
   const toggleLock = useCallback((funderName) => {
     const key = normalizeFunderKey(funderName);
