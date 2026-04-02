@@ -353,12 +353,32 @@ When a funder's agreement shows prior_balance_is_self_renewal: true, this means 
       "recommended_weekly": 0,
       "reduction_pct": 0,
       "remaining_balance": 0,
+      "remaining_balance_method": "string — how the balance was calculated: 'agreement_minus_payments', 'payoff_statement', or 'estimated'",
+      "total_contracted_payments": 0,
+      "payments_made_count": 0,
+      "payments_remaining_count": 0,
       "recommended_term_weeks": 0,
       "rationale": "string — why this funder should accept these terms"
     }],
     "repayment_guarantee": "string — explain how restructured terms ensure 100% repayment"
   }
 }
+
+### REMAINING BALANCE ESTIMATION — Per Position
+For each funder position, calculate the estimated remaining balance:
+
+Step 1: Get the total payback amount (purchased_amount) from the agreement
+Step 2: Get the contracted payment amount (weekly_payment or daily_payment × 5)
+Step 3: Calculate total contracted payments: purchased_amount / weekly_payment = total_weeks
+Step 4: Get the agreement effective_date or funding_date
+Step 5: Count payments that SHOULD have been made: weeks from funding_date to the last bank statement date
+Step 6: Cross-check against actual payments seen in bank statement data (payments_detected from bank analysis)
+Step 7: Use the HIGHER of Step 5 and Step 6 for payments_made_count (some payments may have been made outside the statement window)
+Step 8: remaining_balance = purchased_amount - (payments_made_count × weekly_payment)
+Step 9: If remaining_balance < 0, set to 0 (position may be paid off or near completion)
+
+This calculation is critical because the Pricing tab needs accurate balances to allocate TAD correctly.
+If no agreement data is available for a position, use: estimated_balance = weekly_payment × remaining_weeks_estimate (default 26 weeks if unknown).
 
 RULES:
 1. Revenue discrepancy calculation:
