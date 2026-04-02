@@ -686,6 +686,22 @@ export default function PricingTab({ a, positions, excludedIds, otherExcludedIds
         </div>
       </div>
 
+      {/* ISO/Merchant Quote */}
+      <div style={{
+        background: 'rgba(0,0,0,0.3)', border: '1px solid rgba(255,255,255,0.08)',
+        borderRadius: 10, padding: '14px 20px', marginBottom: 20,
+      }}>
+        <div style={{ fontSize: 10, color: '#00e5ff', fontWeight: 700, textTransform: 'uppercase', letterSpacing: 0.5, marginBottom: 6 }}>
+          ISO/Merchant Quote
+        </div>
+        <div style={{ fontSize: 13, color: 'rgba(232,232,240,0.7)', lineHeight: 1.6, fontStyle: 'italic' }}>
+          {'"'}Your new payment is <strong style={{ color: '#4caf50' }}>{fmtD(selectedMerchantWeekly)}/week</strong>.
+          The estimated term is <strong style={{ color: '#e8e8f0' }}>{Math.round(maxTerm / 4.33)} months</strong> depending
+          on how negotiations go with your funders. Some funders may accept shorter terms, which means you
+          could be done sooner.{'"'}
+        </div>
+      </div>
+
       {/* ═══════════════ PER-POSITION BREAKDOWN ═══════════════ */}
       <div style={S.section}>Per-Position Breakdown</div>
       <div style={{ display: 'flex', flexDirection: 'column', gap: 12, marginBottom: 20 }}>
