@@ -173,6 +173,7 @@ export default function PricingTab({ a, positions, excludedIds, otherExcludedIds
   const [targetDSR, setTargetDSR] = useState(22);
   const [ffMarginWeekly, setFfMarginWeekly] = useState('');
   const [enforcementWeighting, setEnforcementWeighting] = useState(false);
+  const [selectedTierIdx, setSelectedTierIdx] = useState(0); // 0=Opening, 1=Mid1, 2=Mid2, 3=Final
 
   // ── Locked positions state: { [funderKey]: { locked: true, payment: number } } ──
   const [lockedPositions, setLockedPositions] = useState({});
