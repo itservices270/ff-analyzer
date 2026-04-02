@@ -674,7 +674,7 @@ function MCATab({ a, positions, setPositions, excludedIds, setExcludedIds, other
 
   const startEdit = (p) => {
     setEditingId(p._id);
-    setEditValues({ funder_name: p.funder_name, payment_amount: p.payment_amount_current || p.payment_amount, frequency: p.frequency, payments_detected: p.payments_detected });
+    setEditValues({ funder_name: p.funder_name, payment_amount: p.payment_amount_current || p.payment_amount, frequency: p.frequency, payments_detected: p.payments_detected, estimated_balance: p.estimated_balance || '' });
   };
   const saveEdit = (id) => {
     const v = editValues;
@@ -690,6 +690,7 @@ function MCATab({ a, positions, setPositions, excludedIds, setExcludedIds, other
       frequency: v.frequency,
       payments_detected: pd,
       estimated_monthly_total: monthly,
+      estimated_balance: parseFloat(v.estimated_balance) || null,
       isEdited: true,
     } : p));
     setEditingId(null);
@@ -898,6 +899,7 @@ function MCATab({ a, positions, setPositions, excludedIds, setExcludedIds, other
                       <option value="monthly">Monthly</option>
                     </select>
                   </div>
+                  <input value={editValues.estimated_balance} onChange={e => setEditValues(v => ({...v, estimated_balance: e.target.value}))} placeholder="Est. balance" type="number" style={{ padding: '4px 8px', borderRadius: 6, border: '1px solid rgba(0,229,255,0.3)', background: 'rgba(0,0,0,0.3)', color: '#e8e8f0', fontSize: 13, fontFamily: 'inherit', width: 120 }} />
                   <div style={{ display: 'flex', gap: 6 }}>
                     <button onClick={() => saveEdit(p._id)} style={{ padding: '4px 12px', borderRadius: 6, border: 'none', background: 'rgba(0,229,255,0.2)', color: '#00e5ff', cursor: 'pointer', fontSize: 12, fontFamily: 'inherit' }}>✓ Save</button>
                     <button onClick={() => setEditingId(null)} style={{ padding: '4px 10px', borderRadius: 6, border: '1px solid rgba(255,255,255,0.12)', background: 'transparent', color: 'rgba(232,232,240,0.5)', cursor: 'pointer', fontSize: 12, fontFamily: 'inherit' }}>Cancel</button>
@@ -907,6 +909,12 @@ function MCATab({ a, positions, setPositions, excludedIds, setExcludedIds, other
                 <div style={{ textAlign: 'right' }}>
                   <div style={{ fontSize: 20, color: (p.position_type || 'mca').toLowerCase() === 'loc' ? '#64b5f6' : (p.position_type || 'mca').toLowerCase() === 'true_split' ? '#ce93d8' : (p.position_type || 'mca').toLowerCase() === 'reverse_mca' ? '#ffb74d' : '#ef9a9a' }}>{fmt(p.estimated_monthly_total)}<span style={{ fontSize: 12, color: 'rgba(232,232,240,0.4)' }}>/mo{(p.position_type || 'mca').toLowerCase() === 'true_split' ? ' (est)' : ''}</span></div>
                   <div style={{ fontSize: 13, color: 'rgba(232,232,240,0.5)' }}>{fmt(p.payment_amount_current || p.payment_amount)} × {p.payments_detected} pmts</div>
+                  {p.estimated_balance && (
+                    <div style={{ fontSize: 11, color: 'rgba(232,232,240,0.45)' }}>
+                      Est. Balance: <span style={{ color: '#00e5ff' }}>${(p.estimated_balance).toLocaleString()}</span>
+                      {p.isEdited && <span style={{ marginLeft: 4, fontSize: 9, color: 'rgba(0,229,255,0.5)' }}>&#9998; manual</span>}
+                    </div>
+                  )}
                 </div>
               )}
               {editingId !== p._id && (
