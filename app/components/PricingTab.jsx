@@ -125,9 +125,10 @@ export default function PricingTab({ a, positions, excludedIds, otherExcludedIds
         if (matchKey.length >= 6 && dpKey.length >= 6 && (matchKey.includes(dpKey.slice(0, 6)) || dpKey.includes(matchKey.slice(0, 6)))) {
           const advWeekly = toWeeklyEquiv(p.payment_amount_current || p.payment_amount || 0, p.frequency);
           const advAgMatch = matchAgreementToPosition(p.funder_name, agreementResults);
-          const advBalance = advAgMatch?.analysis?.financial_terms?.purchased_amount
-            ? Math.round(advAgMatch.analysis.financial_terms.purchased_amount)
-            : (p.estimated_balance || Math.round(advWeekly * 52));
+          const advBalance = p.estimated_balance
+            || (advAgMatch?.analysis?.financial_terms?.purchased_amount
+              ? Math.round(advAgMatch.analysis.financial_terms.purchased_amount)
+              : Math.round(advWeekly * 52));
           dp._totalWeekly += advWeekly;
           dp._balance += advBalance;
           dp._advCount++;
@@ -140,9 +141,11 @@ export default function PricingTab({ a, positions, excludedIds, otherExcludedIds
       if (!found) {
         const agMatch = matchAgreementToPosition(p.funder_name, agreementResults);
         const weekly = toWeeklyEquiv(p.payment_amount_current || p.payment_amount || 0, p.frequency);
-        const bal = agMatch?.analysis?.financial_terms?.purchased_amount
-          ? Math.round(agMatch.analysis.financial_terms.purchased_amount)
-          : (p.estimated_balance || Math.round(weekly * 52));
+        // Priority: 1) manual override / cross-ref enriched, 2) agreement purchased_amount, 3) fallback
+        const bal = p.estimated_balance
+          || (agMatch?.analysis?.financial_terms?.purchased_amount
+            ? Math.round(agMatch.analysis.financial_terms.purchased_amount)
+            : Math.round(weekly * 52));
         result.push({
           ...p,
           funder_name: p.funder_name.replace(/\s*\(Advance\s*\d+\)/i, '').replace(/\s*\(Position\s*[A-Z]\)/i, '').trim(),
