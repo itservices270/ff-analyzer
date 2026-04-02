@@ -792,33 +792,49 @@ export default function PricingTab({ a, positions, excludedIds, otherExcludedIds
                 </div>
               )}
 
-              {/* 4-tier grid */}
-              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 8 }}>
-                {(ft.tiers || []).map((t, ti) => (
-                  <div key={ti} style={{
-                    background: isLocked ? 'rgba(234,208,104,0.05)' : `${tierColors[ti]}08`,
-                    border: `1px solid ${isLocked ? 'rgba(234,208,104,0.2)' : `${tierColors[ti]}33`}`,
-                    borderRadius: 8, padding: 10,
+              {/* Selected tier — prominent display */}
+              {(() => {
+                const selectedTier = (ft.tiers || [])[selectedTierIdx];
+                if (!selectedTier) return null;
+                return (
+                  <div style={{
+                    background: isLocked ? 'rgba(234,208,104,0.06)' : `${tierColors[selectedTierIdx]}10`,
+                    border: `1px solid ${isLocked ? 'rgba(234,208,104,0.2)' : `${tierColors[selectedTierIdx]}40`}`,
+                    borderRadius: 10, padding: '14px 16px', marginBottom: 8,
                   }}>
-                    <div style={{ fontSize: 11, fontWeight: 700, color: isLocked ? '#EAD068' : tierColors[ti], marginBottom: 6, textTransform: 'uppercase', letterSpacing: 0.5 }}>{t.label}</div>
-                    <div style={{ fontSize: 11, color: 'rgba(232,232,240,0.6)', lineHeight: 1.9 }}>
-                      <div><strong style={{ color: isLocked ? '#EAD068' : tierColors[ti], fontSize: 13 }}>{fmtD(t.weeklyPayment)}/wk</strong></div>
-                      {isLocked ? (
-                        <div style={{ color: '#EAD068', fontSize: 10 }}>(locked)</div>
-                      ) : (
-                        <>
-                          <div>{ft.originalTermWeeks || 0} {'\u2192'} <strong>{(t.proposedTermWeeks || 0) < 9999 ? (t.proposedTermWeeks || 0) : '\u221E'} wks</strong></div>
-                          <div style={{ color: '#888', fontSize: 10 }}>+{t.extensionWeeks || 0} wks ({(parseFloat(t.extensionPct) || 0).toFixed(0)}%)</div>
-                        </>
-                      )}
-                      <div style={{ fontSize: 10 }}>
-                        {isLocked ? (
-                          <span style={{ color: 'rgba(234,208,104,0.6)' }}>Term: {t.proposedTermWeeks} wks</span>
-                        ) : (
-                          <span>Reduction: <strong>{(parseFloat(t.reductionPct) || 0).toFixed(1)}%</strong></span>
-                        )}
+                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
+                      <div style={{ fontSize: 12, fontWeight: 700, color: isLocked ? '#EAD068' : tierColors[selectedTierIdx], textTransform: 'uppercase' }}>
+                        {selectedTier.label} ({(selectedTier.pct * 100).toFixed(0)}%)
+                        {isLocked && ' (locked)'}
+                      </div>
+                      <div style={{ fontSize: 20, fontWeight: 800, color: isLocked ? '#EAD068' : tierColors[selectedTierIdx] }}>
+                        {fmtD(selectedTier.weeklyPayment)}/wk
                       </div>
                     </div>
+                    <div style={{ display: 'flex', gap: 16, fontSize: 11, color: 'rgba(232,232,240,0.6)' }}>
+                      <span>Term: <strong>{(selectedTier.proposedTermWeeks || 0) < 9999 ? (selectedTier.proposedTermWeeks || 0) : '\u221E'} wks</strong></span>
+                      {!isLocked && <span>Extension: +{selectedTier.extensionWeeks || 0} wks ({(parseFloat(selectedTier.extensionPct) || 0).toFixed(0)}%)</span>}
+                      <span>Reduction: <strong style={{ color: isLocked ? '#EAD068' : tierColors[selectedTierIdx] }}>{(parseFloat(selectedTier.reductionPct) || 0).toFixed(1)}%</strong></span>
+                    </div>
+                  </div>
+                );
+              })()}
+
+              {/* All tiers — compact reference row */}
+              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 4 }}>
+                {(ft.tiers || []).map((t, ti) => (
+                  <div
+                    key={ti}
+                    onClick={() => setSelectedTierIdx(ti)}
+                    style={{
+                      background: ti === selectedTierIdx ? `${tierColors[ti]}12` : 'rgba(0,0,0,0.15)',
+                      border: `1px solid ${ti === selectedTierIdx ? `${tierColors[ti]}40` : 'rgba(255,255,255,0.04)'}`,
+                      borderRadius: 6, padding: '6px 8px', textAlign: 'center', cursor: 'pointer',
+                      fontSize: 10, color: ti === selectedTierIdx ? tierColors[ti] : 'rgba(232,232,240,0.35)',
+                    }}
+                  >
+                    <div style={{ fontWeight: 600 }}>{t.label}</div>
+                    <div style={{ fontWeight: 700 }}>{fmtD(t.weeklyPayment)}</div>
                   </div>
                 ))}
               </div>
