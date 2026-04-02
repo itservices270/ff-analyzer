@@ -576,20 +576,47 @@ export default function PricingTab({ a, positions, excludedIds, otherExcludedIds
         </div>
       </div>
 
-      {/* ═══════════════ OFFER TIER GRID ═══════════════ */}
-      <div style={S.section}>Offer Tier Grid</div>
+      {/* ═══════════════ OFFER TIERS (CLICKABLE) ═══════════════ */}
+      <div style={S.divider} />
+      <div style={S.section}>Select Offer Tier</div>
       <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 10, marginBottom: 20 }}>
-        {tierDefs.map((td, ti) => {
-          const tierTotalToFunders = funderTiers.reduce((s, ft) => s + (ft.tiers?.[ti]?.weeklyPayment || 0), 0);
-          const tierMaxTerm = Math.max(...funderTiers.map(ft => ft.tiers?.[ti]?.proposedTermWeeks || 0).filter(t => t > 0 && t < 9999), 0);
+        {tierDefs.map((td, i) => {
+          const isSelected = selectedTierIdx === i;
+          const tierTAD = tad * td.pct;
           return (
-            <div key={ti} style={{ background: `${tierColors[ti]}0a`, border: `1px solid ${tierColors[ti]}44`, borderRadius: 10, padding: 16, textAlign: 'center' }}>
-              <div style={{ fontSize: 13, fontWeight: 700, color: tierColors[ti], marginBottom: 4 }}>{td.label}</div>
-              <div style={{ fontSize: 11, color: 'rgba(232,232,240,0.4)', marginBottom: 10 }}>{(td.pct * 100).toFixed(0)}% TAD</div>
-              <div style={{ fontSize: 9, color: 'rgba(232,232,240,0.35)', textTransform: 'uppercase', marginBottom: 2 }}>Total to Funders</div>
-              <div style={{ fontSize: 18, fontWeight: 800, color: tierColors[ti], marginBottom: 8 }}>{fmtD(tierTotalToFunders)}/wk</div>
-              <div style={{ fontSize: 9, color: 'rgba(232,232,240,0.35)', textTransform: 'uppercase', marginBottom: 2 }}>Max Term</div>
-              <div style={{ fontSize: 14, fontWeight: 700, color: 'rgba(232,232,240,0.7)' }}>{tierMaxTerm} wks <span style={{ fontSize: 10, color: 'rgba(232,232,240,0.35)' }}>~{Math.round(tierMaxTerm / 4.33)} mo</span></div>
+            <div
+              key={td.key}
+              onClick={() => setSelectedTierIdx(i)}
+              style={{
+                background: isSelected ? `${tierColors[i]}15` : 'rgba(0,0,0,0.2)',
+                border: `2px solid ${isSelected ? tierColors[i] : 'rgba(255,255,255,0.08)'}`,
+                borderRadius: 10, padding: '14px 12px', textAlign: 'center',
+                cursor: 'pointer',
+                transition: 'all 0.2s ease',
+                transform: isSelected ? 'scale(1.02)' : 'scale(1)',
+              }}
+            >
+              <div style={{
+                fontSize: 11, fontWeight: 700, textTransform: 'uppercase', letterSpacing: 0.5,
+                color: isSelected ? tierColors[i] : 'rgba(232,232,240,0.5)', marginBottom: 6,
+              }}>
+                {td.label} ({(td.pct * 100).toFixed(0)}%)
+              </div>
+              <div style={{
+                fontSize: 18, fontWeight: 800,
+                color: isSelected ? tierColors[i] : 'rgba(232,232,240,0.4)',
+              }}>
+                {fmtD(tierTAD)}
+              </div>
+              <div style={{ fontSize: 10, color: 'rgba(232,232,240,0.4)' }}>to funders/wk</div>
+              {isSelected && (
+                <div style={{
+                  marginTop: 6, fontSize: 10, fontWeight: 700,
+                  color: tierColors[i], textTransform: 'uppercase',
+                }}>
+                  &#9656; Selected
+                </div>
+              )}
             </div>
           );
         })}
