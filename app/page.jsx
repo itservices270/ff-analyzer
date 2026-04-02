@@ -4851,6 +4851,36 @@ export default function FFAnalyzer() {
   const [crossRefError, setCrossRefError] = useState(null);
   const agreementInputRef = useRef(null);
 
+  // ── Sync cross-ref balances to positions ──
+  useEffect(() => {
+    if (!crossRefResult) return;
+    const cr = crossRefResult.analysis || crossRefResult;
+    const recs = cr?.restructuring_recommendation?.per_funder_recommendation || [];
+    if (recs.length === 0) return;
+
+    setPositions(prev => prev.map(p => {
+      // Don't override manually-set balances
+      if (p.estimated_balance && p.isEdited) return p;
+
+      // Find matching recommendation
+      const pName = (p.funder_name || '').toLowerCase().replace(/[^a-z0-9]/g, '');
+      const match = recs.find(r => {
+        const rName = (r.funder || '').toLowerCase().replace(/[^a-z0-9]/g, '');
+        if (!rName || !pName) return false;
+        return rName.includes(pName.slice(0, 6)) || pName.includes(rName.slice(0, 6));
+      });
+
+      if (match && match.remaining_balance > 0) {
+        return {
+          ...p,
+          estimated_balance: Math.round(match.remaining_balance),
+          _balance_source: 'cross_reference',
+        };
+      }
+      return p;
+    }));
+  }, [crossRefResult]);
+
   // ─── PDF helpers ────────────────────────────────────────────────────────────
   const loadPDFJS = async () => {
     if (!window.pdfjsLib) {
