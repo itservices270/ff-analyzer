@@ -415,6 +415,16 @@ export default function PricingTab({ a, positions, excludedIds, otherExcludedIds
   const totalMerchantPays = merchantPaysWeekly * maxTerm;
   const effectiveFactorRate = totalBalance > 0 ? totalMerchantPays / totalBalance : 0;
 
+  // Selected tier computed values
+  const selectedPct = tierDefs[selectedTierIdx]?.pct || 1.0;
+  const selectedTAD = tad * selectedPct;
+  const selectedMerchantWeekly = selectedTAD + ffFeeWeekly + isoCommWeekly;
+  const selectedDSR = revenue > 0 ? ((selectedMerchantWeekly * 4.33) / revenue) * 100 : 0;
+  const selectedReduction = totalCurrentWeekly > 0
+    ? ((totalCurrentWeekly - selectedMerchantWeekly) / totalCurrentWeekly) * 100 : 0;
+  const selectedTotalPays = selectedMerchantWeekly * maxTerm;
+  const selectedFactorRate = totalBalance > 0 ? selectedTotalPays / totalBalance : 0;
+
   // Locked summary
   const lockedCount = funderTiers.filter(ft => ft.isLocked).length;
   const unlockedCount = funderTiers.filter(ft => !ft.isLocked).length;
@@ -535,28 +545,29 @@ export default function PricingTab({ a, positions, excludedIds, otherExcludedIds
             <div style={{ fontSize: 24, fontWeight: 800, color: '#ef5350' }}>{fmt(totalCurrentWeekly)}</div>
             <div style={{ fontSize: 11, color: 'rgba(232,232,240,0.4)' }}>DSR: {fmtP(currentDSR)}</div>
           </div>
-          <div style={{ fontSize: 28, color: reductionPct > 0 ? '#4caf50' : '#ef5350' }}>{'\u2192'}</div>
+          <div style={{ fontSize: 28, color: selectedReduction > 0 ? '#4caf50' : '#ef5350' }}>{'\u2192'}</div>
           <div style={{ textAlign: 'center' }}>
-            <div style={{ fontSize: 9, color: 'rgba(232,232,240,0.4)', textTransform: 'uppercase', letterSpacing: 0.5, marginBottom: 4 }}>Merchant Pays FF</div>
-            <div style={{ fontSize: 24, fontWeight: 800, color: '#00e5ff' }}>{fmtD(merchantPaysWeekly)}</div>
-            <div style={{ fontSize: 11, color: 'rgba(232,232,240,0.4)' }}>DSR: {fmtP(proposedDSR)}</div>
+            <div style={{ fontSize: 9, color: 'rgba(232,232,240,0.4)', textTransform: 'uppercase', letterSpacing: 0.5, marginBottom: 4 }}>Merchant Pays FF ({tierDefs[selectedTierIdx]?.label})</div>
+            <div style={{ fontSize: 24, fontWeight: 800, color: tierColors[selectedTierIdx] }}>{fmtD(selectedMerchantWeekly)}</div>
+            <div style={{ fontSize: 11, color: 'rgba(232,232,240,0.4)' }}>DSR: {fmtP(selectedDSR)}</div>
           </div>
         </div>
 
         {/* Breakdown boxes */}
         <div style={{ display: 'grid', gridTemplateColumns: 'repeat(7, 1fr)', gap: 8 }}>
           {[
-            { label: 'TAD to Funders/wk', value: fmtD(tad), color: '#00e5ff' },
+            { label: 'TAD to Funders/wk', value: fmtD(selectedTAD), color: tierColors[selectedTierIdx], final: selectedTierIdx !== 3 ? fmtD(tad) : null },
             { label: 'ISO Commission/wk', value: fmtD(isoCommWeekly), color: '#EAD068' },
             { label: 'FF Margin/wk', value: fmtD(ffFeeWeekly), color: '#CFA529' },
             { label: 'ISO Total', value: fmt(commissionTotal), color: '#EAD068' },
             { label: 'Max Term', value: maxTerm < 9999 ? `${maxTerm} wks` : '\u2014', color: '#e8e8f0' },
-            { label: 'Eff Factor Rate', value: effectiveFactorRate > 0 ? effectiveFactorRate.toFixed(3) : '\u2014', color: '#7c3aed' },
-            { label: 'Payment Reduction', value: fmtP(reductionPct), color: reductionPct > 0 ? '#4caf50' : '#ef5350' },
+            { label: 'Eff Factor Rate', value: selectedFactorRate > 0 ? selectedFactorRate.toFixed(3) : '\u2014', color: '#7c3aed', final: selectedTierIdx !== 3 && effectiveFactorRate > 0 ? effectiveFactorRate.toFixed(3) : null },
+            { label: 'Payment Reduction', value: fmtP(selectedReduction), color: selectedReduction > 0 ? '#4caf50' : '#ef5350', final: selectedTierIdx !== 3 ? fmtP(reductionPct) : null },
           ].map((s, i) => (
             <div key={i} style={S.kpiBox()}>
               <div style={S.kpiLabel}>{s.label}</div>
               <div style={S.kpiValue(s.color)}>{s.value}</div>
+              {s.final && <div style={{ fontSize: 9, color: 'rgba(232,232,240,0.3)', marginTop: 2 }}>Final: {s.final}</div>}
             </div>
           ))}
         </div>
