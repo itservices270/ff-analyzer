@@ -633,6 +633,59 @@ export default function PricingTab({ a, positions, excludedIds, otherExcludedIds
         })}
       </div>
 
+      {/* ═══════════════ BEFORE vs AFTER COMPARISON ═══════════════ */}
+      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 16, marginBottom: 20 }}>
+        {/* Before */}
+        <div style={{ background: 'rgba(239,83,80,0.06)', border: '1px solid rgba(239,83,80,0.2)', borderRadius: 12, padding: 16 }}>
+          <div style={{ fontSize: 12, fontWeight: 700, color: '#ef5350', marginBottom: 12, display: 'flex', alignItems: 'center', gap: 6 }}>
+            <span style={{ width: 8, height: 8, borderRadius: '50%', background: '#ef5350', display: 'inline-block' }} />
+            Current (Before FF)
+          </div>
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8 }}>
+            <div><div style={{ fontSize: 9, color: 'rgba(232,232,240,0.4)', textTransform: 'uppercase' }}>Total Debt</div><div style={{ fontSize: 16, fontWeight: 700, color: '#ef5350' }}>{fmt(totalBalance)}</div></div>
+            <div><div style={{ fontSize: 9, color: 'rgba(232,232,240,0.4)', textTransform: 'uppercase' }}>Weekly Payment</div><div style={{ fontSize: 16, fontWeight: 700, color: '#ef5350' }}>{fmtD(totalCurrentWeekly)}</div></div>
+            <div><div style={{ fontSize: 9, color: 'rgba(232,232,240,0.4)', textTransform: 'uppercase' }}>Withhold %</div><div style={{ fontSize: 16, fontWeight: 700, color: '#ef5350' }}>{fmtP(currentDSR)}</div></div>
+            <div><div style={{ fontSize: 9, color: 'rgba(232,232,240,0.4)', textTransform: 'uppercase' }}># Positions</div><div style={{ fontSize: 16, fontWeight: 700, color: '#e8e8f0' }}>{effectivePositions.length}</div></div>
+          </div>
+        </div>
+
+        {/* After */}
+        <div style={{ background: 'rgba(76,175,80,0.06)', border: '1px solid rgba(76,175,80,0.2)', borderRadius: 12, padding: 16 }}>
+          <div style={{ fontSize: 12, fontWeight: 700, color: '#4caf50', marginBottom: 12, display: 'flex', alignItems: 'center', gap: 6 }}>
+            <span style={{ width: 8, height: 8, borderRadius: '50%', background: '#4caf50', display: 'inline-block' }} />
+            After FF Restructure ({tierDefs[selectedTierIdx]?.label})
+          </div>
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8 }}>
+            <div><div style={{ fontSize: 9, color: 'rgba(232,232,240,0.4)', textTransform: 'uppercase' }}>Payback Amount</div><div style={{ fontSize: 16, fontWeight: 700, color: '#4caf50' }}>{fmt(totalBalance)}</div></div>
+            <div><div style={{ fontSize: 9, color: 'rgba(232,232,240,0.4)', textTransform: 'uppercase' }}>New Weekly</div><div style={{ fontSize: 16, fontWeight: 700, color: '#4caf50' }}>{fmtD(selectedMerchantWeekly)}</div></div>
+            <div><div style={{ fontSize: 9, color: 'rgba(232,232,240,0.4)', textTransform: 'uppercase' }}>New Withhold %</div><div style={{ fontSize: 16, fontWeight: 700, color: '#4caf50' }}>{fmtP(selectedDSR)}</div></div>
+            <div><div style={{ fontSize: 9, color: 'rgba(232,232,240,0.4)', textTransform: 'uppercase' }}>Reduction</div><div style={{ fontSize: 16, fontWeight: 700, color: '#4caf50' }}>{selectedReduction.toFixed(1)}%</div></div>
+          </div>
+        </div>
+      </div>
+
+      {/* Weekly reduction callout */}
+      <div style={{
+        background: 'rgba(76,175,80,0.08)', border: '1px solid rgba(76,175,80,0.2)',
+        borderRadius: 10, padding: '12px 20px', marginBottom: 20,
+        display: 'flex', justifyContent: 'space-around', textAlign: 'center',
+      }}>
+        <div>
+          <div style={{ fontSize: 9, color: 'rgba(232,232,240,0.4)', textTransform: 'uppercase' }}>Weekly Reduction</div>
+          <div style={{ fontSize: 22, fontWeight: 800, color: '#4caf50' }}>{fmtD(totalCurrentWeekly - selectedMerchantWeekly)}</div>
+          <div style={{ fontSize: 10, color: '#4caf50' }}>{selectedReduction.toFixed(1)}% less</div>
+        </div>
+        <div>
+          <div style={{ fontSize: 9, color: 'rgba(232,232,240,0.4)', textTransform: 'uppercase' }}>FF Fee</div>
+          <div style={{ fontSize: 22, fontWeight: 800, color: '#EAD068' }}>{fmtD(ffFeeWeekly)}</div>
+        </div>
+        <div>
+          <div style={{ fontSize: 9, color: 'rgba(232,232,240,0.4)', textTransform: 'uppercase' }}>Est. Term</div>
+          <div style={{ fontSize: 22, fontWeight: 800, color: '#e8e8f0' }}>{maxTerm} wks</div>
+          <div style={{ fontSize: 10, color: 'rgba(232,232,240,0.3)' }}>~{Math.round(maxTerm / 4.33)} months</div>
+        </div>
+      </div>
+
       {/* ═══════════════ PER-POSITION BREAKDOWN ═══════════════ */}
       <div style={S.section}>Per-Position Breakdown</div>
       <div style={{ display: 'flex', flexDirection: 'column', gap: 12, marginBottom: 20 }}>
