@@ -158,6 +158,34 @@ ACH CREDITS CLASSIFICATION (CRITICAL — DO NOT LUMP ALL ACH TOGETHER):
 • ACH credits you cannot identify → type: "ach_credit", is_excluded: false (benefit of the doubt), but add note: "unidentified ACH — manual review recommended"
 • NEVER combine MCA advance wires into the ach_credits revenue bucket. They are LOANS, not revenue.
 
+## LARGE ONE-TIME DEPOSIT CLASSIFICATION (wires, ACH credits > $10,000):
+
+DEFAULT: EXCLUDE from revenue (is_excluded: true) unless there is clear evidence it is recurring business income.
+
+A large deposit should be INCLUDED as revenue ONLY if ALL of these are true:
+1. It recurs at least 2 times across the statement period at similar amounts
+2. It matches a pattern consistent with customer payments, settlements, or receivables
+3. It does NOT match any of the exclusion patterns below
+
+ALWAYS EXCLUDE (set is_excluded: true with appropriate type):
+• Wire deposits from entities with "Capital", "Funding", "Finance", "Lending", "Ventures", "Group LLC", "Holdings", "Corp", "Corporation" in the name — likely MCA or loan (type: "loan_proceeds")
+• Wire deposits from credit unions, banks, or financial institutions — loan proceeds (type: "loan_proceeds")
+• Wire deposits from the business owner or related persons — owner contribution (type: "owner_contribution")
+• Wire deposits that appear only ONCE in the entire statement period — one-time event, not revenue (type: "loan_proceeds")
+• Large round-number deposits ($25K, $50K, $65K, $100K, $150K) — almost always loan/advance proceeds (type: "loan_proceeds")
+• Any deposit where there is a CORRESPONDING outbound wire or payment series to the same or similar entity — bidirectional = loan servicing (type: "loan_proceeds")
+
+IMPORTANT: Do NOT override an initial "loan_proceeds" or "mca_advance" classification just because the originator is not in a known MCA funder list. Most MCA funders use shell companies, DBAs, or funding partners for wire origination. An unknown originator is MORE likely to be a funder/lender, not less. Examples of non-funder-name loan originators:
+• "Lovejoy Corporation" — likely MCA advance or related-party loan via shell company
+• "TFCU" or any credit union abbreviation — credit union loan proceeds
+• "Cedars Group LLC" — likely MCA advance or related-party transfer
+
+When excluding, set:
+• is_excluded: true
+• type: "loan_proceeds" (for bank/CU wires), "mca_advance" (if funder-like name), "owner_contribution" (if from owner), or "transfer" (if inter-account)
+• include: false
+• note: explain why excluded (e.g., "One-time $150K wire from credit union — loan proceeds")
+
 PROTECTED REVENUE ACH PATTERNS — ALWAYS COUNT AS REVENUE (never exclude):
 • "ROUTE" / "ROUTE COLLECTION" / "ROUTE PMT" → customer route collections, TRUE REVENUE
 • "CUSTOMER" / "CUST PMT" / "CUST PAYMENT" → customer payments, TRUE REVENUE
@@ -506,6 +534,7 @@ If you cannot find an explicit "Average Daily Balance" line, you MUST calculate 
   "revenue": {
     "gross_deposits": 0.00,
     "excluded_mca_proceeds": 0.00,
+    "excluded_loan_proceeds": 0.00,
     "excluded_nsf_returns": 0.00,
     "excluded_transfers": 0.00,
     "excluded_other": 0.00,
@@ -994,10 +1023,30 @@ function fixExcludedMCAProceeds(analysis) {
     const amount = src.total || src.monthly_avg || 0;
 
     if (!isFunder) {
-      // Not a known funder — this is revenue, reclassify
+      // Not a known funder — but check if this looks like a large one-time
+      // wire/deposit that should STAY excluded (loan proceeds, not revenue)
+      const noteAndNameCheck = `${name} ${(src.note || '').toLowerCase()} ${(src.type || '').toLowerCase()}`;
+      const loanKeywords = ['capital', 'funding', 'finance', 'lending', 'ventures',
+        'group llc', 'holdings', 'corp', 'corporation', 'credit union', 'bank',
+        'loan', 'wire', 'advance', 'proceeds', 'loan_proceeds', 'mca_advance',
+        'owner_contribution'];
+      const hasLoanSignal = loanKeywords.some(kw => noteAndNameCheck.includes(kw));
+      const isLargeOneTime = amount >= 10000;
+      const isRoundNumber = amount >= 25000 && (amount % 1000 === 0 || amount % 500 === 0);
+      const typeIsLoan = ['loan', 'loan_proceeds', 'mca_advance', 'owner_contribution', 'wire'].includes(src.type || '');
+
+      // Keep excluded if: large amount with loan signals, round number, or explicitly typed as loan
+      if (isLargeOneTime && (hasLoanSignal || isRoundNumber || typeIsLoan)) {
+        // Preserve the exclusion — this is likely loan/advance proceeds from an unknown originator
+        if (!src.type || src.type === 'ach_credit') src.type = 'loan_proceeds';
+        src.note = (src.note || '') + ' [KEPT EXCLUDED: large one-time deposit from unknown originator — likely loan/advance proceeds]';
+        continue;
+      }
+
+      // Small or clearly recurring non-funder credit — reclassify as revenue
       src.is_excluded = false;
       src.type = 'ach_credit';
-      src.note = (src.note || '') + ' [CORRECTED: not a known MCA funder — reclassified as revenue]';
+      src.note = (src.note || '') + ' [CORRECTED: not a known MCA funder and no loan signals — reclassified as revenue]';
       continue;
     }
 
@@ -1036,21 +1085,96 @@ function fixExcludedMCAProceeds(analysis) {
     }
   }
 
-  // Recalculate excluded_mca_proceeds from what remains excluded
+  // Recalculate excluded amounts from what remains excluded
   const months = Math.max((analysis.monthly_breakdown || []).length, 1);
-  analysis.revenue.excluded_mca_proceeds = sources
-    .filter(s => s.is_excluded)
+  const excludedSources = sources.filter(s => s.is_excluded);
+
+  // Separate MCA proceeds from non-MCA loan proceeds for clarity
+  const mcaTypes = ['loan', 'mca_advance', 'reverse_mca_advance'];
+  const loanProceedsTypes = ['loan_proceeds', 'owner_contribution'];
+
+  analysis.revenue.excluded_mca_proceeds = excludedSources
+    .filter(s => mcaTypes.includes(s.type) || (!loanProceedsTypes.includes(s.type) && !['transfer', 'returned_item', 'owner_loan'].includes(s.type)))
+    .reduce((sum, s) => sum + (s.total || 0), 0);
+  analysis.revenue.excluded_loan_proceeds = excludedSources
+    .filter(s => loanProceedsTypes.includes(s.type))
     .reduce((sum, s) => sum + (s.total || 0), 0);
 
-  // Recalculate net_verified_revenue
+  // Recalculate net_verified_revenue — include ALL exclusion categories
   const grossDeposits = analysis.revenue.gross_deposits || 0;
   const excludedTotal = (analysis.revenue.excluded_mca_proceeds || 0) +
+    (analysis.revenue.excluded_loan_proceeds || 0) +
     (analysis.revenue.excluded_nsf_returns || 0) +
     (analysis.revenue.excluded_transfers || 0) +
     (analysis.revenue.excluded_other || 0);
   analysis.revenue.net_verified_revenue = grossDeposits - excludedTotal;
   analysis.revenue.monthly_average_revenue = analysis.revenue.net_verified_revenue / months;
 
+  return analysis;
+}
+
+// ─── POST-PROCESSING: Enforce revenue rollup + DSR consistency ───────────────
+// 1. Top-level net_verified_revenue = sum of monthly net_verified_revenue values
+// 2. Single DSR value used consistently across CSV, JSON metrics, and flags
+// 3. negotiation_intel.dsr_posture matches calculated_metrics.dsr_posture
+function enforceConsistency(analysis) {
+  const monthly = analysis?.monthly_breakdown || [];
+  const revenue = analysis?.revenue || {};
+  const metrics = analysis?.calculated_metrics || {};
+
+  // Revenue rollup: if monthly breakdown has net_verified_revenue values,
+  // ensure top-level matches the sum (monthly breakdown is often more accurate)
+  if (monthly.length > 0) {
+    const monthlyNetSum = monthly.reduce((sum, m) => sum + (m.net_verified_revenue || 0), 0);
+    // Only override if monthly sum is meaningfully different and non-zero
+    if (monthlyNetSum > 0 && Math.abs(monthlyNetSum - (revenue.net_verified_revenue || 0)) > 1000) {
+      console.log(`[consistency] Revenue rollup mismatch: top-level $${(revenue.net_verified_revenue || 0).toLocaleString()} vs monthly sum $${monthlyNetSum.toLocaleString()} — using monthly sum`);
+      revenue.net_verified_revenue = monthlyNetSum;
+      revenue.monthly_average_revenue = monthlyNetSum / monthly.length;
+    }
+  }
+
+  // Recalculate DSR with the corrected revenue
+  const monthlyRevenue = revenue.monthly_average_revenue || revenue.net_verified_revenue || 1;
+  const cogsRate = revenue.cogs_rate || 0.40;
+  const grossProfit = monthlyRevenue * (1 - cogsRate);
+  const totalMCAMonthly = metrics.total_mca_monthly || 0;
+
+  if (grossProfit > 0 && totalMCAMonthly > 0) {
+    metrics.dsr_percent = Math.round((totalMCAMonthly / grossProfit) * 10000) / 100;
+
+    // DSR posture
+    if (metrics.dsr_percent < 20) metrics.dsr_posture = 'healthy';
+    else if (metrics.dsr_percent < 35) metrics.dsr_posture = 'elevated';
+    else if (metrics.dsr_percent < 50) metrics.dsr_posture = 'stressed';
+    else if (metrics.dsr_percent < 65) metrics.dsr_posture = 'critical';
+    else metrics.dsr_posture = 'unsustainable';
+  }
+
+  // Enforce DSR consistency in negotiation_intel
+  if (analysis.negotiation_intel) {
+    analysis.negotiation_intel.dsr_posture = metrics.dsr_posture;
+  }
+
+  // Enforce DSR consistency in flags_and_alerts — update any DSR-related messages
+  const flags = analysis.flags_and_alerts || [];
+  const dsrPct = metrics.dsr_percent || 0;
+  for (const flag of flags) {
+    if (flag.message && (flag.message.includes('DSR') || flag.message.includes('dsr') || flag.message.includes('debt service ratio'))) {
+      // Replace any percentage in the DSR message with the consistent value
+      flag.message = flag.message.replace(/\d+\.?\d*%/g, `${dsrPct.toFixed(1)}%`);
+    }
+  }
+
+  // Recalculate free cash with corrected revenue
+  const totalMCAandLOC = totalMCAMonthly + (metrics.total_loc_monthly || 0);
+  const opex = analysis?.expense_categories?.total_operating_expenses || 0;
+  const otherDebt = (analysis?.other_debt_service || []).reduce((s, d) => s + (d.monthly_total || 0), 0);
+  metrics.free_cash_after_mca = Math.round((monthlyRevenue - totalMCAandLOC) * 100) / 100;
+  metrics.true_free_cash = Math.round((monthlyRevenue - totalMCAandLOC - otherDebt - opex) * 100) / 100;
+
+  analysis.revenue = revenue;
+  analysis.calculated_metrics = metrics;
   return analysis;
 }
 
@@ -1460,9 +1584,10 @@ export async function POST(request) {
     analysis = fixPositionBalances(analysis);
     analysis = enforcePaidOffStatus(analysis);
     analysis = recalcMCAMetrics(analysis);
+    analysis = enforceConsistency(analysis);
     analysis = fixInsolvencyCalc(analysis);
 
-    console.log(`[analyze-multi] Post-processing: ${analysis.mca_positions?.length} positions, MCA monthly: $${analysis.calculated_metrics?.total_mca_monthly}`);
+    console.log(`[analyze-multi] Post-processing: ${analysis.mca_positions?.length} positions, MCA monthly: $${analysis.calculated_metrics?.total_mca_monthly}, DSR: ${analysis.calculated_metrics?.dsr_percent}%`);
 
     return Response.json({ success: true, analysis, statement_count: statements.length });
   } catch (err) {

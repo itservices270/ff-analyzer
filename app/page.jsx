@@ -360,6 +360,7 @@ function postProcessAnalysis(analysis) {
     }
 
     // PASS 2: Scan excluded sources — reclassify non-funder items as revenue
+    // BUT preserve exclusions for large one-time wires/deposits that look like loan proceeds
     for (const src of analysis.revenue.revenue_sources) {
       if (!src.is_excluded) continue;
       const name = (src.name || '').toLowerCase();
@@ -367,19 +368,46 @@ function postProcessAnalysis(analysis) {
       // Also keep excluded if type is explicitly reverse_mca_advance or returned_item
       const isSpecialExclusion = src.type === 'reverse_mca_advance' || src.type === 'returned_item' || src.type === 'owner_loan';
       if (!isFunder && !isSpecialExclusion) {
-        src.is_excluded = false;
-        src.type = 'ach_credit';
-        src.note = (src.note || '') + ' [CORRECTED: not a known MCA funder — reclassified as revenue]';
+        // Check if this looks like a large one-time wire that should stay excluded
+        const amount = src.total || src.monthly_avg || 0;
+        const noteAndNameCheck = `${name} ${(src.note || '').toLowerCase()} ${(src.type || '').toLowerCase()}`;
+        const loanKeywords = ['capital', 'funding', 'finance', 'lending', 'ventures',
+          'group llc', 'holdings', 'corp', 'corporation', 'credit union', 'bank',
+          'loan', 'wire', 'advance', 'proceeds', 'loan_proceeds', 'mca_advance',
+          'owner_contribution'];
+        const hasLoanSignal = loanKeywords.some(kw => noteAndNameCheck.includes(kw));
+        const isLargeOneTime = amount >= 10000;
+        const isRoundNumber = amount >= 25000 && (amount % 1000 === 0 || amount % 500 === 0);
+        const typeIsLoan = ['loan', 'loan_proceeds', 'mca_advance', 'owner_contribution', 'wire'].includes(src.type || '');
+
+        if (isLargeOneTime && (hasLoanSignal || isRoundNumber || typeIsLoan)) {
+          // Keep excluded — likely loan/advance proceeds from unknown originator
+          if (!src.type || src.type === 'ach_credit') src.type = 'loan_proceeds';
+          src.note = (src.note || '') + ' [KEPT EXCLUDED: large one-time deposit — likely loan/advance proceeds]';
+        } else {
+          src.is_excluded = false;
+          src.type = 'ach_credit';
+          src.note = (src.note || '') + ' [CORRECTED: not a known MCA funder and no loan signals — reclassified as revenue]';
+        }
       }
     }
 
-    // Recalculate excluded_mca_proceeds from what remains excluded
+    // Recalculate excluded amounts from what remains excluded
     const months = Math.max((analysis.monthly_breakdown || []).length, 1);
-    analysis.revenue.excluded_mca_proceeds = analysis.revenue.revenue_sources
-      .filter(s => s.is_excluded)
+    const excludedSources = analysis.revenue.revenue_sources.filter(s => s.is_excluded);
+    const mcaTypes = ['loan', 'mca_advance', 'reverse_mca_advance'];
+    const loanProceedsTypes = ['loan_proceeds', 'owner_contribution'];
+
+    analysis.revenue.excluded_mca_proceeds = excludedSources
+      .filter(s => mcaTypes.includes(s.type) || (!loanProceedsTypes.includes(s.type) && !['transfer', 'returned_item', 'owner_loan'].includes(s.type)))
       .reduce((sum, s) => sum + (s.total || 0), 0);
+    analysis.revenue.excluded_loan_proceeds = excludedSources
+      .filter(s => loanProceedsTypes.includes(s.type))
+      .reduce((sum, s) => sum + (s.total || 0), 0);
+
     const grossDeposits = analysis.revenue.gross_deposits || 0;
     const excludedTotal = (analysis.revenue.excluded_mca_proceeds || 0) +
+      (analysis.revenue.excluded_loan_proceeds || 0) +
       (analysis.revenue.excluded_nsf_returns || 0) +
       (analysis.revenue.excluded_transfers || 0) +
       (analysis.revenue.excluded_other || 0);
@@ -495,6 +523,7 @@ function buildCSV(a, activePositions, totalMCAMonthly, dsr, totalOtherDebt, tota
     ['monthly_revenue', adjustedRevenue || r.monthly_average_revenue || r.net_verified_revenue, 'Monthly avg · bank-verified (adjusted if deposits excluded)'],
     ['gross_deposits', r.gross_deposits, 'Before exclusions'],
     ['excluded_mca_proceeds', r.excluded_mca_proceeds, ''],
+    ['excluded_loan_proceeds', r.excluded_loan_proceeds || 0, 'Non-MCA loan/advance proceeds excluded'],
     ['excluded_transfers', r.excluded_transfers, ''],
     ['monthly_outgo', a.expense_categories.total_operating_expenses, ''],
     ['avg_daily_balance', m.avg_daily_balance, ''],
