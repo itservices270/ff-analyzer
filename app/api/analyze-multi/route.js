@@ -408,6 +408,28 @@ Combined Itria monthly debt service: ~$3,635/month.
 • AMERICAN FUNDS INVESTMENT: 401k/investment contributions. Owner expense, NOT MCA.
 • Any staffing/temp agency with daily payment patterns = payroll OpEx, NOT MCA.
 
+## EQUIPMENT LEASES AND VENDOR PAYMENTS — DO NOT CLASSIFY AS MCA:
+
+The following patterns indicate equipment leases, NOT MCA positions:
+- Bank descriptor contains "lease", "leasechg", "leasing", "rental", or "equip"
+- Known equipment finance companies: Ascentium Capital, Navitas Lease, LEAF Commercial, Balboa Capital (lease), Marlin Leasing, TimePayment, Onset Financial, Beacon Funding, Channel Partners Capital (lease), Great Elm Capital, Currency Capital
+- Payment amounts that are irregular or returned multiple times with no successful collection (suggests terminated lease, not active MCA)
+
+The following patterns indicate vendor/supplier payments, NOT MCA positions:
+- The entity is a product manufacturer, distributor, or supplier (e.g., "Golfzon America" = golf simulator manufacturer)
+- The entity name references a product category or industry (e.g., "America" suffix on a manufacturer name)
+- The payment is very large relative to other MCA positions AND only appears 1-2 times before being returned NSF (vendor invoice, not recurring MCA)
+- There is no corresponding advance deposit from the same entity
+
+When an entity is identified as equipment lease or vendor payment:
+- Do NOT include it in mca_positions
+- DO include it in other_debt_service with appropriate type:
+  - type: "equipment" for leases
+  - type: "vendor" for supplier payments
+- Include the monthly_total based on detected payment frequency
+
+IMPORTANT: If the bank descriptor explicitly contains "lease" or "leasechg", it is ALWAYS an equipment lease, regardless of any other signals. The bank itself is telling you it's a lease.
+
 ## PAID-OFF DETECTION (CRITICAL — MANDATORY RULE):
 A position is paid_off if it shows ZERO payment activity in the MOST RECENT statement month.
 Do NOT mark as active unless payments appear in the most recent month.
@@ -458,7 +480,8 @@ Some funders (especially OnDeck) have payment amounts that vary slightly from we
 • dsr_percent = (total_mca_monthly / monthly_gross_profit) × 100
 • DO NOT divide MCA by gross revenue — that produces an artificially low DSR
 • Example: $209,000 MCA / ($571,000 × 0.60 = $342,600 gross profit) = 61.0% DSR
-• DSR tiers: <20% healthy | 20–35% elevated | 35–50% stressed | 50–65% critical | 65%+ unsustainable
+• DSR tiers: 0-15% healthy | 15-25% elevated | 25-40% stressed | 40-60% critical | 60%+ unsustainable
+• IMPORTANT: Do NOT calculate DSR yourself — only detect positions and their payment amounts. The JavaScript post-processing will calculate DSR from the position data you return.
 
 ## AVERAGE DAILY BALANCE (ADB) EXTRACTION — CRITICAL:
 Many bank statements include a daily balance table, daily ledger, or a summary line showing "Average Daily Balance" or "Average Collected Balance" or "Average Ledger Balance."
@@ -629,7 +652,7 @@ If you cannot find an explicit "Average Daily Balance" line, you MUST calculate 
   "adb_by_month": [{"month": "Month YYYY", "adb": 0.00, "adb_adjusted": 0.00, "note": "string"}],
 
   "other_debt_service": [
-    { "name": "string", "type": "sba_loan|bank_loan|equipment|credit_card|other", "monthly_total": 0.00 }
+    { "name": "string", "type": "sba_loan|bank_loan|equipment|vendor|credit_card|other", "monthly_total": 0.00 }
   ],
 
   "expense_categories": {
@@ -722,7 +745,7 @@ Patterns that indicate MCA advance proceeds (add to excluded_mca_proceeds):
 
 4. DSR DENOMINATOR: dsr_percent = total_mca_monthly / (monthly_average_revenue × 0.60). Use gross profit, NOT revenue.
 
-5. DSR TIERS: <20% healthy | 20-35% elevated | 35-50% stressed | 50-65% critical | 65%+ unsustainable
+5. DSR TIERS: 0-15% healthy | 15-25% elevated | 25-40% stressed | 40-60% critical | 60%+ unsustainable
 
 6. PAID-OFF (MANDATORY): A position is paid_off if it has ZERO debits in the most recent statement month. Do NOT mark as active unless payments appear in the LAST month. OnDeck, Newtek, or any funder with $0 in the final month = paid_off.
 
@@ -1114,9 +1137,11 @@ function fixExcludedMCAProceeds(analysis) {
 }
 
 // ─── POST-PROCESSING: Enforce revenue rollup + DSR consistency ───────────────
+// This is the SINGLE AUTHORITATIVE DSR enforcement point.
 // 1. Top-level net_verified_revenue = sum of monthly net_verified_revenue values
-// 2. Single DSR value used consistently across CSV, JSON metrics, and flags
-// 3. negotiation_intel.dsr_posture matches calculated_metrics.dsr_posture
+// 2. Recalculates DSR from actual position data — ONE value everywhere
+// 3. Writes that value to: calculated_metrics, negotiation_intel, flags_and_alerts, CSV fields
+// 4. Also calculates total_dsr_all_debt (MCA + other_debt_service)
 function enforceConsistency(analysis) {
   const monthly = analysis?.monthly_breakdown || [];
   const revenue = analysis?.revenue || {};
@@ -1134,42 +1159,95 @@ function enforceConsistency(analysis) {
     }
   }
 
-  // Recalculate DSR with the corrected revenue
+  // ── Authoritative DSR calculation ──
   const monthlyRevenue = revenue.monthly_average_revenue || revenue.net_verified_revenue || 1;
   const cogsRate = revenue.cogs_rate || 0.40;
   const grossProfit = monthlyRevenue * (1 - cogsRate);
   const totalMCAMonthly = metrics.total_mca_monthly || 0;
+  const otherDebt = (analysis?.other_debt_service || []).reduce((s, d) => s + (d.monthly_total || 0), 0);
+
+  let dsrPct = 0;
+  let dsrPosture = 'healthy';
 
   if (grossProfit > 0 && totalMCAMonthly > 0) {
-    metrics.dsr_percent = Math.round((totalMCAMonthly / grossProfit) * 10000) / 100;
-
-    // DSR posture
-    if (metrics.dsr_percent < 20) metrics.dsr_posture = 'healthy';
-    else if (metrics.dsr_percent < 35) metrics.dsr_posture = 'elevated';
-    else if (metrics.dsr_percent < 50) metrics.dsr_posture = 'stressed';
-    else if (metrics.dsr_percent < 65) metrics.dsr_posture = 'critical';
-    else metrics.dsr_posture = 'unsustainable';
+    dsrPct = Math.round((totalMCAMonthly / grossProfit) * 10000) / 100;
   }
 
-  // Enforce DSR consistency in negotiation_intel
+  // DSR posture (updated tiers)
+  if (dsrPct <= 15) dsrPosture = 'healthy';
+  else if (dsrPct <= 25) dsrPosture = 'elevated';
+  else if (dsrPct <= 40) dsrPosture = 'stressed';
+  else if (dsrPct <= 60) dsrPosture = 'critical';
+  else dsrPosture = 'unsustainable';
+
+  // Total DSR including all debt (MCA + other_debt_service)
+  let totalDsrAllDebt = 0;
+  if (grossProfit > 0) {
+    totalDsrAllDebt = Math.round(((totalMCAMonthly + otherDebt) / grossProfit) * 10000) / 100;
+  }
+
+  // Write the ONE DSR value to ALL locations
+  metrics.dsr_percent = dsrPct;
+  metrics.dsr_posture = dsrPosture;
+  metrics.total_dsr_all_debt = totalDsrAllDebt;
+  metrics.monthly_gross_profit = Math.round(grossProfit * 100) / 100;
+
+  console.log(`[consistency] DSR enforced: ${dsrPct.toFixed(1)}% (${dsrPosture}) | MCA monthly: $${totalMCAMonthly.toLocaleString()} | Gross profit: $${Math.round(grossProfit).toLocaleString()} | All-debt DSR: ${totalDsrAllDebt.toFixed(1)}%`);
+
+  // ── Enforce DSR in negotiation_intel ──
   if (analysis.negotiation_intel) {
-    analysis.negotiation_intel.dsr_posture = metrics.dsr_posture;
-  }
-
-  // Enforce DSR consistency in flags_and_alerts — update any DSR-related messages
-  const flags = analysis.flags_and_alerts || [];
-  const dsrPct = metrics.dsr_percent || 0;
-  for (const flag of flags) {
-    if (flag.message && (flag.message.includes('DSR') || flag.message.includes('dsr') || flag.message.includes('debt service ratio'))) {
-      // Replace any percentage in the DSR message with the consistent value
-      flag.message = flag.message.replace(/\d+\.?\d*%/g, `${dsrPct.toFixed(1)}%`);
+    analysis.negotiation_intel.dsr_posture = dsrPosture;
+    // Update impossibility_statement with the authoritative DSR
+    if (dsrPct > 50) {
+      analysis.negotiation_intel.impossibility_statement =
+        `Current MCA debt service ratio of ${dsrPct.toFixed(1)}% of gross profit makes continued payment mathematically unsustainable. ` +
+        `Monthly MCA obligations of $${totalMCAMonthly.toLocaleString()} against gross profit of $${Math.round(grossProfit).toLocaleString()} ` +
+        `leave insufficient cash flow for operations.`;
+    } else if (analysis.negotiation_intel.impossibility_statement) {
+      // DSR is not >50%, remove any stale impossibility statement or update percentage references
+      if (dsrPct <= 40) {
+        analysis.negotiation_intel.impossibility_statement = null;
+      } else {
+        // Between 40-50%: update the percentage references in existing statement
+        analysis.negotiation_intel.impossibility_statement =
+          analysis.negotiation_intel.impossibility_statement.replace(/\d+\.?\d*%/g, `${dsrPct.toFixed(1)}%`);
+      }
     }
   }
 
-  // Recalculate free cash with corrected revenue
+  // ── Enforce DSR in flags_and_alerts ──
+  const flags = analysis.flags_and_alerts || [];
+  // Remove ALL existing DSR-related flags and replace with one authoritative flag
+  const nonDsrFlags = flags.filter(f => {
+    const msg = (f.message || '').toLowerCase();
+    return !msg.includes('dsr') && !msg.includes('debt service ratio') && !msg.includes('debt-service');
+  });
+
+  // Add single authoritative DSR flag
+  let dsrSeverity = 'info';
+  if (dsrPct > 60) dsrSeverity = 'critical';
+  else if (dsrPct > 40) dsrSeverity = 'critical';
+  else if (dsrPct > 25) dsrSeverity = 'warning';
+
+  nonDsrFlags.push({
+    severity: dsrSeverity,
+    category: 'debt_service',
+    message: `MCA debt service ratio: ${dsrPct.toFixed(1)}% of gross profit (${dsrPosture}). Monthly MCA: $${totalMCAMonthly.toLocaleString()} / Gross profit: $${Math.round(grossProfit).toLocaleString()}.`
+  });
+
+  if (totalDsrAllDebt > dsrPct + 5) {
+    nonDsrFlags.push({
+      severity: totalDsrAllDebt > 60 ? 'critical' : 'warning',
+      category: 'debt_service',
+      message: `Total debt service ratio (MCA + other obligations): ${totalDsrAllDebt.toFixed(1)}% of gross profit.`
+    });
+  }
+
+  analysis.flags_and_alerts = nonDsrFlags;
+
+  // ── Recalculate free cash with corrected revenue ──
   const totalMCAandLOC = totalMCAMonthly + (metrics.total_loc_monthly || 0);
   const opex = analysis?.expense_categories?.total_operating_expenses || 0;
-  const otherDebt = (analysis?.other_debt_service || []).reduce((s, d) => s + (d.monthly_total || 0), 0);
   metrics.free_cash_after_mca = Math.round((monthlyRevenue - totalMCAandLOC) * 100) / 100;
   metrics.true_free_cash = Math.round((monthlyRevenue - totalMCAandLOC - otherDebt - opex) * 100) / 100;
 
@@ -1419,12 +1497,13 @@ function recalcMCAMetrics(analysis) {
   const cogsRate = revenue.cogs_rate || 0.40;
   const grossProfit = monthlyRevenue * (1 - cogsRate);
   metrics.dsr_percent = Math.round((metrics.total_mca_monthly / grossProfit) * 10000) / 100;
+  metrics.monthly_gross_profit = Math.round(grossProfit * 100) / 100;
 
-  // DSR posture
-  if (metrics.dsr_percent < 20) metrics.dsr_posture = 'healthy';
-  else if (metrics.dsr_percent < 35) metrics.dsr_posture = 'elevated';
-  else if (metrics.dsr_percent < 50) metrics.dsr_posture = 'stressed';
-  else if (metrics.dsr_percent < 65) metrics.dsr_posture = 'critical';
+  // DSR posture (updated tiers)
+  if (metrics.dsr_percent <= 15) metrics.dsr_posture = 'healthy';
+  else if (metrics.dsr_percent <= 25) metrics.dsr_posture = 'elevated';
+  else if (metrics.dsr_percent <= 40) metrics.dsr_posture = 'stressed';
+  else if (metrics.dsr_percent <= 60) metrics.dsr_posture = 'critical';
   else metrics.dsr_posture = 'unsustainable';
 
   // Free cash — include BOTH MCA and LOC in total debt service
@@ -1522,23 +1601,44 @@ export async function POST(request) {
     console.log(`[analyze-multi] model: ${selectedModel} | streaming: ${useStreaming} | statements: ${statements.length} | API key: ${(process.env.ANTHROPIC_API_KEY || '').slice(0, 7)}...`);
 
     // ─── STREAMING PATH (Opus) ─────────────────────────────────────────
-    // Streams text chunks back to the client so Vercel's timeout resets
-    // with each chunk. The client accumulates the full text and parses
-    // JSON only after the [DONE] marker.
+    // Accumulates text from the LLM stream server-side, applies all post-
+    // processing (dedup, DSR, consistency), then sends the final processed
+    // JSON. Keepalive spaces are sent during streaming to prevent Vercel
+    // timeout. The client ignores whitespace before the first '{'.
     if (useStreaming) {
       const encoder = new TextEncoder();
       const readableStream = new ReadableStream({
         async start(controller) {
           try {
+            let accumulated = '';
             const stream = client.messages.stream(apiParams);
 
             stream.on('text', (text) => {
-              controller.enqueue(encoder.encode(text));
+              accumulated += text;
+              // Send a keepalive space to prevent Vercel timeout
+              controller.enqueue(encoder.encode(' '));
             });
 
             const finalMessage = await stream.finalMessage();
 
             console.log(`[analyze-multi] Stream complete | stop_reason: ${finalMessage.stop_reason} | usage: input=${finalMessage.usage?.input_tokens} output=${finalMessage.usage?.output_tokens}`);
+
+            // Parse and apply ALL post-processing (same pipeline as Sonnet path)
+            let analysis = parseAnalysisJSON(accumulated);
+            analysis.mca_positions = deduplicatePositions(analysis.mca_positions);
+            analysis = fixExcludedMCAProceeds(analysis);
+            analysis = fixBalanceFields(analysis);
+            analysis = fixPositionBalances(analysis);
+            analysis = enforcePaidOffStatus(analysis);
+            analysis = recalcMCAMetrics(analysis);
+            analysis = enforceConsistency(analysis);
+            analysis = fixInsolvencyCalc(analysis);
+
+            console.log(`[analyze-multi] Stream post-processing: ${analysis.mca_positions?.length} positions, MCA monthly: $${analysis.calculated_metrics?.total_mca_monthly}, DSR: ${analysis.calculated_metrics?.dsr_percent}%`);
+
+            // Send the post-processed analysis JSON (client wraps in {success, analysis})
+            const result = JSON.stringify(analysis);
+            controller.enqueue(encoder.encode(result));
 
             // Send end marker on its own line
             controller.enqueue(encoder.encode('\n[DONE]'));
