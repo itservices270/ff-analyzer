@@ -514,6 +514,12 @@ If you cannot find an explicit "Average Daily Balance" line, you MUST calculate 
 • Include weekends if the balance was negative Friday through Monday (those are negative even without a listed balance entry)
 • Record in total_days_negative and days_negative per month
 
+## POSITION COUNT VERIFICATION (do this BEFORE outputting JSON):
+1. Scan ALL recurring debits across ALL months. List every unique (descriptor, amount) pair.
+2. If the SAME funder name/descriptor has debits at 2+ DIFFERENT amounts, that is 2+ SEPARATE positions. Create one mca_positions entry for EACH amount.
+3. Count your total unique positions. If you only found 1-2 positions on a business with $40K+/week in MCA payments, you almost certainly missed or merged positions. Re-scan.
+4. Common merge error: "Merchant Market" or "Merchant Marketplace" often has 2-3 advances at different amounts ($10,718 and $9,764 for example). These MUST be separate entries.
+
 ## OUTPUT SCHEMA — Return ONLY valid JSON, no markdown, no preamble:
 
 {

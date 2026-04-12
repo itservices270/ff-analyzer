@@ -85,6 +85,12 @@ CRITICAL RULES:
 - REVENUE CALCULATION: The server will calculate revenue from your large_deposits data. Just make sure gross_deposits is accurate and every deposit ≥ $10,000 is listed in large_deposits.
 - total_mca_payments per month = sum of all MCA debits in that month (for the trend chart)
 
+## POSITION COUNT VERIFICATION (do this BEFORE outputting JSON):
+1. Scan ALL recurring debits across ALL months. List every unique (descriptor, amount) pair.
+2. If the SAME funder name/descriptor has debits at 2+ DIFFERENT amounts, that is 2+ SEPARATE positions. Create one mca_positions entry for EACH amount.
+3. Count your total unique positions. If you only found 1-2 positions on a business with $40K+/week in MCA payments, you almost certainly missed or merged positions. Re-scan.
+4. Common merge error: "Merchant Market" or "Merchant Marketplace" often has 2-3 advances at different amounts ($10,718 and $9,764 for example). These MUST be separate entries.
+
 ${buildFunderIntelBlock()}
 
 ## REQUIRED JSON OUTPUT STRUCTURE
