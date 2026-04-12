@@ -85,11 +85,14 @@ Scan ALL months of statements for recurring ACH debits. For each funder position
 10. CONFIDENCE: "high" if descriptor clearly matches known funder, "medium" if pattern-matched, "low" if uncertain
 
 CRITICAL RULES:
-- Different reference numbers or amounts from the same funder descriptor = SEPARATE positions (e.g., two TMM advances)
+- POSITION SEPARATION IS CRITICAL: If the same funder has debits at DIFFERENT AMOUNTS, these are SEPARATE positions (separate advances). For example, if "Merchant Market" has debits of $10,718.75 AND $9,764.75, that is TWO positions, not one. Each unique recurring debit amount from the same funder = separate position. Do NOT average them. Do NOT pick just one. List EACH as its own entry.
+- Same funder with different reference numbers = SEPARATE positions even if amounts are similar
 - Term loans with declining balances go in other_debt_service, NOT mca_positions
 - "INCREASE" descriptor = Funders First (our company) — classify as "restructuring", not MCA
 - "CORPORATE TURNAROUND" = debt settlement company, not MCA
 - Collections descriptors ("MCA RECOVERY", "NOMAS", "MCALLC") = flag as collections, not active MCA
+- REVENUE CALCULATION: net_verified_revenue MUST equal gross_deposits MINUS total_excluded. Double-check your math. monthly_average_revenue = sum of all months net_verified_revenue / number of months.
+- total_mca_payments per month = sum of all MCA debits in that month (for the trend chart)
 
 ${buildFunderIntelBlock()}
 
@@ -111,13 +114,14 @@ ${buildFunderIntelBlock()}
         { "description": "descriptor text", "amount": 0, "type": "mca_advance|loan|transfer|nsf_return|owner_deposit" }
       ],
       "total_excluded": 0,
-      "net_revenue": 0,
+      "net_verified_revenue": 0,
       "ending_balance": 0,
       "beginning_balance": 0,
       "average_daily_balance": 0,
-      "negative_balance_days": 0,
-      "nsf_events": 0,
-      "total_withdrawals": 0
+      "days_negative": 0,
+      "nsf_count": 0,
+      "total_withdrawals": 0,
+      "total_mca_payments": 0
     }
   ],
 
