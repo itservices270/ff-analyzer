@@ -340,10 +340,36 @@ export default function PricingTab({ a, positions, excludedIds, otherExcludedIds
   const commissionRate = getGraduatedCommissionRate(isoPoints);
   const commissionTotal = totalBalance * commissionRate;
 
-  // ── TAD locked at 0-point reduction (72.86%) ──
+  // ── Reduction formula (drives merchant's total weekly payment) ──
   const BASE_REDUCTION = 0.7286;
-  const tad0 = totalCurrentWeekly * (1 - BASE_REDUCTION); // What funders get per week at final
-  const ffMargin = 0; // FF margin is now handled via factor, not separate weekly
+  const REDUCTION_PER_POINT = 0.02857;
+  const reductionPct = BASE_REDUCTION - (isoPoints * REDUCTION_PER_POINT);
+  const merchantWeeklyAtFinal = totalCurrentWeekly * (1 - reductionPct);
+
+  // ── FF Factor (term-based + retention pricing) ──
+  // Use preliminary term (debt / merchant weekly) to pick factor tier
+  const prelimTerm = totalBalance > 0 && merchantWeeklyAtFinal > 0
+    ? totalBalance / merchantWeeklyAtFinal : 0;
+  const retentionAdj = getRetentionAdjustment(isoPoints);
+  const autoFactor = getFFFactorForTerm(prelimTerm);
+  const effectiveFFRate = ffFactorOverride
+    ? parseFloat(ffFactorOverride)
+    : autoFactor.factor + retentionAdj;
+  const isRetentionPricing = isoPoints < 3;
+
+  // ── Total payback and actual term ──
+  const ffFeeTotal = totalBalance * (effectiveFFRate - 1);
+  const totalPayback = totalBalance + ffFeeTotal + commissionTotal;
+  const actualTerm = merchantWeeklyAtFinal > 0 ? Math.ceil(totalPayback / merchantWeeklyAtFinal) : 0;
+
+  // ── Weekly breakdown ──
+  const isoCommWeekly = actualTerm > 0 ? commissionTotal / actualTerm : 0;
+  const ffFeeWeekly = actualTerm > 0 ? ffFeeTotal / actualTerm : 0;
+  const tadFinal = merchantWeeklyAtFinal - isoCommWeekly - ffFeeWeekly; // what funders get at final
+
+  // ── Enrollment fee (tiered by debt load) ──
+  const autoEnrollmentFee = getEnrollmentFee(totalBalance);
+  const enrollmentFee = ffFeeOverride ? parseFloat(ffFeeOverride) : autoEnrollmentFee;
 
   // ── Tier definitions ──
   const tierDefs = [
@@ -358,8 +384,7 @@ export default function PricingTab({ a, positions, excludedIds, otherExcludedIds
   const pricingResult = useMemo(() => {
     if (effectivePositions.length === 0 || totalBalance <= 0) return { tad: 0, funderTiers: [], maxTerm: 0, warnings: [], totalLocked: 0 };
 
-    // TAD = locked at 0-point reduction
-    const tad = tad0;
+    const tad = tadFinal;
 
     // Prepare positions with lock status and effective weekly
     const preparedPositions = effectivePositions.map(dp => {
@@ -423,43 +448,22 @@ export default function PricingTab({ a, positions, excludedIds, otherExcludedIds
       };
     });
 
-    const maxTerm = Math.max(...funderTiers.flatMap(ft => (ft.tiers || []).map(t => t.proposedTermWeeks || 0)).filter(t => t > 0 && t < 9999), 0);
+    const maxTerm = actualTerm; // deal length = total payback / merchant weekly
 
     return { tad, funderTiers, maxTerm, warnings, totalLocked };
   }, [
     JSON.stringify(effectivePositions.map(dp => dp._balance + dp._totalWeekly + dp.funder_name)),
-    tad0, ffMargin, enforcementWeighting,
+    tadFinal, enforcementWeighting, actualTerm,
     JSON.stringify(scoreMap), JSON.stringify(lockedPositions),
     JSON.stringify(funderIntelMap), totalBalance,
   ]);
 
   const { tad, funderTiers, maxTerm, warnings, totalLocked } = pricingResult;
 
-  // ── FF Factor calculation (term-based + retention pricing) ──
-  const retentionAdj = getRetentionAdjustment(isoPoints);
-  const autoFactor = getFFFactorForTerm(maxTerm);
-  const effectiveFFRate = ffFactorOverride
-    ? parseFloat(ffFactorOverride)
-    : autoFactor.factor + retentionAdj;
-  const ffFeeTotal = totalBalance * (effectiveFFRate - 1);
-  const ffFeeWeekly = maxTerm > 0 ? ffFeeTotal / maxTerm : 0;
-
-  // ── ISO commission amortized over max funder term ──
-  const isoCommWeekly = maxTerm > 0 ? commissionTotal / maxTerm : 0;
-
-  // ── Enrollment fee (tiered by debt load) ──
-  const autoEnrollmentFee = getEnrollmentFee(totalBalance);
-  const enrollmentFee = ffFeeOverride ? parseFloat(ffFeeOverride) : autoEnrollmentFee;
-
-  // ── Merchant pays = TAD + FF factor fee/wk + ISO commission/wk ──
-  const merchantPaysWeekly = tad + ffFeeWeekly + isoCommWeekly;
+  // ── Merchant pays (at final tier = full TAD) ──
+  const merchantPaysWeekly = merchantWeeklyAtFinal;
   const proposedDSR = revenue > 0 ? ((merchantPaysWeekly * 4.33) / revenue) * 100 : 0;
-  const reductionPct = totalCurrentWeekly > 0 ? ((totalCurrentWeekly - merchantPaysWeekly) / totalCurrentWeekly) * 100 : 0;
-  const isRetentionPricing = isoPoints < 3;
-
-  // Effective factor rate
-  const totalMerchantPays = merchantPaysWeekly * maxTerm;
-  const effectiveFactorRate = totalBalance > 0 ? totalMerchantPays / totalBalance : 0;
+  const reductionPct_display = totalCurrentWeekly > 0 ? ((totalCurrentWeekly - merchantPaysWeekly) / totalCurrentWeekly) * 100 : 0;
 
   // Selected tier computed values
   const selectedPct = tierDefs[selectedTierIdx]?.pct || 1.0;
@@ -625,7 +629,7 @@ export default function PricingTab({ a, positions, excludedIds, otherExcludedIds
             { label: 'Enrollment Fee', value: fmt(enrollmentFee), color: '#00bcd4' },
             { label: 'Max Term', value: maxTerm < 9999 ? `${maxTerm} wks` : '\u2014', color: '#e8e8f0' },
             { label: 'FF Factor Rate', value: effectiveFFRate.toFixed(3), color: isRetentionPricing ? '#a78bfa' : '#7c3aed' },
-            { label: 'Payment Reduction', value: fmtP(selectedReduction), color: selectedReduction > 0 ? '#4caf50' : '#ef5350', final: selectedTierIdx !== 3 ? fmtP(reductionPct) : null },
+            { label: 'Payment Reduction', value: fmtP(selectedReduction), color: selectedReduction > 0 ? '#4caf50' : '#ef5350', final: selectedTierIdx !== 3 ? fmtP(reductionPct_display) : null },
           ].map((s, i) => (
             <div key={i} style={S.kpiBox()}>
               <div style={S.kpiLabel}>{s.label}</div>
