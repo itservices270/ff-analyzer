@@ -664,6 +664,7 @@ export default function PricingTab({ a, positions, excludedIds, otherExcludedIds
         <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 8 }}>
           {[
             { label: 'Total Debt', value: fmt(totalBalance), color: '#ef5350' },
+            { label: 'Total Payback', value: fmt(merchantPaysWeekly * maxTerm), color: '#e8e8f0', note: fmtD(merchantPaysWeekly) + ' \u00d7 ' + maxTerm + 'wk' },
             { label: 'TAD to Funders/wk', value: fmtD(selectedTAD), color: tierColors[selectedTierIdx], final: selectedTierIdx !== 3 ? fmtD(tad) : null },
             { label: 'ISO Commission/wk', value: fmtD(isoCommWeekly), color: '#EAD068' },
             { label: 'FF Factor Fee/wk', value: fmtD(ffFeeWeekly), color: '#CFA529' },
