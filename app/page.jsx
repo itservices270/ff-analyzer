@@ -3194,6 +3194,7 @@ const UW_SETTINGS = {
 function toWeeklyEquiv(payment, frequency) {
   if (frequency === 'daily') return payment * 5;
   if (frequency === 'bi-weekly') return payment / 2;
+  if (frequency === 'monthly') return payment / 4.33;
   return payment; // weekly
 }
 
@@ -5287,7 +5288,13 @@ export default function FFAnalyzer() {
     setError(null);
     setResult(null);
 
-    const msgs = [
+    const isQuickUW = model === 'sonnet';
+    const msgs = isQuickUW ? [
+      `Quick UW: Scanning ${ready.length} statement${ready.length > 1 ? 's' : ''}…`,
+      'Extracting revenue & flagging proceeds…',
+      'Detecting MCA positions…',
+      'Calculating metrics…',
+    ] : [
       `Extracting data from ${ready.length} statement${ready.length > 1 ? 's' : ''}…`,
       'Detecting MCA positions across accounts…',
       'Deduplicating cross-account transfers…',
@@ -5297,7 +5304,7 @@ export default function FFAnalyzer() {
     ];
     let mi = 0;
     setLoadingMsg(msgs[0]);
-    const interval = setInterval(() => { if (mi < msgs.length - 1) setLoadingMsg(msgs[++mi]); }, 3000);
+    const interval = setInterval(() => { if (mi < msgs.length - 1) setLoadingMsg(msgs[++mi]); }, isQuickUW ? 2000 : 3000);
 
     try {
       const statements = ready.map(f => ({
@@ -5307,10 +5314,14 @@ export default function FFAnalyzer() {
         images: f.images || null,
         isScanned: f.isScanned || false,
       }));
-      const endpoint = statements.length === 1 ? '/api/analyze' : '/api/analyze-multi';
-      const body = statements.length === 1
-        ? { text: statements[0].text, fileName: ready[0].file.name, model, industry: selectedIndustry }
-        : { statements, model, industry: selectedIndustry };
+      const endpoint = isQuickUW
+        ? '/api/quick-uw'
+        : (statements.length === 1 ? '/api/analyze' : '/api/analyze-multi');
+      const body = isQuickUW
+        ? { statements, industry: selectedIndustry }
+        : (statements.length === 1
+          ? { text: statements[0].text, fileName: ready[0].file.name, model, industry: selectedIndustry }
+          : { statements, model, industry: selectedIndustry });
 
       const data = await fetchAnalysis(endpoint, body);
       clearInterval(interval);
@@ -5362,7 +5373,8 @@ export default function FFAnalyzer() {
 
     setLoading(true);
     setError(null);
-    setLoadingMsg(`Re-analyzing with ${model === 'opus' ? 'Opus' : 'Sonnet'}…`);
+    const isQuickUW = model === 'sonnet';
+    setLoadingMsg(isQuickUW ? 'Quick UW: Re-scanning…' : `Re-analyzing with Opus…`);
 
     try {
       const statements = ready.map(f => ({
@@ -5372,10 +5384,14 @@ export default function FFAnalyzer() {
         images: f.images || null,
         isScanned: f.isScanned || false,
       }));
-      const endpoint = statements.length === 1 ? '/api/analyze' : '/api/analyze-multi';
-      const body = statements.length === 1
-        ? { text: statements[0].text, fileName: ready[0].file.name, model, industry: selectedIndustry }
-        : { statements, model, industry: selectedIndustry };
+      const endpoint = isQuickUW
+        ? '/api/quick-uw'
+        : (statements.length === 1 ? '/api/analyze' : '/api/analyze-multi');
+      const body = isQuickUW
+        ? { statements, industry: selectedIndustry }
+        : (statements.length === 1
+          ? { text: statements[0].text, fileName: ready[0].file.name, model, industry: selectedIndustry }
+          : { statements, model, industry: selectedIndustry });
 
       const data = await fetchAnalysis(endpoint, body);
 
@@ -5550,10 +5566,10 @@ export default function FFAnalyzer() {
               {/* Action bar */}
               <div style={{ display: 'flex', gap: 12, alignItems: 'center', flexWrap: 'wrap' }}>
                 <button
-                  style={{ ...S.btn('primary'), opacity: canAnalyze ? 1 : 0.5 }}
+                  style={{ ...S.btn(model === 'sonnet' ? 'gold' : 'primary'), opacity: canAnalyze ? 1 : 0.5 }}
                   disabled={!canAnalyze}
                   onClick={analyze}>
-                  🔍 Analyze {readyCount} Statement{readyCount !== 1 ? 's' : ''}
+                  {model === 'sonnet' ? '⚡ Quick UW' : '🔍 Analyze'} {readyCount} Statement{readyCount !== 1 ? 's' : ''}
                 </button>
                 <button style={S.btn('secondary')} onClick={reset}>✕ Clear All</button>
                 <select
@@ -5566,9 +5582,9 @@ export default function FFAnalyzer() {
                   ))}
                 </select>
                 <div style={{ display: 'flex', alignItems: 'center', gap: 8, background: 'rgba(255,255,255,0.06)', border: '1px solid rgba(255,255,255,0.12)', borderRadius: 8, padding: '8px 14px' }}>
-                  <span style={{ fontSize: 12, color: 'rgba(232,232,240,0.5)' }}>Model:</span>
-                  <button onClick={() => setModel('opus')} style={{ fontSize: 12, padding: '3px 10px', borderRadius: 6, border: 'none', cursor: 'pointer', fontFamily: 'inherit', background: model === 'opus' ? 'rgba(0,229,255,0.2)' : 'transparent', color: model === 'opus' ? '#00e5ff' : 'rgba(232,232,240,0.45)' }}>Opus</button>
-                  <button onClick={() => setModel('sonnet')} style={{ fontSize: 12, padding: '3px 10px', borderRadius: 6, border: 'none', cursor: 'pointer', fontFamily: 'inherit', background: model === 'sonnet' ? 'rgba(234,208,104,0.2)' : 'transparent', color: model === 'sonnet' ? '#EAD068' : 'rgba(232,232,240,0.45)' }}>Sonnet ⚡</button>
+                  <span style={{ fontSize: 12, color: 'rgba(232,232,240,0.5)' }}>Mode:</span>
+                  <button onClick={() => setModel('opus')} style={{ fontSize: 12, padding: '3px 10px', borderRadius: 6, border: 'none', cursor: 'pointer', fontFamily: 'inherit', background: model === 'opus' ? 'rgba(0,229,255,0.2)' : 'transparent', color: model === 'opus' ? '#00e5ff' : 'rgba(232,232,240,0.45)' }}>Full Analysis</button>
+                  <button onClick={() => setModel('sonnet')} style={{ fontSize: 12, padding: '3px 10px', borderRadius: 6, border: 'none', cursor: 'pointer', fontFamily: 'inherit', background: model === 'sonnet' ? 'rgba(234,208,104,0.2)' : 'transparent', color: model === 'sonnet' ? '#EAD068' : 'rgba(232,232,240,0.45)' }}>Quick UW ⚡</button>
                 </div>
                 {detectingCount > 0 && <span style={{ fontSize: 12, color: '#00e5ff', animation: 'pulse 1s infinite' }}>Detecting {detectingCount} file{detectingCount > 1 ? 's' : ''}…</span>}
                 {needsScanCount > 0 && <span style={{ fontSize: 12, color: '#ff9800' }}>⚠️ {needsScanCount} statement{needsScanCount > 1 ? 's need' : ' needs'} scanning first</span>}
@@ -5658,7 +5674,7 @@ export default function FFAnalyzer() {
           <div style={{ ...S.card, background: 'rgba(0,0,0,0.2)', marginBottom: 20 }}>
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', flexWrap: 'wrap', gap: 12 }}>
               <div>
-                <div style={{ fontSize: 22, color: '#e8e8f0', marginBottom: 4 }}>{result.analysis.business_name}</div>
+                <div style={{ fontSize: 22, color: '#e8e8f0', marginBottom: 4, display: 'flex', alignItems: 'center', gap: 10 }}>{result.analysis.business_name} {result.analysis.quick_uw_mode && <span style={{ fontSize: 11, padding: '3px 10px', borderRadius: 20, background: 'rgba(234,208,104,0.15)', color: '#EAD068', border: '1px solid rgba(234,208,104,0.3)', letterSpacing: 0.5, textTransform: 'uppercase', fontWeight: 500 }}>Quick UW</span>}</div>
                 <div style={{ fontSize: 13, color: 'rgba(232,232,240,0.45)' }}>
                   {result.statement_count > 1
                     ? `${result.statement_count} statements analyzed · ${(result.analysis.accounts || []).length} account${(result.analysis.accounts||[]).length !== 1 ? 's' : ''}`
@@ -5778,6 +5794,12 @@ export default function FFAnalyzer() {
           </div>
 
           <div style={S.card}>
+            {result.analysis.quick_uw_mode && [5, 6, 8, 9, 10].includes(activeTab) && (
+              <div style={{ background: 'rgba(234,208,104,0.08)', border: '1px solid rgba(234,208,104,0.2)', borderRadius: 8, padding: '10px 16px', marginBottom: 16, display: 'flex', alignItems: 'center', gap: 10 }}>
+                <span style={{ fontSize: 14 }}>⚡</span>
+                <span style={{ fontSize: 13, color: '#EAD068' }}>Quick UW mode — switch to <strong>Full Analysis</strong> and re-analyze for this tab</span>
+              </div>
+            )}
             {activeTab === 0 && <RevenueTab a={result.analysis} depositOverrides={depositOverrides} setDepositOverrides={setDepositOverrides} />}
             {activeTab === 1 && <TrendTab a={result.analysis} agreementResults={agreementResults} />}
             {activeTab === 2 && <MCATab a={result.analysis} positions={positions} setPositions={setPositions} excludedIds={excludedIds} setExcludedIds={setExcludedIds} otherExcludedIds={otherExcludedIds} setOtherExcludedIds={setOtherExcludedIds} depositOverrides={depositOverrides} agreementResults={agreementResults} enrolledPositions={enrolledPositions} setEnrolledPositions={setEnrolledPositions} />}

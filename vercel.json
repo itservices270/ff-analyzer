@@ -5,6 +5,7 @@
     "app/api/analyze-agreement/route.js": { "maxDuration": 120 },
     "app/api/cross-reference/route.js": { "maxDuration": 150 },
     "app/api/scan-statement/route.js": { "maxDuration": 120 },
+    "app/api/quick-uw/route.js": { "maxDuration": 120 },
     "app/api/chat/route.js": { "maxDuration": 60 },
     "app/api/detect-statement/route.js": { "maxDuration": 30 },
     "app/api/parse-position/route.js": { "maxDuration": 30 }

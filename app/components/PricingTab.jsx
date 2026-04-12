@@ -12,6 +12,7 @@ const fmtP = (n) => (parseFloat(n) || 0).toFixed(1) + '%';
 function toWeeklyEquiv(payment, frequency) {
   if (frequency === 'daily') return payment * 5;
   if (frequency === 'bi-weekly') return payment / 2;
+  if (frequency === 'monthly') return payment / 4.33;
   return payment;
 }
 
