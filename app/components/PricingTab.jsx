@@ -614,9 +614,9 @@ export default function PricingTab({ a, positions, excludedIds, otherExcludedIds
           </div>
           <div style={{ fontSize: 28, color: selectedReduction > 0 ? '#4caf50' : '#ef5350' }}>{'\u2192'}</div>
           <div style={{ textAlign: 'center' }}>
-            <div style={{ fontSize: 9, color: 'rgba(232,232,240,0.4)', textTransform: 'uppercase', letterSpacing: 0.5, marginBottom: 4 }}>Merchant Pays FF ({tierDefs[selectedTierIdx]?.label})</div>
-            <div style={{ fontSize: 24, fontWeight: 800, color: tierColors[selectedTierIdx] }}>{fmtD(selectedMerchantWeekly)}</div>
-            <div style={{ fontSize: 11, color: 'rgba(232,232,240,0.4)' }}>DSR: {fmtP(selectedDSR)}</div>
+            <div style={{ fontSize: 9, color: 'rgba(232,232,240,0.4)', textTransform: 'uppercase', letterSpacing: 0.5, marginBottom: 4 }}>Merchant Pays FF (Fixed)</div>
+            <div style={{ fontSize: 24, fontWeight: 800, color: '#22c55e' }}>{fmtD(merchantPaysWeekly)}</div>
+            <div style={{ fontSize: 11, color: 'rgba(232,232,240,0.4)' }}>DSR: {fmtP(proposedDSR)}</div>
           </div>
         </div>
 
