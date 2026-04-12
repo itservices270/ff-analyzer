@@ -181,6 +181,8 @@ export default function PricingTab({ a, positions, excludedIds, otherExcludedIds
   const [ffFeeOverride, setFfFeeOverride] = useState(''); // blank = auto from debt tiers
   const [enforcementWeighting, setEnforcementWeighting] = useState(false);
   const [selectedTierIdx, setSelectedTierIdx] = useState(0); // 0=Opening, 1=Mid1, 2=Mid2, 3=Final
+  const [negotiationBuffer, setNegotiationBuffer] = useState(3);
+  const [tailWeeks, setTailWeeks] = useState(8);
 
   // ── FF Factor term-based tiers ──
   const FF_FACTOR_TIERS = [
@@ -591,6 +593,30 @@ export default function PricingTab({ a, positions, excludedIds, otherExcludedIds
           </div>
         </div>
 
+        {/* Negotiation Buffer & Tail Weeks */}
+        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 20, marginBottom: 12 }}>
+          <div style={{ background: 'rgba(0,0,0,0.2)', borderRadius: 10, padding: '14px 16px' }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
+              <div style={{ fontSize: 12, color: 'rgba(232,232,240,0.6)' }}>Negotiation Buffer</div>
+              <div style={{ fontSize: 20, fontWeight: 800, color: '#00e5ff' }}>{negotiationBuffer} wks</div>
+            </div>
+            <input type="range" min={0} max={8} step={1} value={negotiationBuffer} onChange={e => setNegotiationBuffer(Number(e.target.value))} style={{ width: '100%', accentColor: '#00e5ff' }} />
+            <div style={{ fontSize: 9, color: 'rgba(0,229,255,0.7)', textAlign: 'center', marginTop: 4 }}>
+              {fmtD(negotiationBuffer * merchantWeeklyAtFinal)} collected before funders accept
+            </div>
+          </div>
+          <div style={{ background: 'rgba(0,0,0,0.2)', borderRadius: 10, padding: '14px 16px' }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
+              <div style={{ fontSize: 12, color: 'rgba(232,232,240,0.6)' }}>Tail Weeks</div>
+              <div style={{ fontSize: 20, fontWeight: 800, color: '#f97316' }}>{tailWeeks} wks</div>
+            </div>
+            <input type="range" min={0} max={16} step={1} value={tailWeeks} onChange={e => setTailWeeks(Number(e.target.value))} style={{ width: '100%', accentColor: '#f97316' }} />
+            <div style={{ fontSize: 9, color: 'rgba(249,115,22,0.7)', textAlign: 'center', marginTop: 4 }}>
+              {fmtD(tailWeeks * merchantWeeklyAtFinal)} after funders paid off
+            </div>
+          </div>
+        </div>
+
         {/* Enforceability Weighting */}
         <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
           <label style={{ display: 'flex', alignItems: 'center', gap: 8, cursor: 'pointer', userSelect: 'none' }}>
@@ -673,6 +699,52 @@ export default function PricingTab({ a, positions, excludedIds, otherExcludedIds
           Funders: {fmtD(selectedTAD)} + ISO: {fmtD(isoCommWeekly)} + FF Fee: {fmtD(ffFeeWeekly)} + Buffer: {fmtD(Math.max(0, tad - selectedTAD))} = Merchant: {fmtD(merchantPaysWeekly)}/wk
         </div>
       </div>
+
+      {/* ═══════════════ FF REVENUE ANALYSIS ═══════════════ */}
+      <div style={S.divider} />
+      <div style={S.section}>FF Revenue Analysis</div>
+      {(() => {
+        const frontRev = negotiationBuffer * merchantPaysWeekly;
+        const ffFeeTotalRev = ffFeeTotal;
+        const tierBufferRev = Math.max(0, tad - selectedTAD) * maxTerm;
+        const tailRev = tailWeeks * merchantPaysWeekly;
+        const totalFFRev = frontRev + ffFeeTotalRev + tierBufferRev + tailRev;
+        const agreementTermWks = negotiationBuffer + maxTerm + tailWeeks;
+        const totalMerchantCost = commissionTotal + ffFeeTotalRev + frontRev + tailRev;
+        const aprEquiv = totalBalance > 0 && agreementTermWks > 0 ? (totalMerchantCost / totalBalance / (agreementTermWks / 52)) * 100 : 0;
+        const aprColor = aprEquiv <= 24 ? '#4caf50' : aprEquiv <= 30 ? '#f59e0b' : '#ef5350';
+        const aprLabel = aprEquiv <= 19 ? 'Below market' : aprEquiv <= 24 ? 'Competitive' : aprEquiv <= 30 ? 'Above market' : 'High';
+        return (
+          <div style={{ background: 'rgba(0,0,0,0.25)', borderRadius: 12, padding: 20, marginBottom: 20 }}>
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 8, marginBottom: 12 }}>
+              {[
+                { label: 'Front Buffer', value: fmtD(frontRev), color: '#00e5ff' },
+                { label: 'FF Factor Fee', value: fmtD(ffFeeTotalRev), color: '#CFA529' },
+                { label: 'Tier Buffer Held', value: fmtD(tierBufferRev), color: '#a78bfa' },
+                { label: 'Tail Revenue', value: fmtD(tailRev), color: '#f97316' },
+              ].map((s, i) => (
+                <div key={i} style={S.kpiBox()}>
+                  <div style={S.kpiLabel}>{s.label}</div>
+                  <div style={S.kpiValue(s.color)}>{s.value}</div>
+                </div>
+              ))}
+            </div>
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 8 }}>
+              {[
+                { label: 'Total FF Revenue', value: fmtD(totalFFRev), color: '#4caf50' },
+                { label: 'APR Equivalent', value: aprEquiv.toFixed(1) + '%', color: aprColor, note: aprLabel },
+                { label: 'Agreement Term', value: `${agreementTermWks} wks (${(agreementTermWks / 4.33).toFixed(1)}mo)`, color: '#e8e8f0' },
+              ].map((s, i) => (
+                <div key={i} style={S.kpiBox()}>
+                  <div style={S.kpiLabel}>{s.label}</div>
+                  <div style={S.kpiValue(s.color)}>{s.value}</div>
+                  {s.note && <div style={{ fontSize: 9, color: 'rgba(232,232,240,0.3)', marginTop: 2 }}>{s.note}</div>}
+                </div>
+              ))}
+            </div>
+          </div>
+        );
+      })()}
 
       {/* ═══════════════ OFFER TIERS (CLICKABLE) ═══════════════ */}
       <div style={S.divider} />
