@@ -629,23 +629,30 @@ export default function PricingTab({ a, positions, excludedIds, otherExcludedIds
         </div>
 
         {/* Breakdown boxes */}
-        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(7, 1fr)', gap: 8 }}>
+        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 8 }}>
           {[
+            { label: 'Total Debt', value: fmt(totalBalance), color: '#ef5350' },
             { label: 'TAD to Funders/wk', value: fmtD(selectedTAD), color: tierColors[selectedTierIdx], final: selectedTierIdx !== 3 ? fmtD(tad) : null },
             { label: 'ISO Commission/wk', value: fmtD(isoCommWeekly), color: '#EAD068' },
             { label: 'FF Factor Fee/wk', value: fmtD(ffFeeWeekly), color: '#CFA529' },
+            { label: 'FF Buffer/wk', value: fmtD(Math.max(0, tad - selectedTAD)), color: selectedTierIdx === 3 ? 'rgba(232,232,240,0.3)' : '#a78bfa', note: selectedTierIdx === 3 ? 'None at Final' : ((1 - selectedPct) * 100).toFixed(0) + '% of TAD' },
             { label: 'Enrollment Fee', value: fmt(enrollmentFee), color: '#00bcd4' },
             { label: 'Max Term', value: maxTerm < 9999 ? `${maxTerm} wks` : '\u2014', color: '#e8e8f0' },
-            { label: 'FF Factor Rate', value: effectiveFFRate.toFixed(3), color: isRetentionPricing ? '#a78bfa' : '#7c3aed' },
             { label: 'Payment Reduction', value: fmtP(selectedReduction), color: selectedReduction > 0 ? '#4caf50' : '#ef5350', final: selectedTierIdx !== 3 ? fmtP(reductionPct_display) : null },
           ].map((s, i) => (
             <div key={i} style={S.kpiBox()}>
               <div style={S.kpiLabel}>{s.label}</div>
               <div style={S.kpiValue(s.color)}>{s.value}</div>
               {s.final && <div style={{ fontSize: 9, color: 'rgba(232,232,240,0.3)', marginTop: 2 }}>Final: {s.final}</div>}
+              {s.note && <div style={{ fontSize: 9, color: 'rgba(232,232,240,0.3)', marginTop: 2 }}>{s.note}</div>}
             </div>
           ))}
         </div>
+        {tad < 0 && (
+          <div style={{ marginTop: 10, padding: '8px 14px', borderRadius: 8, background: 'rgba(239,83,80,0.12)', border: '1px solid rgba(239,83,80,0.3)', fontSize: 12, color: '#ef5350', textAlign: 'center' }}>
+            {'\uD83D\uDEA8'} Negative TAD: FF Factor fee + ISO commission exceed merchant capacity.
+          </div>
+        )}
 
         {/* Locked position summary */}
         {lockedCount > 0 && (
@@ -658,7 +665,7 @@ export default function PricingTab({ a, positions, excludedIds, otherExcludedIds
 
         {/* Waterfall explanation */}
         <div style={{ fontSize: 10, color: 'rgba(232,232,240,0.3)', marginTop: 8, textAlign: 'center' }}>
-          TAD (0-pt locked): {fmtD(tad)}/wk to funders {'\u00b7'} FF Factor: {effectiveFFRate.toFixed(3)} ({fmtD(ffFeeWeekly)}/wk) {'\u00b7'} ISO: {fmtD(isoCommWeekly)}/wk ({fmt(commissionTotal)} over {maxTerm}wk) {'\u00b7'} Merchant: {fmtD(merchantPaysWeekly)}/wk
+          Funders: {fmtD(selectedTAD)} + ISO: {fmtD(isoCommWeekly)} + FF Fee: {fmtD(ffFeeWeekly)} + Buffer: {fmtD(Math.max(0, tad - selectedTAD))} = Merchant: {fmtD(merchantPaysWeekly)}/wk
         </div>
       </div>
 
