@@ -119,11 +119,16 @@ export default function PricingTab({ a, positions, excludedIds, otherExcludedIds
     const result = [];
     enrolledActive.forEach(p => {
       const key = normalizeFunderKey(p.funder_name);
-      const matchKey = key.length >= 6 ? key : (p.funder_name || '').toLowerCase().split(/\s+/)[0];
       let found = false;
       for (const dp of result) {
         const dpKey = normalizeFunderKey(dp.funder_name);
-        if (matchKey.length >= 6 && dpKey.length >= 6 && (matchKey.includes(dpKey.slice(0, 6)) || dpKey.includes(matchKey.slice(0, 6)))) {
+        // Only merge if: exact match, one is substring of other, or 10+ char prefix overlap
+        const isMatch = (
+          (key === dpKey) ||
+          (key.length >= 6 && dpKey.length >= 6 && (key.includes(dpKey) || dpKey.includes(key))) ||
+          (key.length >= 10 && dpKey.length >= 10 && (key.includes(dpKey.slice(0, 10)) || dpKey.includes(key.slice(0, 10))))
+        );
+        if (isMatch) {
           const advWeekly = toWeeklyEquiv(p.payment_amount_current || p.payment_amount || 0, p.frequency);
           const advAgMatch = matchAgreementToPosition(p.funder_name, agreementResults);
           const advBalance = p.estimated_balance
