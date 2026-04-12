@@ -710,30 +710,20 @@ export default function PricingTab({ a, positions, excludedIds, otherExcludedIds
         const tailRev = tailWeeks * merchantPaysWeekly;
         const totalFFRev = frontRev + ffFeeTotalRev + tierBufferRev + tailRev;
         const agreementTermWks = negotiationBuffer + maxTerm + tailWeeks;
+        const agreementYears = agreementTermWks / 52;
         const totalMerchantCost = commissionTotal + ffFeeTotalRev + frontRev + tailRev;
-        const aprEquiv = totalBalance > 0 && agreementTermWks > 0 ? (totalMerchantCost / totalBalance / (agreementTermWks / 52)) * 100 : 0;
+        const aprEquiv = totalBalance > 0 && agreementYears > 0 ? (totalMerchantCost / totalBalance / agreementYears) * 100 : 0;
         const aprColor = aprEquiv <= 24 ? '#4caf50' : aprEquiv <= 30 ? '#f59e0b' : '#ef5350';
         const aprLabel = aprEquiv <= 19 ? 'Below market' : aprEquiv <= 24 ? 'Competitive' : aprEquiv <= 30 ? 'Above market' : 'High';
         return (
           <div style={{ background: 'rgba(0,0,0,0.25)', borderRadius: 12, padding: 20, marginBottom: 20 }}>
+            {/* Row 1: Revenue components */}
             <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 8, marginBottom: 12 }}>
               {[
-                { label: 'Front Buffer', value: fmtD(frontRev), color: '#00e5ff' },
-                { label: 'FF Factor Fee', value: fmtD(ffFeeTotalRev), color: '#CFA529' },
-                { label: 'Tier Buffer Held', value: fmtD(tierBufferRev), color: '#a78bfa' },
-                { label: 'Tail Revenue', value: fmtD(tailRev), color: '#f97316' },
-              ].map((s, i) => (
-                <div key={i} style={S.kpiBox()}>
-                  <div style={S.kpiLabel}>{s.label}</div>
-                  <div style={S.kpiValue(s.color)}>{s.value}</div>
-                </div>
-              ))}
-            </div>
-            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 8 }}>
-              {[
-                { label: 'Total FF Revenue', value: fmtD(totalFFRev), color: '#4caf50' },
-                { label: 'APR Equivalent', value: aprEquiv.toFixed(1) + '%', color: aprColor, note: aprLabel },
-                { label: 'Agreement Term', value: `${agreementTermWks} wks (${(agreementTermWks / 4.33).toFixed(1)}mo)`, color: '#e8e8f0' },
+                { label: 'Front Buffer', value: fmt(frontRev), color: '#00e5ff', note: `${negotiationBuffer} wks \u00d7 ${fmtD(merchantPaysWeekly)}` },
+                { label: 'FF Factor Fee', value: fmt(ffFeeTotalRev), color: '#CFA529', note: `${effectiveFFRate.toFixed(3)} on ${fmt(totalBalance)}` },
+                { label: 'Tier Buffer Held', value: fmt(tierBufferRev), color: '#a78bfa', note: `tier % \u00d7 ${maxTerm}wk` },
+                { label: 'Tail Revenue', value: fmt(tailRev), color: '#f97316', note: `${tailWeeks} wks \u00d7 ${fmtD(merchantPaysWeekly)}` },
               ].map((s, i) => (
                 <div key={i} style={S.kpiBox()}>
                   <div style={S.kpiLabel}>{s.label}</div>
@@ -741,6 +731,28 @@ export default function PricingTab({ a, positions, excludedIds, otherExcludedIds
                   {s.note && <div style={{ fontSize: 9, color: 'rgba(232,232,240,0.3)', marginTop: 2 }}>{s.note}</div>}
                 </div>
               ))}
+            </div>
+            {/* Row 2: Summary metrics */}
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 8, marginBottom: 10 }}>
+              <div style={{ background: 'linear-gradient(135deg, rgba(76,175,80,0.15), rgba(76,175,80,0.05))', border: '1px solid rgba(76,175,80,0.2)', borderRadius: 10, padding: '12px 14px', textAlign: 'center' }}>
+                <div style={{ fontSize: 9, color: 'rgba(232,232,240,0.5)', textTransform: 'uppercase', letterSpacing: 0.5, marginBottom: 4 }}>Total FF Revenue</div>
+                <div style={{ fontSize: 22, fontWeight: 800, color: '#4caf50' }}>{fmt(totalFFRev)}</div>
+                <div style={{ fontSize: 9, color: 'rgba(232,232,240,0.3)', marginTop: 2 }}>{fmt(totalFFRev / (agreementTermWks / 4.33))}/mo avg</div>
+              </div>
+              <div style={{ background: `linear-gradient(135deg, ${aprColor}22, ${aprColor}0d)`, border: `1px solid ${aprColor}33`, borderRadius: 10, padding: '12px 14px', textAlign: 'center' }}>
+                <div style={{ fontSize: 9, color: 'rgba(232,232,240,0.5)', textTransform: 'uppercase', letterSpacing: 0.5, marginBottom: 4 }}>APR Equivalent</div>
+                <div style={{ fontSize: 22, fontWeight: 800, color: aprColor }}>{aprEquiv.toFixed(1)}%</div>
+                <div style={{ fontSize: 9, color: 'rgba(232,232,240,0.3)', marginTop: 2 }}>{aprLabel} (19-24% benchmark)</div>
+              </div>
+              <div style={{ background: 'rgba(0,0,0,0.2)', border: '1px solid rgba(255,255,255,0.08)', borderRadius: 10, padding: '12px 14px', textAlign: 'center' }}>
+                <div style={{ fontSize: 9, color: 'rgba(232,232,240,0.5)', textTransform: 'uppercase', letterSpacing: 0.5, marginBottom: 4 }}>Agreement Term</div>
+                <div style={{ fontSize: 22, fontWeight: 800, color: '#e8e8f0' }}>{agreementTermWks} wks</div>
+                <div style={{ fontSize: 9, color: 'rgba(232,232,240,0.3)', marginTop: 2 }}>~{Math.round(agreementTermWks / 4.33)} months</div>
+              </div>
+            </div>
+            {/* Waterfall */}
+            <div style={{ fontSize: 10, color: 'rgba(232,232,240,0.3)', textAlign: 'center' }}>
+              Front: {fmt(frontRev)} + Fee: {fmt(ffFeeTotalRev)} + Buffer: {fmt(tierBufferRev)} + Tail: {fmt(tailRev)} = {fmt(totalFFRev)} total FF revenue {'\u00b7'} + Enrollment: {fmt(enrollmentFee)}
             </div>
           </div>
         );
