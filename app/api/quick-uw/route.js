@@ -36,30 +36,21 @@ You are an expert MCA underwriter doing a QUICK SCREENING of bank statements for
 
 For each statement month:
 1. Start with GROSS DEPOSITS (total credits for the month)
-2. Identify and FLAG any large deposits that look like MCA/loan funding proceeds:
-   - Round-number wires ($50K, $100K, $200K, etc.)
-   - Credits containing "WIRE", "ADVANCE", "FUNDING", "CAPITAL", "LOAN", "PROCEEDS", "GRP"
-   - Credits matching any known MCA funder descriptor from the reference list below
-   - These are NOT revenue — they are borrowed money being deposited
-3. Also flag and exclude: NSF return credits, internal transfers between accounts, owner deposits labeled as such
-4. NET REVENUE = Gross Deposits − Flagged MCA/Loan Proceeds − NSF Returns − Transfers
-5. Record the ENDING BALANCE for each month
-6. Record AVERAGE DAILY BALANCE if stated on the statement; otherwise estimate from beginning + ending / 2
-7. Count NEGATIVE BALANCE DAYS and NSF/OD events
+2. List EVERY INDIVIDUAL DEPOSIT of $10,000 or more. For each one, provide:
+   - descriptor: the exact text from the bank statement
+   - amount: the dollar amount
+   - date: the date it posted (YYYY-MM-DD)
+   - is_revenue: your best guess — true if it's real business income, false if it's MCA/loan proceeds, a transfer, or non-revenue
+   - exclusion_reason: if is_revenue is false, explain why (e.g., "MCA advance wire", "internal transfer", "loan proceeds")
+3. Calculate the sum of ALL deposits UNDER $10,000 for the month — report this as "small_deposits_total"
+4. Record ENDING BALANCE, BEGINNING BALANCE for each month
+5. Record AVERAGE DAILY BALANCE if stated on the statement; otherwise estimate from (beginning + ending) / 2
+6. Count NEGATIVE BALANCE DAYS and NSF/OD events
+7. Calculate total_mca_payments = sum of all MCA debits in that month
 
-Revenue sources to ALWAYS count as TRUE REVENUE (never exclude):
-- Card processing (Square, Clover, Stripe, PayPal, etc.)
-- "THREE SQUARE" / "LE-USA TECHNOL" / "Cantaloupe" / "CANTALOUPE PAYOUTS" → vending processors
-- Cash deposits / route collections
-- Customer payments / invoices
-- Vendor rebates
-- ACH credits that do NOT match any known funder descriptor
-
-Revenue sources to ALWAYS EXCLUDE:
-- "AMF TEAM" / "AMFTEAM" = staffing company (OpEx), NOT MCA
-- "FLEETCOR" / "WEX" / "COMDATA" = fleet fuel cards (OpEx), NOT MCA
-- "AMERICAN FUNDS" = 401k, NOT revenue
-- Any deposit matching a known MCA funder descriptor = loan proceeds
+Classification guidance for large deposits:
+- EXCLUDE (is_revenue: false): Round-number wires ($50K, $100K, $200K), credits containing "WIRE" + "ADVANCE"/"FUNDING"/"CAPITAL"/"LOAN"/"PROCEEDS"/"GRP", credits matching known MCA funder descriptors, NSF return credits, internal transfers, "AMF TEAM"/"AMFTEAM" (staffing, not revenue)
+- INCLUDE (is_revenue: true): Card processing (Square, Clover, Stripe, PayPal), "THREE SQUARE"/"LE-USA TECHNOL"/"Cantaloupe"/"CANTALOUPE PAYOUTS" (vending processors), cash deposits/route collections, customer payments/invoices, vendor rebates, ACH credits NOT matching any known funder descriptor
 
 ## TASK 2: MCA POSITIONS
 
@@ -91,7 +82,7 @@ CRITICAL RULES:
 - "INCREASE" descriptor = Funders First (our company) — classify as "restructuring", not MCA
 - "CORPORATE TURNAROUND" = debt settlement company, not MCA
 - Collections descriptors ("MCA RECOVERY", "NOMAS", "MCALLC") = flag as collections, not active MCA
-- REVENUE CALCULATION: net_verified_revenue MUST equal gross_deposits MINUS total_excluded. Double-check your math. monthly_average_revenue = sum of all months net_verified_revenue / number of months.
+- REVENUE CALCULATION: The server will calculate revenue from your large_deposits data. Just make sure gross_deposits is accurate and every deposit ≥ $10,000 is listed in large_deposits.
 - total_mca_payments per month = sum of all MCA debits in that month (for the trend chart)
 
 ${buildFunderIntelBlock()}
@@ -110,11 +101,10 @@ ${buildFunderIntelBlock()}
       "month": "Month YYYY",
       "statement_period": { "start": "YYYY-MM-DD", "end": "YYYY-MM-DD" },
       "gross_deposits": 0,
-      "flagged_proceeds": [
-        { "description": "descriptor text", "amount": 0, "type": "mca_advance|loan|transfer|nsf_return|owner_deposit" }
+      "large_deposits": [
+        { "descriptor": "exact text from statement", "amount": 0, "date": "YYYY-MM-DD", "is_revenue": true, "exclusion_reason": null }
       ],
-      "total_excluded": 0,
-      "net_verified_revenue": 0,
+      "small_deposits_total": 0,
       "ending_balance": 0,
       "beginning_balance": 0,
       "average_daily_balance": 0,
@@ -127,25 +117,7 @@ ${buildFunderIntelBlock()}
 
   "revenue": {
     "gross_deposits": 0,
-    "excluded_mca_proceeds": 0,
-    "excluded_loan_proceeds": 0,
-    "excluded_nsf_returns": 0,
-    "excluded_transfers": 0,
-    "excluded_other": 0,
-    "net_verified_revenue": 0,
-    "monthly_average_revenue": 0,
-    "cogs_rate": 0.40,
-    "revenue_sources": [
-      {
-        "name": "string",
-        "type": "card_processing|cash_deposit|ach_credit|vendor_credit|mca_advance|loan_advance|transfer|nsf_return",
-        "total": 0,
-        "monthly_avg": 0,
-        "is_excluded": false,
-        "confidence": 95,
-        "exclusion_reason": "string or null"
-      }
-    ]
+    "cogs_rate": 0.40
   },
 
   "balance_summary": {
@@ -371,37 +343,119 @@ export async function POST(request) {
       estimated_monthly_total: p.estimated_monthly_total || 0,
     }));
 
-    // ── SERVER-SIDE REVENUE RECALCULATION ──
-    // Don't trust Sonnet's summary math — recalculate from monthly breakdown
+    // ── SERVER-SIDE REVENUE BUILDER ──
+    // Build revenue_sources from individual large_deposits for manual toggle control
     const mb = analysis.monthly_breakdown || [];
     if (mb.length > 0) {
-      const totalNetRevenue = mb.reduce((s, m) => s + (m.net_verified_revenue || 0), 0);
       const totalGross = mb.reduce((s, m) => s + (m.gross_deposits || 0), 0);
-      const totalExcluded = mb.reduce((s, m) => s + (m.total_excluded || 0), 0);
-      const avgRevenue = totalNetRevenue / mb.length;
+      const avgMonthlyGross = totalGross / mb.length;
 
-      // Recalculate exclusion breakdown from flagged_proceeds
-      let excludedMCA = 0, excludedLoan = 0, excludedTransfers = 0, excludedNSF = 0, excludedOther = 0;
+      // Dynamic threshold: 3% of avg monthly gross, minimum $10,000
+      const threshold = Math.max(10000, avgMonthlyGross * 0.03);
+
+      // Collect all large deposits across all months
+      const allLargeDeposits = [];
+      let totalSmallDeposits = 0;
+
       mb.forEach(m => {
-        (m.flagged_proceeds || []).forEach(fp => {
-          const amt = fp.amount || 0;
-          if (fp.type === 'mca_advance') excludedMCA += amt;
-          else if (fp.type === 'loan') excludedLoan += amt;
-          else if (fp.type === 'transfer') excludedTransfers += amt;
-          else if (fp.type === 'nsf_return') excludedNSF += amt;
-          else excludedOther += amt;
+        (m.large_deposits || []).forEach(dep => {
+          allLargeDeposits.push({
+            descriptor: dep.descriptor || 'Unknown',
+            amount: dep.amount || 0,
+            date: dep.date || null,
+            month: m.month,
+            is_revenue: dep.is_revenue !== false, // default to revenue if not specified
+            exclusion_reason: dep.exclusion_reason || null,
+          });
         });
+        totalSmallDeposits += (m.small_deposits_total || 0);
+
+        // Backfill net_verified_revenue and total_excluded for Trend tab compat
+        const monthExcluded = (m.large_deposits || [])
+          .filter(d => d.is_revenue === false)
+          .reduce((s, d) => s + (d.amount || 0), 0);
+        m.total_excluded = monthExcluded;
+        m.net_verified_revenue = (m.gross_deposits || 0) - monthExcluded;
       });
 
-      // Override Sonnet's summary with server-calculated values
+      // Group deposits by normalized descriptor for the toggle table
+      const groups = {};
+      allLargeDeposits.forEach(dep => {
+        // Normalize: strip dates, numbers, whitespace for grouping
+        const normKey = (dep.descriptor || '')
+          .replace(/\d{2}\/\d{2}\/?\d{0,4}/g, '') // strip dates
+          .replace(/\d{6,}/g, '') // strip long numbers (reference IDs)
+          .replace(/\s+/g, ' ')
+          .trim()
+          .toUpperCase()
+          || 'UNKNOWN';
+
+        if (!groups[normKey]) {
+          groups[normKey] = {
+            name: dep.descriptor, // keep first occurrence's original text
+            total: 0,
+            count: 0,
+            is_excluded: !dep.is_revenue,
+            exclusion_reason: dep.exclusion_reason,
+            deposits: [],
+          };
+        }
+        groups[normKey].total += dep.amount;
+        groups[normKey].count += 1;
+        groups[normKey].deposits.push(dep);
+        // If ANY deposit in the group is excluded, mark the group as excluded
+        if (dep.is_revenue === false) {
+          groups[normKey].is_excluded = true;
+          groups[normKey].exclusion_reason = groups[normKey].exclusion_reason || dep.exclusion_reason;
+        }
+      });
+
+      // Build revenue_sources array
+      const revenueSources = Object.values(groups).map(g => ({
+        name: g.name + (g.count > 1 ? ` (${g.count}×)` : ''),
+        type: g.is_excluded ? 'mca_advance' : 'ach_credit',
+        total: Math.round(g.total * 100) / 100,
+        monthly_avg: Math.round((g.total / mb.length) * 100) / 100,
+        is_excluded: g.is_excluded,
+        confidence: g.is_excluded ? 95 : 90,
+        exclusion_reason: g.exclusion_reason,
+      }));
+
+      // Sort: excluded items first (so they're visible at top), then by total descending
+      revenueSources.sort((a, b) => {
+        if (a.is_excluded !== b.is_excluded) return a.is_excluded ? -1 : 1;
+        return b.total - a.total;
+      });
+
+      // Add "Other deposits below threshold" line for small deposits
+      if (totalSmallDeposits > 0) {
+        revenueSources.push({
+          name: `Other deposits under ${threshold >= 10000 ? '$' + Math.round(threshold / 1000) + 'K' : '$' + Math.round(threshold)}`,
+          type: 'ach_credit',
+          total: Math.round(totalSmallDeposits * 100) / 100,
+          monthly_avg: Math.round((totalSmallDeposits / mb.length) * 100) / 100,
+          is_excluded: false,
+          confidence: 85,
+          exclusion_reason: null,
+        });
+      }
+
+      // Calculate revenue from sources
+      const totalExcluded = revenueSources.filter(s => s.is_excluded).reduce((s, r) => s + r.total, 0);
+      const totalIncluded = revenueSources.filter(s => !s.is_excluded).reduce((s, r) => s + r.total, 0);
+      const netRevenue = totalGross - totalExcluded;
+      const avgRevenue = netRevenue / mb.length;
+
+      // Set revenue object
       analysis.revenue.gross_deposits = totalGross;
-      analysis.revenue.net_verified_revenue = totalNetRevenue;
+      analysis.revenue.net_verified_revenue = Math.round(netRevenue * 100) / 100;
       analysis.revenue.monthly_average_revenue = Math.round(avgRevenue * 100) / 100;
-      analysis.revenue.excluded_mca_proceeds = excludedMCA;
-      analysis.revenue.excluded_loan_proceeds = excludedLoan;
-      analysis.revenue.excluded_transfers = excludedTransfers;
-      analysis.revenue.excluded_nsf_returns = excludedNSF;
-      analysis.revenue.excluded_other = excludedOther;
+      analysis.revenue.excluded_mca_proceeds = Math.round(totalExcluded * 100) / 100;
+      analysis.revenue.excluded_loan_proceeds = 0;
+      analysis.revenue.excluded_transfers = 0;
+      analysis.revenue.excluded_nsf_returns = 0;
+      analysis.revenue.excluded_other = 0;
+      analysis.revenue.revenue_sources = revenueSources;
 
       // Recalculate metrics with corrected revenue
       const cogsRate = analysis.revenue.cogs_rate || 0.40;
