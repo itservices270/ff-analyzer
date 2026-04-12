@@ -349,68 +349,6 @@ export async function POST(request) {
       estimated_monthly_total: p.estimated_monthly_total || 0,
     }));
 
-    // ── SERVER-SIDE POSITION SPLIT DETECTION ──
-    // Scan raw statement text for each funder's descriptor to find missed multi-advance positions
-    try {
-      const fullText = statements.filter(s => s.text).map(s => s.text).join('\n').toLowerCase();
-      if (fullText.length > 0 && analysis.mca_positions.length > 0) {
-        // Group positions by funder (first 2 significant words, 4+ chars each)
-        const funderGroups = {};
-        analysis.mca_positions.forEach(pos => {
-          const words = (pos.funder_name || '').toLowerCase().split(/\s+/).filter(w => w.length >= 4);
-          const key = words.slice(0, 2).join(' ') || (pos.funder_name || '').toLowerCase().trim();
-          if (!funderGroups[key]) funderGroups[key] = { positions: [], words, name: pos.funder_name };
-          funderGroups[key].positions.push(pos);
-        });
-
-        const newPositions = [];
-        for (const [key, info] of Object.entries(funderGroups)) {
-          if (info.words.length === 0) continue;
-          // Find lines matching this funder's descriptor words
-          const lines = fullText.split('\n').filter(line =>
-            info.words.every(w => line.includes(w))
-          );
-          // Extract debit amounts ($200-$50K range)
-          const amountRegex = /\$?([\d,]+\.\d{2})/g;
-          const matchingAmounts = new Set();
-          for (const line of lines) {
-            let m;
-            while ((m = amountRegex.exec(line)) !== null) {
-              const amt = parseFloat(m[1].replace(/,/g, ''));
-              if (amt >= 200 && amt <= 50000) matchingAmounts.add(amt);
-            }
-          }
-          // Check if more unique amounts than positions
-          if (matchingAmounts.size > info.positions.length) {
-            const existingAmounts = info.positions.map(p => p.payment_amount || p.payment_amount_current || 0);
-            const missingAmounts = [...matchingAmounts].filter(amt =>
-              !existingAmounts.some(ea => Math.abs(ea - amt) < 50)
-            );
-            // Create new positions for missing amounts
-            const template = info.positions[0];
-            missingAmounts.forEach((amt, idx) => {
-              newPositions.push({
-                ...template,
-                funder_name: `${info.name} (Advance ${info.positions.length + idx + 1})`,
-                payment_amount: amt,
-                payment_amount_current: amt,
-                estimated_balance: Math.round(amt * 40),
-                estimated_monthly_total: Math.round(amt * (template.frequency === 'daily' ? 22 : template.frequency === 'weekly' ? 4.33 : 1)),
-                confidence: 'medium',
-                _auto_split: true,
-              });
-            });
-          }
-        }
-        if (newPositions.length > 0) {
-          analysis.mca_positions = [...analysis.mca_positions, ...newPositions];
-          analysis._auto_split_count = newPositions.length;
-        }
-      }
-    } catch (splitErr) {
-      console.warn('Position split detection error:', splitErr.message);
-    }
-
     // ── SERVER-SIDE REVENUE BUILDER ──
     // Build revenue_sources from individual large_deposits for manual toggle control
     const mb = analysis.monthly_breakdown || [];
