@@ -164,17 +164,48 @@ export default function PricingTab({ a, positions, excludedIds, otherExcludedIds
 
   // ── Revenue & business metrics ──
   const revenue = calcAdjustedRevenue(a, depositOverrides);
-  const cogs = a.expense_categories?.inventory_cogs || 0;
+  const cogsRate = a.revenue?.cogs_rate || 0.40;
+  const cogs = a.expense_categories?.inventory_cogs || (revenue * cogsRate);
   const grossProfit = revenue - cogs;
   const adb = a.balance_summary?.avg_daily_balance || a.calculated_metrics?.avg_daily_balance || 0;
   const biz = a.business_name || 'Business';
 
   // ── Deal Controls state ──
   const [isoPoints, setIsoPoints] = useState(11);
-  const [targetDSR, setTargetDSR] = useState(22);
-  const [ffMarginWeekly, setFfMarginWeekly] = useState('');
+  const [ffFactorOverride, setFfFactorOverride] = useState(''); // blank = auto from term tiers
+  const [ffFeeOverride, setFfFeeOverride] = useState(''); // blank = auto from debt tiers
   const [enforcementWeighting, setEnforcementWeighting] = useState(false);
   const [selectedTierIdx, setSelectedTierIdx] = useState(0); // 0=Opening, 1=Mid1, 2=Mid2, 3=Final
+
+  // ── FF Factor term-based tiers ──
+  const FF_FACTOR_TIERS = [
+    { maxWeeks: 26, factor: 1.119, label: '≤6 months' },
+    { maxWeeks: 43, factor: 1.129, label: '6-10 months' },
+    { maxWeeks: 65, factor: 1.139, label: '11-15 months' },
+    { maxWeeks: Infinity, factor: 1.149, label: '16+ months' },
+  ];
+  const getFFFactorForTerm = (weeks) => {
+    for (const tier of FF_FACTOR_TIERS) {
+      if (weeks <= tier.maxWeeks) return tier;
+    }
+    return FF_FACTOR_TIERS[FF_FACTOR_TIERS.length - 1];
+  };
+
+  // ── Enrollment fee tiers ──
+  const getEnrollmentFee = (debt) => {
+    if (debt >= 2000000) return 5000;
+    if (debt >= 1000000) return 4000;
+    if (debt >= 500000) return 3000;
+    if (debt >= 250000) return 2000;
+    return 1500;
+  };
+
+  // ── Retention pricing (ISO drops below 3 pts → FF drops rate) ──
+  const getRetentionAdjustment = (pts) => {
+    if (pts >= 3) return 0;
+    if (pts === 2) return -0.01;
+    return -0.02; // 0-1 points
+  };
 
   // ── Locked positions state: { [funderKey]: { locked: true, payment: number } } ──
   const [lockedPositions, setLockedPositions] = useState({});
@@ -309,9 +340,10 @@ export default function PricingTab({ a, positions, excludedIds, otherExcludedIds
   const commissionRate = getGraduatedCommissionRate(isoPoints);
   const commissionTotal = totalBalance * commissionRate;
 
-  // ── TAD calculation ──
-  const targetMerchantWeekly = (revenue * (targetDSR / 100)) / 4.33;
-  const ffMargin = ffMarginWeekly ? parseFloat(ffMarginWeekly) : 0;
+  // ── TAD locked at 0-point reduction (72.86%) ──
+  const BASE_REDUCTION = 0.7286;
+  const tad0 = totalCurrentWeekly * (1 - BASE_REDUCTION); // What funders get per week at final
+  const ffMargin = 0; // FF margin is now handled via factor, not separate weekly
 
   // ── Tier definitions ──
   const tierDefs = [
@@ -326,8 +358,8 @@ export default function PricingTab({ a, positions, excludedIds, otherExcludedIds
   const pricingResult = useMemo(() => {
     if (effectivePositions.length === 0 || totalBalance <= 0) return { tad: 0, funderTiers: [], maxTerm: 0, warnings: [], totalLocked: 0 };
 
-    // TAD = targetMerchantWeekly - FF margin (ISO sits on top, never reduces TAD)
-    const tad = Math.max(targetMerchantWeekly - ffMargin, 0);
+    // TAD = locked at 0-point reduction
+    const tad = tad0;
 
     // Prepare positions with lock status and effective weekly
     const preparedPositions = effectivePositions.map(dp => {
@@ -396,21 +428,34 @@ export default function PricingTab({ a, positions, excludedIds, otherExcludedIds
     return { tad, funderTiers, maxTerm, warnings, totalLocked };
   }, [
     JSON.stringify(effectivePositions.map(dp => dp._balance + dp._totalWeekly + dp.funder_name)),
-    targetMerchantWeekly, ffMargin, enforcementWeighting,
+    tad0, ffMargin, enforcementWeighting,
     JSON.stringify(scoreMap), JSON.stringify(lockedPositions),
     JSON.stringify(funderIntelMap), totalBalance,
   ]);
 
   const { tad, funderTiers, maxTerm, warnings, totalLocked } = pricingResult;
 
-  // ISO commission amortized over max term
-  const isoCommWeekly = maxTerm > 0 ? commissionTotal / maxTerm : 0;
-  const ffFeeWeekly = ffMargin;
+  // ── FF Factor calculation (term-based + retention pricing) ──
+  const retentionAdj = getRetentionAdjustment(isoPoints);
+  const autoFactor = getFFFactorForTerm(maxTerm);
+  const effectiveFFRate = ffFactorOverride
+    ? parseFloat(ffFactorOverride)
+    : autoFactor.factor + retentionAdj;
+  const ffFeeTotal = totalBalance * (effectiveFFRate - 1);
+  const ffFeeWeekly = maxTerm > 0 ? ffFeeTotal / maxTerm : 0;
 
-  // Merchant pays = TAD + FF margin + ISO commission/wk
+  // ── ISO commission amortized over max funder term ──
+  const isoCommWeekly = maxTerm > 0 ? commissionTotal / maxTerm : 0;
+
+  // ── Enrollment fee (tiered by debt load) ──
+  const autoEnrollmentFee = getEnrollmentFee(totalBalance);
+  const enrollmentFee = ffFeeOverride ? parseFloat(ffFeeOverride) : autoEnrollmentFee;
+
+  // ── Merchant pays = TAD + FF factor fee/wk + ISO commission/wk ──
   const merchantPaysWeekly = tad + ffFeeWeekly + isoCommWeekly;
   const proposedDSR = revenue > 0 ? ((merchantPaysWeekly * 4.33) / revenue) * 100 : 0;
   const reductionPct = totalCurrentWeekly > 0 ? ((totalCurrentWeekly - merchantPaysWeekly) / totalCurrentWeekly) * 100 : 0;
+  const isRetentionPricing = isoPoints < 3;
 
   // Effective factor rate
   const totalMerchantPays = merchantPaysWeekly * maxTerm;
@@ -468,6 +513,17 @@ export default function PricingTab({ a, positions, excludedIds, otherExcludedIds
       {/* ═══════════════ DEAL CONTROLS ═══════════════ */}
       <div style={S.section}>Deal Controls</div>
       <div style={{ background: 'rgba(207,165,41,0.06)', border: '1px solid rgba(207,165,41,0.2)', borderRadius: 12, padding: 20, marginBottom: 20 }}>
+        {/* Retention pricing banner */}
+        {isRetentionPricing && (
+          <div style={{ background: 'rgba(139,92,246,0.1)', border: '1px solid rgba(139,92,246,0.3)', borderRadius: 8, padding: '10px 14px', marginBottom: 16, display: 'flex', alignItems: 'center', gap: 10 }}>
+            <span style={{ fontSize: 16 }}>💎</span>
+            <div>
+              <div style={{ fontSize: 12, color: '#a78bfa', fontWeight: 700 }}>RETENTION PRICING ACTIVE</div>
+              <div style={{ fontSize: 10, color: 'rgba(232,232,240,0.5)' }}>FF rate reduced by {Math.abs(retentionAdj * 100).toFixed(0)}pts ({effectiveFFRate.toFixed(3)}). Conditional on full financial verification.</div>
+            </div>
+          </div>
+        )}
+
         <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 20, marginBottom: 12 }}>
           {/* ISO Commission Points Slider */}
           <div style={{ background: 'rgba(0,0,0,0.2)', borderRadius: 10, padding: '14px 16px' }}>
@@ -492,35 +548,41 @@ export default function PricingTab({ a, positions, excludedIds, otherExcludedIds
             </div>
           </div>
 
-          {/* Target DSR Slider */}
+          {/* FF Factor & Overrides */}
           <div style={{ background: 'rgba(0,0,0,0.2)', borderRadius: 10, padding: '14px 16px' }}>
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
-              <div style={{ fontSize: 12, color: 'rgba(232,232,240,0.6)' }}>Target DSR</div>
-              <div style={{ fontSize: 20, fontWeight: 800, color: '#00bcd4' }}>{targetDSR}%</div>
+              <div style={{ fontSize: 12, color: 'rgba(232,232,240,0.6)' }}>FF Factor{isRetentionPricing ? ' (Retention)' : ''}</div>
+              <div style={{ fontSize: 20, fontWeight: 800, color: isRetentionPricing ? '#a78bfa' : '#EAD068' }}>{effectiveFFRate.toFixed(3)}</div>
             </div>
-            <input type="range" min={10} max={35} step={1} value={targetDSR} onChange={e => setTargetDSR(Number(e.target.value))} style={{ width: '100%', accentColor: '#00bcd4' }} />
-            <div style={{ fontSize: 11, color: 'rgba(232,232,240,0.5)', textAlign: 'center', marginTop: 4 }}>
-              Merchant weekly: {fmtD(targetMerchantWeekly)} ({fmt(targetMerchantWeekly * 4.33)}/mo)
+            <div style={{ display: 'flex', gap: 8, marginBottom: 8 }}>
+              <div style={{ flex: 1 }}>
+                <label style={{ fontSize: 9, color: 'rgba(232,232,240,0.4)', display: 'block', marginBottom: 2 }}>MANUAL OVERRIDE</label>
+                <input type="text" value={ffFactorOverride} onChange={e => setFfFactorOverride(e.target.value)} placeholder={`e.g. ${autoFactor.factor}`} style={{ width: '100%', padding: '5px 8px', borderRadius: 4, border: '1px solid rgba(255,255,255,0.12)', background: 'rgba(0,0,0,0.3)', color: '#e8e8f0', fontSize: 11, fontFamily: 'inherit', boxSizing: 'border-box' }} />
+              </div>
+              <div style={{ flex: 1 }}>
+                <label style={{ fontSize: 9, color: 'rgba(232,232,240,0.4)', display: 'block', marginBottom: 2 }}>ENROLLMENT FEE</label>
+                <input type="text" value={ffFeeOverride} onChange={e => setFfFeeOverride(e.target.value)} placeholder={`$${autoEnrollmentFee.toLocaleString()}`} style={{ width: '100%', padding: '5px 8px', borderRadius: 4, border: '1px solid rgba(255,255,255,0.12)', background: 'rgba(0,0,0,0.3)', color: '#e8e8f0', fontSize: 11, fontFamily: 'inherit', boxSizing: 'border-box' }} />
+              </div>
+            </div>
+            <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4 }}>
+              {FF_FACTOR_TIERS.map(t => (
+                <span key={t.factor} style={{ fontSize: 9, padding: '2px 6px', borderRadius: 4, background: autoFactor.factor === t.factor ? 'rgba(234,208,104,0.2)' : 'rgba(255,255,255,0.05)', color: autoFactor.factor === t.factor ? '#EAD068' : 'rgba(232,232,240,0.35)', border: `1px solid ${autoFactor.factor === t.factor ? 'rgba(234,208,104,0.3)' : 'rgba(255,255,255,0.08)'}` }}>
+                  {t.label}: {t.factor}
+                </span>
+              ))}
             </div>
           </div>
         </div>
 
-        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 20 }}>
-          {/* FF Net Margin */}
-          <div>
-            <label style={{ fontSize: 11, color: 'rgba(232,232,240,0.5)', display: 'block', marginBottom: 4 }}>FF Net Margin / Week</label>
-            <input type="number" value={ffMarginWeekly} onChange={e => setFfMarginWeekly(e.target.value)} placeholder="$0" style={{ width: '100%', padding: '8px 12px', borderRadius: 6, border: '1px solid rgba(207,165,41,0.3)', background: 'rgba(0,0,0,0.3)', color: '#EAD068', fontSize: 16, fontFamily: 'inherit', fontWeight: 700, boxSizing: 'border-box' }} />
-          </div>
-          {/* Enforceability Weighting */}
-          <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-            <label style={{ display: 'flex', alignItems: 'center', gap: 8, cursor: 'pointer', userSelect: 'none' }}>
-              <input type="checkbox" checked={enforcementWeighting} onChange={e => setEnforcementWeighting(e.target.checked)} style={{ accentColor: '#EAD068', width: 16, height: 16 }} />
-              <div>
-                <div style={{ fontSize: 12, color: enforcementWeighting ? '#EAD068' : 'rgba(232,232,240,0.5)', fontWeight: 600 }}>Enable Enforceability Weighting</div>
-                <div style={{ fontSize: 10, color: 'rgba(232,232,240,0.35)' }}>Adjusts TAD allocation using 3-axis composite scores + funder intel</div>
-              </div>
-            </label>
-          </div>
+        {/* Enforceability Weighting */}
+        <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+          <label style={{ display: 'flex', alignItems: 'center', gap: 8, cursor: 'pointer', userSelect: 'none' }}>
+            <input type="checkbox" checked={enforcementWeighting} onChange={e => setEnforcementWeighting(e.target.checked)} style={{ accentColor: '#EAD068', width: 16, height: 16 }} />
+            <div>
+              <div style={{ fontSize: 12, color: enforcementWeighting ? '#EAD068' : 'rgba(232,232,240,0.5)', fontWeight: 600 }}>Enable Enforceability Weighting</div>
+              <div style={{ fontSize: 10, color: 'rgba(232,232,240,0.35)' }}>Adjusts TAD allocation using 3-axis composite scores + funder intel</div>
+            </div>
+          </label>
         </div>
       </div>
 
@@ -559,10 +621,10 @@ export default function PricingTab({ a, positions, excludedIds, otherExcludedIds
           {[
             { label: 'TAD to Funders/wk', value: fmtD(selectedTAD), color: tierColors[selectedTierIdx], final: selectedTierIdx !== 3 ? fmtD(tad) : null },
             { label: 'ISO Commission/wk', value: fmtD(isoCommWeekly), color: '#EAD068' },
-            { label: 'FF Margin/wk', value: fmtD(ffFeeWeekly), color: '#CFA529' },
-            { label: 'ISO Total', value: fmt(commissionTotal), color: '#EAD068' },
+            { label: 'FF Factor Fee/wk', value: fmtD(ffFeeWeekly), color: '#CFA529' },
+            { label: 'Enrollment Fee', value: fmt(enrollmentFee), color: '#00bcd4' },
             { label: 'Max Term', value: maxTerm < 9999 ? `${maxTerm} wks` : '\u2014', color: '#e8e8f0' },
-            { label: 'Eff Factor Rate', value: selectedFactorRate > 0 ? selectedFactorRate.toFixed(3) : '\u2014', color: '#7c3aed', final: selectedTierIdx !== 3 && effectiveFactorRate > 0 ? effectiveFactorRate.toFixed(3) : null },
+            { label: 'FF Factor Rate', value: effectiveFFRate.toFixed(3), color: isRetentionPricing ? '#a78bfa' : '#7c3aed' },
             { label: 'Payment Reduction', value: fmtP(selectedReduction), color: selectedReduction > 0 ? '#4caf50' : '#ef5350', final: selectedTierIdx !== 3 ? fmtP(reductionPct) : null },
           ].map((s, i) => (
             <div key={i} style={S.kpiBox()}>
@@ -584,7 +646,7 @@ export default function PricingTab({ a, positions, excludedIds, otherExcludedIds
 
         {/* Waterfall explanation */}
         <div style={{ fontSize: 10, color: 'rgba(232,232,240,0.3)', marginTop: 8, textAlign: 'center' }}>
-          TAD (isolated): {fmtD(targetMerchantWeekly)} target {'\u2212'} {fmtD(ffFeeWeekly)} FF margin = {fmtD(tad)} TAD {'\u00b7'} Merchant total: TAD + FF + ISO = {fmtD(merchantPaysWeekly)}/wk
+          TAD (0-pt locked): {fmtD(tad)}/wk to funders {'\u00b7'} FF Factor: {effectiveFFRate.toFixed(3)} ({fmtD(ffFeeWeekly)}/wk) {'\u00b7'} ISO: {fmtD(isoCommWeekly)}/wk ({fmt(commissionTotal)} over {maxTerm}wk) {'\u00b7'} Merchant: {fmtD(merchantPaysWeekly)}/wk
         </div>
       </div>
 
