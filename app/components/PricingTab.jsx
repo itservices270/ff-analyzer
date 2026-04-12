@@ -430,10 +430,11 @@ export default function PricingTab({ a, positions, excludedIds, otherExcludedIds
       }
     });
     if (shortestTerm === Infinity) shortestTerm = 0;
-    const maxTerm = longestTerm || actualTerm;
+    const maxFunderTerm = longestTerm || actualTerm;
+    const agreementTerm = negotiationBuffer + maxFunderTerm + tailWeeks;
 
-    // Corrected weekly splits using longest/shortest funder terms
-    const isoCommWeekly = maxTerm > 0 ? commissionTotal / maxTerm : 0;
+    // Corrected weekly splits: ISO over full agreement term, FF fee over shortest funder term
+    const isoCommWeekly = agreementTerm > 0 ? commissionTotal / agreementTerm : 0;
     const ffFeeWeekly = shortestTerm > 0 ? ffFeeTotal / shortestTerm : 0;
     const tadFinal = merchantWeeklyAtFinal - isoCommWeekly - ffFeeWeekly;
 
@@ -473,15 +474,15 @@ export default function PricingTab({ a, positions, excludedIds, otherExcludedIds
       };
     });
 
-    return { tad: tadFinal, funderTiers, maxTerm, warnings, totalLocked, isoCommWeekly, ffFeeWeekly, tadFinal };
+    return { tad: tadFinal, funderTiers, maxTerm: agreementTerm, maxFunderTerm, warnings, totalLocked, isoCommWeekly, ffFeeWeekly, tadFinal };
   }, [
     JSON.stringify(effectivePositions.map(dp => dp._balance + dp._totalWeekly + dp.funder_name)),
     merchantWeeklyAtFinal, enforcementWeighting, actualTerm, commissionTotal, ffFeeTotal,
     JSON.stringify(scoreMap), JSON.stringify(lockedPositions),
-    JSON.stringify(funderIntelMap), totalBalance,
+    JSON.stringify(funderIntelMap), totalBalance, negotiationBuffer, tailWeeks,
   ]);
 
-  const { tad, funderTiers, maxTerm, warnings, totalLocked, isoCommWeekly, ffFeeWeekly, tadFinal } = pricingResult;
+  const { tad, funderTiers, maxTerm, maxFunderTerm, warnings, totalLocked, isoCommWeekly, ffFeeWeekly, tadFinal } = pricingResult;
 
   // ── Merchant pays (at final tier = full TAD) ──
   const merchantPaysWeekly = merchantWeeklyAtFinal;
@@ -668,7 +669,7 @@ export default function PricingTab({ a, positions, excludedIds, otherExcludedIds
             { label: 'FF Factor Fee/wk', value: fmtD(ffFeeWeekly), color: '#CFA529' },
             { label: 'FF Buffer/wk', value: fmtD(Math.max(0, tad - selectedTAD)), color: selectedTierIdx === 3 ? 'rgba(232,232,240,0.3)' : '#a78bfa', note: selectedTierIdx === 3 ? 'None at Final' : ((1 - selectedPct) * 100).toFixed(0) + '% of TAD' },
             { label: 'Enrollment Fee', value: fmt(enrollmentFee), color: '#00bcd4' },
-            { label: 'Max Term', value: maxTerm < 9999 ? `${maxTerm} wks` : '\u2014', color: '#e8e8f0' },
+            { label: 'Est. Term', value: maxTerm < 9999 ? `${maxTerm} wks` : '\u2014', color: '#e8e8f0', note: `~${Math.round(maxTerm / 4.33)} mo (${negotiationBuffer}+${maxFunderTerm}+${tailWeeks})` },
             { label: 'Payment Reduction', value: fmtP(selectedReduction), color: selectedReduction > 0 ? '#4caf50' : '#ef5350', final: selectedTierIdx !== 3 ? fmtP(reductionPct_display) : null },
           ].map((s, i) => (
             <div key={i} style={S.kpiBox()}>
@@ -706,10 +707,10 @@ export default function PricingTab({ a, positions, excludedIds, otherExcludedIds
       {(() => {
         const frontRev = negotiationBuffer * merchantPaysWeekly;
         const ffFeeTotalRev = ffFeeTotal;
-        const tierBufferRev = Math.max(0, tad - selectedTAD) * maxTerm;
+        const tierBufferRev = Math.max(0, tad - selectedTAD) * maxFunderTerm;
         const tailRev = tailWeeks * merchantPaysWeekly;
         const totalFFRev = frontRev + ffFeeTotalRev + tierBufferRev + tailRev;
-        const agreementTermWks = negotiationBuffer + maxTerm + tailWeeks;
+        const agreementTermWks = maxTerm;
         const agreementYears = agreementTermWks / 52;
         const totalMerchantCost = commissionTotal + ffFeeTotalRev + frontRev + tailRev;
         const aprEquiv = totalBalance > 0 && agreementYears > 0 ? (totalMerchantCost / totalBalance / agreementYears) * 100 : 0;
@@ -722,7 +723,7 @@ export default function PricingTab({ a, positions, excludedIds, otherExcludedIds
               {[
                 { label: 'Front Buffer', value: fmt(frontRev), color: '#00e5ff', note: `${negotiationBuffer} wks \u00d7 ${fmtD(merchantPaysWeekly)}` },
                 { label: 'FF Factor Fee', value: fmt(ffFeeTotalRev), color: '#CFA529', note: `${effectiveFFRate.toFixed(3)} on ${fmt(totalBalance)}` },
-                { label: 'Tier Buffer Held', value: fmt(tierBufferRev), color: '#a78bfa', note: `tier % \u00d7 ${maxTerm}wk` },
+                { label: 'Tier Buffer Held', value: fmt(tierBufferRev), color: '#a78bfa', note: `tier % \u00d7 ${maxFunderTerm}wk` },
                 { label: 'Tail Revenue', value: fmt(tailRev), color: '#f97316', note: `${tailWeeks} wks \u00d7 ${fmtD(merchantPaysWeekly)}` },
               ].map((s, i) => (
                 <div key={i} style={S.kpiBox()}>
