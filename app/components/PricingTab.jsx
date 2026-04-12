@@ -362,11 +362,6 @@ export default function PricingTab({ a, positions, excludedIds, otherExcludedIds
   const totalPayback = totalBalance + ffFeeTotal + commissionTotal;
   const actualTerm = merchantWeeklyAtFinal > 0 ? Math.ceil(totalPayback / merchantWeeklyAtFinal) : 0;
 
-  // ── Weekly breakdown ──
-  const isoCommWeekly = actualTerm > 0 ? commissionTotal / actualTerm : 0;
-  const ffFeeWeekly = actualTerm > 0 ? ffFeeTotal / actualTerm : 0;
-  const tadFinal = merchantWeeklyAtFinal - isoCommWeekly - ffFeeWeekly; // what funders get at final
-
   // ── Enrollment fee (tiered by debt load) ──
   const autoEnrollmentFee = getEnrollmentFee(totalBalance);
   const enrollmentFee = ffFeeOverride ? parseFloat(ffFeeOverride) : autoEnrollmentFee;
@@ -380,11 +375,14 @@ export default function PricingTab({ a, positions, excludedIds, otherExcludedIds
   ];
   const tierColors = ['#00bcd4', '#7c3aed', '#f59e0b', '#22c55e'];
 
-  // ── Pricing with locked position carve-out ──
+  // ── Pricing with locked position carve-out (two-pass TAD calc) ──
   const pricingResult = useMemo(() => {
-    if (effectivePositions.length === 0 || totalBalance <= 0) return { tad: 0, funderTiers: [], maxTerm: 0, warnings: [], totalLocked: 0 };
+    if (effectivePositions.length === 0 || totalBalance <= 0) return { tad: 0, funderTiers: [], maxTerm: 0, warnings: [], totalLocked: 0, isoCommWeekly: 0, ffFeeWeekly: 0, tadFinal: 0 };
 
-    const tad = tadFinal;
+    // Pass 1: estimate TAD using actualTerm to get initial tier allocations
+    const isoCommWeeklyEst = actualTerm > 0 ? commissionTotal / actualTerm : 0;
+    const ffFeeWeeklyEst = actualTerm > 0 ? ffFeeTotal / actualTerm : 0;
+    const tadEst = merchantWeeklyAtFinal - isoCommWeeklyEst - ffFeeWeeklyEst;
 
     // Prepare positions with lock status and effective weekly
     const preparedPositions = effectivePositions.map(dp => {
@@ -408,9 +406,29 @@ export default function PricingTab({ a, positions, excludedIds, otherExcludedIds
 
     const tierPcts = tierDefs.map(td => td.pct);
     const { funderTiers: rawTiers, warnings, totalLocked } = calculateTierAllocations(
-      preparedPositions, tad, tierPcts,
+      preparedPositions, tadEst, tierPcts,
       { enforcementWeighting, scoreMap }
     );
+
+    // Pass 2: derive maxTerm (longest funder term) and shortestTerm from tier allocations
+    let longestTerm = 0;
+    let shortestTerm = Infinity;
+    rawTiers.forEach(ft => {
+      // Funder term = balance / final tier allocation
+      const finalAlloc = ft.tiers?.[ft.tiers.length - 1]?.weeklyPayment || 0;
+      if (finalAlloc > 0) {
+        const funderTerm = Math.ceil(ft._balance / finalAlloc);
+        if (funderTerm > longestTerm) longestTerm = funderTerm;
+        if (funderTerm < shortestTerm) shortestTerm = funderTerm;
+      }
+    });
+    if (shortestTerm === Infinity) shortestTerm = 0;
+    const maxTerm = longestTerm || actualTerm;
+
+    // Corrected weekly splits using longest/shortest funder terms
+    const isoCommWeekly = maxTerm > 0 ? commissionTotal / maxTerm : 0;
+    const ffFeeWeekly = shortestTerm > 0 ? ffFeeTotal / shortestTerm : 0;
+    const tadFinal = merchantWeeklyAtFinal - isoCommWeekly - ffFeeWeekly;
 
     // Attach labels and extra display data
     const funderTiers = rawTiers.map(ft => {
@@ -448,17 +466,15 @@ export default function PricingTab({ a, positions, excludedIds, otherExcludedIds
       };
     });
 
-    const maxTerm = actualTerm; // deal length = total payback / merchant weekly
-
-    return { tad, funderTiers, maxTerm, warnings, totalLocked };
+    return { tad: tadFinal, funderTiers, maxTerm, warnings, totalLocked, isoCommWeekly, ffFeeWeekly, tadFinal };
   }, [
     JSON.stringify(effectivePositions.map(dp => dp._balance + dp._totalWeekly + dp.funder_name)),
-    tadFinal, enforcementWeighting, actualTerm,
+    merchantWeeklyAtFinal, enforcementWeighting, actualTerm, commissionTotal, ffFeeTotal,
     JSON.stringify(scoreMap), JSON.stringify(lockedPositions),
     JSON.stringify(funderIntelMap), totalBalance,
   ]);
 
-  const { tad, funderTiers, maxTerm, warnings, totalLocked } = pricingResult;
+  const { tad, funderTiers, maxTerm, warnings, totalLocked, isoCommWeekly, ffFeeWeekly, tadFinal } = pricingResult;
 
   // ── Merchant pays (at final tier = full TAD) ──
   const merchantPaysWeekly = merchantWeeklyAtFinal;
@@ -468,7 +484,7 @@ export default function PricingTab({ a, positions, excludedIds, otherExcludedIds
   // Selected tier computed values
   const selectedPct = tierDefs[selectedTierIdx]?.pct || 1.0;
   const selectedTAD = tad * selectedPct;
-  const selectedMerchantWeekly = selectedTAD + ffFeeWeekly + isoCommWeekly;
+  const selectedMerchantWeekly = merchantWeeklyAtFinal; // merchant payment fixed across tiers
   const selectedDSR = revenue > 0 ? ((selectedMerchantWeekly * 4.33) / revenue) * 100 : 0;
   const selectedReduction = totalCurrentWeekly > 0
     ? ((totalCurrentWeekly - selectedMerchantWeekly) / totalCurrentWeekly) * 100 : 0;
@@ -539,16 +555,8 @@ export default function PricingTab({ a, positions, excludedIds, otherExcludedIds
             <div style={{ fontSize: 11, color: '#EAD068', fontWeight: 700, textAlign: 'center', marginTop: 4 }}>
               Commission: {(commissionRate * 100).toFixed(2)}% ({fmt(commissionTotal)})
             </div>
-            <div style={{ display: 'flex', justifyContent: 'center', gap: 16, marginTop: 4 }}>
-              {[
-                { range: '1-5', rate: '0.75%', active: isoPoints >= 1 },
-                { range: '6-10', rate: '1.00%', active: isoPoints >= 6 },
-                { range: '11-15', rate: '1.25%', active: isoPoints >= 11 },
-              ].map((t, i) => (
-                <div key={i} style={{ fontSize: 9, color: t.active ? 'rgba(234,208,104,0.7)' : 'rgba(232,232,240,0.2)' }}>
-                  Pts {t.range}: {t.rate}/pt
-                </div>
-              ))}
+            <div style={{ fontSize: 9, color: 'rgba(234,208,104,0.7)', textAlign: 'center', marginTop: 4 }}>
+              Linear: 1% per point (0–15 pts)
             </div>
           </div>
 
@@ -979,15 +987,15 @@ export default function PricingTab({ a, positions, excludedIds, otherExcludedIds
         })}
       </div>
 
-      {/* ═══════════════ GRADUATED COMMISSION REFERENCE TABLE ═══════════════ */}
+      {/* ═══════════════ LINEAR COMMISSION REFERENCE TABLE ═══════════════ */}
       <div style={S.divider} />
-      <div style={S.section}>Graduated Commission Reference</div>
+      <div style={S.section}>Linear Commission Reference</div>
       <div style={{ background: 'rgba(0,0,0,0.25)', borderRadius: 10, padding: 16, marginBottom: 20, overflowX: 'auto' }}>
         <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 12 }}>
           <thead>
             <tr style={{ borderBottom: '1px solid rgba(255,255,255,0.1)' }}>
-              {['Points', 'Tier', 'Rate', `Commission on ${fmt(totalBalance)}`].map(h => (
-                <th key={h} style={{ padding: '6px 10px', textAlign: h === 'Points' || h === 'Tier' ? 'left' : 'right', fontSize: 10, color: 'rgba(232,232,240,0.4)', fontWeight: 600, textTransform: 'uppercase', letterSpacing: 0.5 }}>{h}</th>
+              {['Points', 'Rate (1%/pt)', `Commission on ${fmt(totalBalance)}`].map(h => (
+                <th key={h} style={{ padding: '6px 10px', textAlign: h === 'Points' ? 'left' : 'right', fontSize: 10, color: 'rgba(232,232,240,0.4)', fontWeight: 600, textTransform: 'uppercase', letterSpacing: 0.5 }}>{h}</th>
               ))}
             </tr>
           </thead>
@@ -995,12 +1003,10 @@ export default function PricingTab({ a, positions, excludedIds, otherExcludedIds
             {Array.from({ length: 16 }, (_, pts) => {
               const rate = getGraduatedCommissionRate(pts);
               const isActive = pts === isoPoints;
-              const tier = pts === 0 ? '\u2014' : pts <= 5 ? '1 (0.75%/pt)' : pts <= 10 ? '2 (1.00%/pt)' : '3 (1.25%/pt)';
               return (
                 <tr key={pts} style={{ borderBottom: '1px solid rgba(255,255,255,0.04)', background: isActive ? 'rgba(234,208,104,0.08)' : 'transparent' }}>
                   <td style={{ padding: '5px 10px', color: isActive ? '#EAD068' : '#e8e8f0', fontWeight: isActive ? 700 : 400 }}>{pts}</td>
-                  <td style={{ padding: '5px 10px', color: isActive ? '#EAD068' : 'rgba(232,232,240,0.5)' }}>{tier}</td>
-                  <td style={{ padding: '5px 10px', textAlign: 'right', color: isActive ? '#EAD068' : 'rgba(232,232,240,0.6)', fontWeight: isActive ? 700 : 400 }}>{(rate * 100).toFixed(2)}%</td>
+                  <td style={{ padding: '5px 10px', textAlign: 'right', color: isActive ? '#EAD068' : 'rgba(232,232,240,0.6)', fontWeight: isActive ? 700 : 400 }}>{(rate * 100).toFixed(1)}%</td>
                   <td style={{ padding: '5px 10px', textAlign: 'right', color: isActive ? '#EAD068' : 'rgba(232,232,240,0.5)', fontWeight: isActive ? 700 : 400 }}>{fmt(totalBalance * rate)}</td>
                 </tr>
               );
