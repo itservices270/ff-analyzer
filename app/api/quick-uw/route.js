@@ -133,8 +133,8 @@ ${buildFunderIntelBlock()}
     "cogs_rate": 0.40,
     "revenue_sources": [
       {
-        "description": "string",
-        "category": "card_processing|cash_deposit|ach_credit|vendor_credit|mca_advance|loan_advance|transfer|nsf_return",
+        "name": "string",
+        "type": "card_processing|cash_deposit|ach_credit|vendor_credit|mca_advance|loan_advance|transfer|nsf_return",
         "total": 0,
         "monthly_avg": 0,
         "is_excluded": false,

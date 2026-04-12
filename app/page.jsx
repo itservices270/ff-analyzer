@@ -1369,7 +1369,7 @@ function RiskTab({ a, positions, excludedIds, otherExcludedIds, depositOverrides
   const activeOther = (a.other_debt_service || []).filter((_, i) => !(otherExcludedIds || []).includes(i));
   const totalOtherDebt = activeOther.reduce((s, o) => s + (o.monthly_total || 0), 0);
   const revenue = calcAdjustedRevenue(a, depositOverrides);
-  const nsf = a.nsf_analysis;
+  const nsf = a.nsf_analysis || { nsf_risk_score: 0, nsf_count: 0, nsf_dates: [] };
   const flags = a.flags_and_alerts || [];
   const dsr = positions && positions.length > 0 ? (totalMCAMonthly / revenue) * 100 : (a.calculated_metrics?.dsr_percent || 0);
   const totalDSR = ((totalMCAMonthly + totalOtherDebt) / revenue) * 100;
@@ -1455,7 +1455,7 @@ function RiskTab({ a, positions, excludedIds, otherExcludedIds, depositOverrides
               <span style={{ fontSize: 12, color: 'rgba(232,232,240,0.55)', textTransform: 'capitalize' }}>{k.replace(/_/g, ' ')}</span>
               <span style={{ fontSize: 13 }}>{fmt(v)}</span>
             </div>
-            <div style={S.progressTrack}><div style={S.progressBar((v / (a.expense_categories.total_operating_expenses || 1)) * 100, '#00acc1')} /></div>
+            <div style={S.progressTrack}><div style={S.progressBar((v / ((a.expense_categories || {}).total_operating_expenses || 1)) * 100, '#00acc1')} /></div>
           </div>
         ))}
       </div>
