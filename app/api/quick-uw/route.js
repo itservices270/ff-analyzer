@@ -371,6 +371,56 @@ export async function POST(request) {
       estimated_monthly_total: p.estimated_monthly_total || 0,
     }));
 
+    // ── SERVER-SIDE REVENUE RECALCULATION ──
+    // Don't trust Sonnet's summary math — recalculate from monthly breakdown
+    const mb = analysis.monthly_breakdown || [];
+    if (mb.length > 0) {
+      const totalNetRevenue = mb.reduce((s, m) => s + (m.net_verified_revenue || 0), 0);
+      const totalGross = mb.reduce((s, m) => s + (m.gross_deposits || 0), 0);
+      const totalExcluded = mb.reduce((s, m) => s + (m.total_excluded || 0), 0);
+      const avgRevenue = totalNetRevenue / mb.length;
+
+      // Recalculate exclusion breakdown from flagged_proceeds
+      let excludedMCA = 0, excludedLoan = 0, excludedTransfers = 0, excludedNSF = 0, excludedOther = 0;
+      mb.forEach(m => {
+        (m.flagged_proceeds || []).forEach(fp => {
+          const amt = fp.amount || 0;
+          if (fp.type === 'mca_advance') excludedMCA += amt;
+          else if (fp.type === 'loan') excludedLoan += amt;
+          else if (fp.type === 'transfer') excludedTransfers += amt;
+          else if (fp.type === 'nsf_return') excludedNSF += amt;
+          else excludedOther += amt;
+        });
+      });
+
+      // Override Sonnet's summary with server-calculated values
+      analysis.revenue.gross_deposits = totalGross;
+      analysis.revenue.net_verified_revenue = totalNetRevenue;
+      analysis.revenue.monthly_average_revenue = Math.round(avgRevenue * 100) / 100;
+      analysis.revenue.excluded_mca_proceeds = excludedMCA;
+      analysis.revenue.excluded_loan_proceeds = excludedLoan;
+      analysis.revenue.excluded_transfers = excludedTransfers;
+      analysis.revenue.excluded_nsf_returns = excludedNSF;
+      analysis.revenue.excluded_other = excludedOther;
+
+      // Recalculate metrics with corrected revenue
+      const cogsRate = analysis.revenue.cogs_rate || 0.40;
+      const grossProfit = avgRevenue * (1 - cogsRate);
+      const activeMCA = analysis.mca_positions.filter(p => (p.status || '').toLowerCase() === 'active');
+      const totalMCAMonthly = activeMCA.reduce((s, p) => s + (p.estimated_monthly_total || 0), 0);
+      const totalMCAWeekly = totalMCAMonthly / 4.33;
+      const dsrPercent = grossProfit > 0 ? (totalMCAMonthly / grossProfit) * 100 : 0;
+
+      analysis.calculated_metrics.monthly_revenue = Math.round(avgRevenue * 100) / 100;
+      analysis.calculated_metrics.gross_profit = Math.round(grossProfit * 100) / 100;
+      analysis.calculated_metrics.total_mca_monthly = Math.round(totalMCAMonthly * 100) / 100;
+      analysis.calculated_metrics.total_mca_weekly = Math.round(totalMCAWeekly * 100) / 100;
+      analysis.calculated_metrics.dsr_percent = Math.round(dsrPercent * 100) / 100;
+      analysis.calculated_metrics.active_positions = activeMCA.length;
+      analysis.calculated_metrics.free_cash_monthly = Math.round((grossProfit - totalMCAMonthly) * 100) / 100;
+      analysis.calculated_metrics.avg_daily_balance = analysis.balance_summary.average_daily_balance || analysis.balance_summary.avg_daily_balance || 0;
+    }
+
     return Response.json({
       success: true,
       analysis,
