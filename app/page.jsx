@@ -4858,7 +4858,7 @@ export default function FFAnalyzer() {
   const [error, setError] = useState(null);
   const [result, setResult] = useState(null);
   const [activeTab, setActiveTab] = useState(0);
-  const [model, setModel] = useState('opus');
+  const [model, setModel] = useState('sonnet');
   const [positions, setPositions] = useState([]);
   const [excludedIds, setExcludedIds] = useState([]);
   const [otherExcludedIds, setOtherExcludedIds] = useState([]);
