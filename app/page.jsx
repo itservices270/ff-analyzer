@@ -4189,9 +4189,18 @@ ${signature}`;
 
         {/* Two-column summary */}
         {(() => {
-          const aprColor = aprEquiv <= 24 ? '#4caf50' : aprEquiv <= 30 ? '#f59e0b' : '#ef5350';
-          const aprLabel = aprEquiv <= 19 ? 'Below market' : aprEquiv <= 24 ? 'Competitive' : aprEquiv <= 30 ? 'Above market' : 'High';
           const actualTermWeeks = merchantWeeklyToFF > 0 ? Math.ceil(disclosedPayback / merchantWeeklyToFF) : 0;
+          // Hybrid cost display — APR for terms >= 52 weeks, Total Cost % for shorter terms
+          const useAPR = (agreementTerm || 0) >= 52;
+          const disclosedCostPct = includedDebt > 0 ? ((disclosedCost / includedDebt) * 100) : 0;
+          const costDisplayValue = useAPR ? aprEquiv.toFixed(1) + '%' : disclosedCostPct.toFixed(1) + '%';
+          const costDisplayLabel = useAPR ? 'APR Equivalent' : 'Total Cost';
+          const costDisplayColor = useAPR
+            ? (aprEquiv <= 24 ? '#4caf50' : aprEquiv <= 30 ? '#f59e0b' : '#ef5350')
+            : (disclosedCostPct <= 25 ? '#4caf50' : disclosedCostPct <= 35 ? '#f59e0b' : '#ef5350');
+          const costDisplayNote = useAPR
+            ? (aprEquiv <= 19 ? 'Below market' : aprEquiv <= 24 ? 'Competitive' : aprEquiv <= 30 ? 'Above market' : 'High')
+            : ('vs 30-45% avg MCA cost');
           return (
             <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12, marginBottom: 12 }}>
               <div style={{ background: 'rgba(0,0,0,0.2)', borderRadius: 10, padding: 20, border: '1px solid rgba(76,175,80,0.2)' }}>
@@ -4205,7 +4214,7 @@ ${signature}`;
                     { label: 'Est. Term', value: `~${Math.round(agreementTerm / 4.33)} months`, color: '#e8e8f0' },
                     { label: 'Total Payback', value: fmt(disclosedPayback), color: '#e8e8f0', note: disclosedFactor.toFixed(2) + '\u00d7' },
                     { label: 'Reduction', value: fmtP(reductionDisplay), color: reductionDisplay > 0 ? '#4caf50' : '#ef5350', hero: true },
-                    { label: 'APR Equiv', value: aprEquiv.toFixed(1) + '%', color: aprColor, note: aprLabel },
+                    { label: costDisplayLabel, value: costDisplayValue, color: costDisplayColor, note: costDisplayNote },
                     { label: 'Enrollment', value: fmt(enrollmentFee), color: '#00bcd4' },
                   ].map((s2, i) => (
                     <div key={i} style={{ background: 'rgba(0,0,0,0.15)', borderRadius: 8, padding: '12px 14px', textAlign: 'center' }}>

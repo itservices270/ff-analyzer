@@ -115,56 +115,25 @@ export default function PricingTab({ a, positions, excludedIds, otherExcludedIds
   });
 
   // ── Deduplicate enrolled positions (same-funder consolidation) ──
+  // Each position stays separate — no merging (each has its own balance, term, negotiation leverage)
   const dedupEnrolled = useMemo(() => {
-    const result = [];
-    enrolledActive.forEach(p => {
-      const key = normalizeFunderKey(p.funder_name);
-      let found = false;
-      for (const dp of result) {
-        const dpKey = normalizeFunderKey(dp.funder_name);
-        // Only merge if: exact match, one is substring of other, or 10+ char prefix overlap
-        const isMatch = (
-          (key === dpKey) ||
-          (key.length >= 6 && dpKey.length >= 6 && (key.includes(dpKey) || dpKey.includes(key))) ||
-          (key.length >= 10 && dpKey.length >= 10 && (key.includes(dpKey.slice(0, 10)) || dpKey.includes(key.slice(0, 10))))
-        );
-        if (isMatch) {
-          const advWeekly = toWeeklyEquiv(p.payment_amount_current || p.payment_amount || 0, p.frequency);
-          const advAgMatch = matchAgreementToPosition(p.funder_name, agreementResults);
-          const advBalance = p.estimated_balance
-            || (advAgMatch?.analysis?.financial_terms?.purchased_amount
-              ? Math.round(advAgMatch.analysis.financial_terms.purchased_amount)
-              : Math.round(advWeekly * 52));
-          dp._totalWeekly += advWeekly;
-          dp._balance += advBalance;
-          dp._advCount++;
-          dp._advances.push({ label: p.funder_name, balance: advBalance, weekly: advWeekly });
-          dp._sourcePositions.push(p);
-          found = true;
-          break;
-        }
-      }
-      if (!found) {
-        const agMatch = matchAgreementToPosition(p.funder_name, agreementResults);
-        const weekly = toWeeklyEquiv(p.payment_amount_current || p.payment_amount || 0, p.frequency);
-        // Priority: 1) manual override / cross-ref enriched, 2) agreement purchased_amount, 3) fallback
-        const bal = p.estimated_balance
-          || (agMatch?.analysis?.financial_terms?.purchased_amount
-            ? Math.round(agMatch.analysis.financial_terms.purchased_amount)
-            : Math.round(weekly * 52));
-        result.push({
-          ...p,
-          funder_name: p.funder_name.replace(/\s*\(Advance\s*\d+\)/i, '').replace(/\s*\(Position\s*[A-Z]\)/i, '').trim(),
-          _totalWeekly: weekly,
-          _advCount: 1,
-          _balance: bal,
-          _advances: [{ label: p.funder_name, balance: bal, weekly }],
-          _sourcePositions: [p],
-          _agMatch: agMatch,
-        });
-      }
+    return enrolledActive.map(p => {
+      const agMatch = matchAgreementToPosition(p.funder_name, agreementResults);
+      const weekly = toWeeklyEquiv(p.payment_amount_current || p.payment_amount || 0, p.frequency);
+      const bal = p.estimated_balance
+        || (agMatch?.analysis?.financial_terms?.purchased_amount
+          ? Math.round(agMatch.analysis.financial_terms.purchased_amount)
+          : Math.round(weekly * 52));
+      return {
+        ...p,
+        _totalWeekly: weekly,
+        _advCount: 1,
+        _balance: bal,
+        _advances: [{ label: p.funder_name, balance: bal, weekly }],
+        _sourcePositions: [p],
+        _agMatch: agMatch,
+      };
     });
-    return result;
   }, [JSON.stringify(enrolledActive.map(p => p._id)), JSON.stringify(agreementResults?.map(a => a?.analysis?.funder_name))]);
 
   // ── Revenue & business metrics ──
@@ -667,10 +636,19 @@ export default function PricingTab({ a, positions, excludedIds, otherExcludedIds
         const disclosedFactor = totalBalance > 0 ? (disclosedPayback / totalBalance) : 0;
         const agreementYears = maxTerm / 52;
         const aprEquiv = totalBalance > 0 && agreementYears > 0 ? (disclosedCost / totalBalance / agreementYears) * 100 : 0;
-        const aprColor = aprEquiv <= 24 ? '#4caf50' : aprEquiv <= 30 ? '#f59e0b' : '#ef5350';
-        const aprLabel = aprEquiv <= 19 ? 'Below market' : aprEquiv <= 24 ? 'Competitive' : aprEquiv <= 30 ? 'Above market' : 'High';
         const actualCollections = merchantPaysWeekly * maxTerm;
         const actualTermWeeks = merchantPaysWeekly > 0 ? Math.ceil(disclosedPayback / merchantPaysWeekly) : 0;
+        // Hybrid cost display — APR for terms >= 52 weeks, Total Cost % for shorter terms
+        const useAPR = (maxTerm || 0) >= 52;
+        const disclosedCostPct = totalBalance > 0 ? ((disclosedCost / totalBalance) * 100) : 0;
+        const costDisplayValue = useAPR ? aprEquiv.toFixed(1) + '%' : disclosedCostPct.toFixed(1) + '%';
+        const costDisplayLabel = useAPR ? 'APR Equivalent' : 'Total Cost';
+        const costDisplayColor = useAPR
+          ? (aprEquiv <= 24 ? '#4caf50' : aprEquiv <= 30 ? '#f59e0b' : '#ef5350')
+          : (disclosedCostPct <= 25 ? '#4caf50' : disclosedCostPct <= 35 ? '#f59e0b' : '#ef5350');
+        const costDisplayNote = useAPR
+          ? (aprEquiv <= 19 ? 'Below market' : aprEquiv <= 24 ? 'Competitive' : aprEquiv <= 30 ? 'Above market' : 'High')
+          : ('vs 30-45% avg MCA cost');
         return (
           <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12, marginBottom: 12 }}>
             {/* LEFT — ISO / Merchant Facing */}
@@ -685,7 +663,7 @@ export default function PricingTab({ a, positions, excludedIds, otherExcludedIds
                   { label: 'Est. Term', value: `~${Math.round(maxTerm / 4.33)} months`, color: '#e8e8f0' },
                   { label: 'Total Payback', value: fmt(disclosedPayback), color: '#e8e8f0', note: disclosedFactor.toFixed(2) + '\u00d7 factor' },
                   { label: 'Payment Reduction', value: fmtP(selectedReduction), color: selectedReduction > 0 ? '#4caf50' : '#ef5350', hero: true },
-                  { label: 'APR Equivalent', value: aprEquiv.toFixed(1) + '%', color: aprColor, note: aprLabel },
+                  { label: costDisplayLabel, value: costDisplayValue, color: costDisplayColor, note: costDisplayNote },
                   { label: 'Enrollment Fee', value: fmt(enrollmentFee), color: '#00bcd4' },
                 ].map((s, i) => (
                   <div key={i} style={{ background: 'rgba(0,0,0,0.2)', borderRadius: 8, padding: '12px 14px', textAlign: 'center' }}>
@@ -763,8 +741,16 @@ export default function PricingTab({ a, positions, excludedIds, otherExcludedIds
         const agreementYears = agreementTermWks / 52;
         const totalMerchantCost = commissionTotal + ffFeeTotalRev + frontRev + tailRev;
         const aprEquiv = totalBalance > 0 && agreementYears > 0 ? (totalMerchantCost / totalBalance / agreementYears) * 100 : 0;
-        const aprColor = aprEquiv <= 24 ? '#4caf50' : aprEquiv <= 30 ? '#f59e0b' : '#ef5350';
-        const aprLabel = aprEquiv <= 19 ? 'Below market' : aprEquiv <= 24 ? 'Competitive' : aprEquiv <= 30 ? 'Above market' : 'High';
+        const useAPRRev = (agreementTermWks || 0) >= 52;
+        const totalCostPct = totalBalance > 0 ? ((totalMerchantCost / totalBalance) * 100) : 0;
+        const revCostValue = useAPRRev ? aprEquiv.toFixed(1) + '%' : totalCostPct.toFixed(1) + '%';
+        const revCostLabel = useAPRRev ? 'APR Equivalent' : 'Total Cost';
+        const revCostColor = useAPRRev
+          ? (aprEquiv <= 24 ? '#4caf50' : aprEquiv <= 30 ? '#f59e0b' : '#ef5350')
+          : (totalCostPct <= 25 ? '#4caf50' : totalCostPct <= 35 ? '#f59e0b' : '#ef5350');
+        const revCostNote = useAPRRev
+          ? (aprEquiv <= 19 ? 'Below market' : aprEquiv <= 24 ? 'Competitive' : aprEquiv <= 30 ? 'Above market' : 'High')
+          : ('vs 30-45% avg MCA cost');
         return (
           <div style={{ background: 'rgba(0,0,0,0.25)', borderRadius: 12, padding: 20, marginBottom: 20 }}>
             {/* Row 1: Revenue components */}
@@ -789,10 +775,10 @@ export default function PricingTab({ a, positions, excludedIds, otherExcludedIds
                 <div style={{ fontSize: 22, fontWeight: 800, color: '#4caf50' }}>{fmt(totalFFRev)}</div>
                 <div style={{ fontSize: 9, color: 'rgba(232,232,240,0.3)', marginTop: 2 }}>{fmt(totalFFRev / (agreementTermWks / 4.33))}/mo avg</div>
               </div>
-              <div style={{ background: `linear-gradient(135deg, ${aprColor}22, ${aprColor}0d)`, border: `1px solid ${aprColor}33`, borderRadius: 10, padding: '12px 14px', textAlign: 'center' }}>
-                <div style={{ fontSize: 9, color: 'rgba(232,232,240,0.5)', textTransform: 'uppercase', letterSpacing: 0.5, marginBottom: 4 }}>APR Equivalent</div>
-                <div style={{ fontSize: 22, fontWeight: 800, color: aprColor }}>{aprEquiv.toFixed(1)}%</div>
-                <div style={{ fontSize: 9, color: 'rgba(232,232,240,0.3)', marginTop: 2 }}>{aprLabel} (19-24% benchmark)</div>
+              <div style={{ background: `linear-gradient(135deg, ${revCostColor}22, ${revCostColor}0d)`, border: `1px solid ${revCostColor}33`, borderRadius: 10, padding: '12px 14px', textAlign: 'center' }}>
+                <div style={{ fontSize: 9, color: 'rgba(232,232,240,0.5)', textTransform: 'uppercase', letterSpacing: 0.5, marginBottom: 4 }}>{revCostLabel}</div>
+                <div style={{ fontSize: 22, fontWeight: 800, color: revCostColor }}>{revCostValue}</div>
+                <div style={{ fontSize: 9, color: 'rgba(232,232,240,0.3)', marginTop: 2 }}>{revCostNote}{useAPRRev ? ' (19-24% benchmark)' : ''}</div>
               </div>
               <div style={{ background: 'rgba(0,0,0,0.2)', border: '1px solid rgba(255,255,255,0.08)', borderRadius: 10, padding: '12px 14px', textAlign: 'center' }}>
                 <div style={{ fontSize: 9, color: 'rgba(232,232,240,0.5)', textTransform: 'uppercase', letterSpacing: 0.5, marginBottom: 4 }}>Agreement Term</div>
