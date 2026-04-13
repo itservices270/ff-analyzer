@@ -644,63 +644,105 @@ export default function PricingTab({ a, positions, excludedIds, otherExcludedIds
 
       {/* ═══════════════ PRICING SUMMARY ═══════════════ */}
       <div style={S.section}>Pricing Summary</div>
-      <div style={{ background: 'rgba(0,0,0,0.25)', borderRadius: 12, padding: 20, marginBottom: 20 }}>
-        {/* Current → Proposed arrow */}
-        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 24, marginBottom: 20 }}>
-          <div style={{ textAlign: 'center' }}>
-            <div style={{ fontSize: 9, color: 'rgba(232,232,240,0.4)', textTransform: 'uppercase', letterSpacing: 0.5, marginBottom: 4 }}>Current Weekly Burden</div>
-            <div style={{ fontSize: 24, fontWeight: 800, color: '#ef5350' }}>{fmt(totalCurrentWeekly)}</div>
-            <div style={{ fontSize: 11, color: 'rgba(232,232,240,0.4)' }}>DSR: {fmtP(currentDSR)}</div>
-          </div>
-          <div style={{ fontSize: 28, color: selectedReduction > 0 ? '#4caf50' : '#ef5350' }}>{'\u2192'}</div>
-          <div style={{ textAlign: 'center' }}>
-            <div style={{ fontSize: 9, color: 'rgba(232,232,240,0.4)', textTransform: 'uppercase', letterSpacing: 0.5, marginBottom: 4 }}>Merchant Pays FF (Fixed)</div>
-            <div style={{ fontSize: 24, fontWeight: 800, color: '#22c55e' }}>{fmtD(merchantPaysWeekly)}</div>
-            <div style={{ fontSize: 11, color: 'rgba(232,232,240,0.4)' }}>DSR: {fmtP(proposedDSR)}</div>
-          </div>
+
+      {/* Current → Proposed arrow */}
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 24, marginBottom: 12, background: 'rgba(0,0,0,0.25)', borderRadius: 12, padding: '16px 20px' }}>
+        <div style={{ textAlign: 'center' }}>
+          <div style={{ fontSize: 9, color: 'rgba(232,232,240,0.4)', textTransform: 'uppercase', letterSpacing: 0.5, marginBottom: 4 }}>Current Weekly Burden</div>
+          <div style={{ fontSize: 24, fontWeight: 800, color: '#ef5350' }}>{fmt(totalCurrentWeekly)}</div>
+          <div style={{ fontSize: 11, color: 'rgba(232,232,240,0.4)' }}>DSR: {fmtP(currentDSR)}</div>
         </div>
-
-        {/* Breakdown boxes */}
-        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 8 }}>
-          {[
-            { label: 'Total Debt', value: fmt(totalBalance), color: '#ef5350' },
-            { label: 'Total Payback', value: fmt(merchantPaysWeekly * maxTerm), color: '#e8e8f0', note: fmtD(merchantPaysWeekly) + ' \u00d7 ' + maxTerm + 'wk' },
-            { label: 'TAD to Funders/wk', value: fmtD(selectedTAD), color: tierColors[selectedTierIdx], final: selectedTierIdx !== 3 ? fmtD(tad) : null },
-            { label: 'ISO Commission/wk', value: fmtD(isoCommWeekly), color: '#EAD068' },
-            { label: 'FF Factor Fee/wk', value: fmtD(ffFeeWeekly), color: '#CFA529' },
-            { label: 'FF Buffer/wk', value: fmtD(Math.max(0, tad - selectedTAD)), color: selectedTierIdx === 3 ? 'rgba(232,232,240,0.3)' : '#a78bfa', note: selectedTierIdx === 3 ? 'None at Final' : ((1 - selectedPct) * 100).toFixed(0) + '% of TAD' },
-            { label: 'Enrollment Fee', value: fmt(enrollmentFee), color: '#00bcd4' },
-            { label: 'Est. Term', value: maxTerm < 9999 ? `${maxTerm} wks` : '\u2014', color: '#e8e8f0', note: `~${Math.round(maxTerm / 4.33)} mo (${negotiationBuffer}+${maxFunderTerm}+${tailWeeks})` },
-            { label: 'Payment Reduction', value: fmtP(selectedReduction), color: selectedReduction > 0 ? '#4caf50' : '#ef5350', final: selectedTierIdx !== 3 ? fmtP(reductionPct_display) : null },
-          ].map((s, i) => (
-            <div key={i} style={S.kpiBox()}>
-              <div style={S.kpiLabel}>{s.label}</div>
-              <div style={S.kpiValue(s.color)}>{s.value}</div>
-              {s.final && <div style={{ fontSize: 9, color: 'rgba(232,232,240,0.3)', marginTop: 2 }}>Final: {s.final}</div>}
-              {s.note && <div style={{ fontSize: 9, color: 'rgba(232,232,240,0.3)', marginTop: 2 }}>{s.note}</div>}
-            </div>
-          ))}
-        </div>
-        {tad < 0 && (
-          <div style={{ marginTop: 10, padding: '8px 14px', borderRadius: 8, background: 'rgba(239,83,80,0.12)', border: '1px solid rgba(239,83,80,0.3)', fontSize: 12, color: '#ef5350', textAlign: 'center' }}>
-            {'\uD83D\uDEA8'} Negative TAD: FF Factor fee + ISO commission exceed merchant capacity.
-          </div>
-        )}
-
-        {/* Locked position summary */}
-        {lockedCount > 0 && (
-          <div style={{ marginTop: 10, fontSize: 11, textAlign: 'center', color: 'rgba(232,232,240,0.5)' }}>
-            <span style={{ color: '#EAD068' }}>{'🔒'} Locked: {lockedCount} ({fmtD(totalLocked)}/wk)</span>
-            <span style={{ margin: '0 10px' }}>|</span>
-            <span>Unlocked: {unlockedCount} ({fmtD(remainingTAD)}/wk remaining TAD)</span>
-          </div>
-        )}
-
-        {/* Waterfall explanation */}
-        <div style={{ fontSize: 10, color: 'rgba(232,232,240,0.3)', marginTop: 8, textAlign: 'center' }}>
-          Funders: {fmtD(selectedTAD)} + ISO: {fmtD(isoCommWeekly)} + FF Fee: {fmtD(ffFeeWeekly)} + Buffer: {fmtD(Math.max(0, tad - selectedTAD))} = Merchant: {fmtD(merchantPaysWeekly)}/wk
+        <div style={{ fontSize: 28, color: selectedReduction > 0 ? '#4caf50' : '#ef5350' }}>{'\u2192'}</div>
+        <div style={{ textAlign: 'center' }}>
+          <div style={{ fontSize: 9, color: 'rgba(232,232,240,0.4)', textTransform: 'uppercase', letterSpacing: 0.5, marginBottom: 4 }}>Merchant Pays FF (Fixed)</div>
+          <div style={{ fontSize: 24, fontWeight: 800, color: '#22c55e' }}>{fmtD(merchantPaysWeekly)}</div>
+          <div style={{ fontSize: 11, color: 'rgba(232,232,240,0.4)' }}>DSR: {fmtP(proposedDSR)}</div>
         </div>
       </div>
+
+      {/* Two-column layout */}
+      {(() => {
+        const totalPayback = merchantPaysWeekly * maxTerm;
+        const agreementYears = maxTerm / 52;
+        const totalCostAboveDebt = totalPayback - totalBalance;
+        const aprEquiv = totalBalance > 0 && agreementYears > 0 ? (totalCostAboveDebt / totalBalance / agreementYears) * 100 : 0;
+        const aprColor = aprEquiv <= 24 ? '#4caf50' : aprEquiv <= 30 ? '#f59e0b' : '#ef5350';
+        const aprLabel = aprEquiv <= 19 ? 'Below market' : aprEquiv <= 24 ? 'Competitive' : aprEquiv <= 30 ? 'Above market' : 'High';
+        return (
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12, marginBottom: 12 }}>
+            {/* LEFT — ISO / Merchant Facing */}
+            <div style={{ background: 'rgba(0,0,0,0.25)', borderRadius: 12, padding: 16, border: '1px solid rgba(76,175,80,0.2)' }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 12 }}>
+                <div style={{ width: 8, height: 8, borderRadius: '50%', background: '#4caf50' }} />
+                <div style={{ fontSize: 10, fontWeight: 700, color: '#4caf50', textTransform: 'uppercase', letterSpacing: 0.8 }}>ISO / Merchant Facing</div>
+              </div>
+              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 6 }}>
+                {[
+                  { label: 'Weekly Payment', value: fmtD(merchantPaysWeekly), color: '#4caf50' },
+                  { label: 'Est. Term', value: maxTerm < 9999 ? `${maxTerm} wks` : '\u2014', color: '#e8e8f0', note: `~${Math.round(maxTerm / 4.33)} months` },
+                  { label: 'Total Payback', value: fmt(totalPayback), color: '#e8e8f0', note: fmtD(merchantPaysWeekly) + ' \u00d7 ' + maxTerm + 'wk' },
+                  { label: 'Payment Reduction', value: fmtP(selectedReduction), color: selectedReduction > 0 ? '#4caf50' : '#ef5350' },
+                  { label: 'APR Equivalent', value: aprEquiv.toFixed(1) + '%', color: aprColor, note: aprLabel },
+                  { label: 'Enrollment Fee', value: fmt(enrollmentFee), color: '#00bcd4' },
+                ].map((s, i) => (
+                  <div key={i} style={S.kpiBox()}>
+                    <div style={S.kpiLabel}>{s.label}</div>
+                    <div style={S.kpiValue(s.color)}>{s.value}</div>
+                    {s.note && <div style={{ fontSize: 9, color: 'rgba(232,232,240,0.3)', marginTop: 2 }}>{s.note}</div>}
+                  </div>
+                ))}
+              </div>
+              <div style={{ fontSize: 9, color: 'rgba(232,232,240,0.25)', fontStyle: 'italic', textAlign: 'center', marginTop: 8 }}>
+                This is what the ISO and merchant see on dashboards + offer preview
+              </div>
+            </div>
+
+            {/* RIGHT — FF Internal Only */}
+            <div style={{ background: 'rgba(0,0,0,0.25)', borderRadius: 12, padding: 16, border: '1px solid rgba(207,165,41,0.2)' }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 12 }}>
+                <div style={{ width: 8, height: 8, borderRadius: '50%', background: '#CFA529' }} />
+                <div style={{ fontSize: 10, fontWeight: 700, color: '#CFA529', textTransform: 'uppercase', letterSpacing: 0.8 }}>FF Internal Only</div>
+              </div>
+              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 6 }}>
+                {[
+                  { label: 'Total Debt', value: fmt(totalBalance), color: '#ef5350' },
+                  { label: 'TAD to Funders/wk', value: fmtD(selectedTAD), color: tierColors[selectedTierIdx], final: selectedTierIdx !== 3 ? fmtD(tad) : null },
+                  { label: 'ISO Commission/wk', value: fmtD(isoCommWeekly), color: '#EAD068', note: fmt(commissionTotal) + ' total' },
+                  { label: 'FF Factor Fee/wk', value: fmtD(ffFeeWeekly), color: '#CFA529', note: fmt(ffFeeTotal) + ' total' },
+                  { label: 'FF Buffer/wk', value: fmtD(Math.max(0, tad - selectedTAD)), color: selectedTierIdx === 3 ? 'rgba(232,232,240,0.3)' : '#a78bfa', note: selectedTierIdx === 3 ? 'None at Final' : ((1 - selectedPct) * 100).toFixed(0) + '% of TAD' },
+                  { label: 'Agreement Term', value: maxTerm < 9999 ? `${maxTerm} wks` : '\u2014', color: '#e8e8f0', note: `${negotiationBuffer}+${maxFunderTerm}+${tailWeeks}` },
+                ].map((s, i) => (
+                  <div key={i} style={S.kpiBox()}>
+                    <div style={S.kpiLabel}>{s.label}</div>
+                    <div style={S.kpiValue(s.color)}>{s.value}</div>
+                    {s.final && <div style={{ fontSize: 9, color: 'rgba(232,232,240,0.3)', marginTop: 2 }}>Final: {s.final}</div>}
+                    {s.note && <div style={{ fontSize: 9, color: 'rgba(232,232,240,0.3)', marginTop: 2 }}>{s.note}</div>}
+                  </div>
+                ))}
+              </div>
+              <div style={{ fontSize: 10, color: 'rgba(232,232,240,0.3)', textAlign: 'center', marginTop: 8 }}>
+                Funders: {fmtD(selectedTAD)} + ISO: {fmtD(isoCommWeekly)} + FF: {fmtD(ffFeeWeekly)} + Buffer: {fmtD(Math.max(0, tad - selectedTAD))} = {fmtD(merchantPaysWeekly)}/wk
+              </div>
+            </div>
+          </div>
+        );
+      })()}
+
+      {/* Negative TAD warning */}
+      {tad < 0 && (
+        <div style={{ marginBottom: 10, padding: '8px 14px', borderRadius: 8, background: 'rgba(239,83,80,0.12)', border: '1px solid rgba(239,83,80,0.3)', fontSize: 12, color: '#ef5350', textAlign: 'center' }}>
+          {'\uD83D\uDEA8'} Negative TAD: FF Factor fee + ISO commission exceed merchant capacity.
+        </div>
+      )}
+
+      {/* Locked position summary */}
+      {lockedCount > 0 && (
+        <div style={{ marginBottom: 12, fontSize: 11, textAlign: 'center', color: 'rgba(232,232,240,0.5)' }}>
+          <span style={{ color: '#EAD068' }}>{'🔒'} Locked: {lockedCount} ({fmtD(totalLocked)}/wk)</span>
+          <span style={{ margin: '0 10px' }}>|</span>
+          <span>Unlocked: {unlockedCount} ({fmtD(remainingTAD)}/wk remaining TAD)</span>
+        </div>
+      )}
 
       {/* ═══════════════ FF REVENUE ANALYSIS ═══════════════ */}
       <div style={S.divider} />
