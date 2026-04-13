@@ -433,9 +433,9 @@ export default function PricingTab({ a, positions, excludedIds, otherExcludedIds
     const maxFunderTerm = longestTerm || actualTerm;
     const agreementTerm = negotiationBuffer + maxFunderTerm + tailWeeks;
 
-    // Corrected weekly splits: ISO over full agreement term, FF fee over shortest funder term
+    // Weekly splits: both ISO and FF fee spread evenly over full agreement term
     const isoCommWeekly = agreementTerm > 0 ? commissionTotal / agreementTerm : 0;
-    const ffFeeWeekly = shortestTerm > 0 ? ffFeeTotal / shortestTerm : 0;
+    const ffFeeWeekly = agreementTerm > 0 ? ffFeeTotal / agreementTerm : 0;
     const tadFinal = merchantWeeklyAtFinal - isoCommWeekly - ffFeeWeekly;
 
     // Attach labels and extra display data
