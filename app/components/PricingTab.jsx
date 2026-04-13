@@ -662,12 +662,14 @@ export default function PricingTab({ a, positions, excludedIds, otherExcludedIds
 
       {/* Two-column layout */}
       {(() => {
-        const totalPayback = merchantPaysWeekly * maxTerm;
+        const disclosedPayback = totalBalance + ffFeeTotal + commissionTotal;
+        const disclosedCost = ffFeeTotal + commissionTotal;
+        const disclosedFactor = totalBalance > 0 ? (disclosedPayback / totalBalance) : 0;
         const agreementYears = maxTerm / 52;
-        const totalCostAboveDebt = totalPayback - totalBalance;
-        const aprEquiv = totalBalance > 0 && agreementYears > 0 ? (totalCostAboveDebt / totalBalance / agreementYears) * 100 : 0;
+        const aprEquiv = totalBalance > 0 && agreementYears > 0 ? (disclosedCost / totalBalance / agreementYears) * 100 : 0;
         const aprColor = aprEquiv <= 24 ? '#4caf50' : aprEquiv <= 30 ? '#f59e0b' : '#ef5350';
         const aprLabel = aprEquiv <= 19 ? 'Below market' : aprEquiv <= 24 ? 'Competitive' : aprEquiv <= 30 ? 'Above market' : 'High';
+        const actualCollections = merchantPaysWeekly * maxTerm;
         return (
           <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12, marginBottom: 12 }}>
             {/* LEFT — ISO / Merchant Facing */}
@@ -679,8 +681,8 @@ export default function PricingTab({ a, positions, excludedIds, otherExcludedIds
               <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 6 }}>
                 {[
                   { label: 'Weekly Payment', value: fmtD(merchantPaysWeekly), color: '#4caf50' },
-                  { label: 'Est. Term', value: maxTerm < 9999 ? `${maxTerm} wks` : '\u2014', color: '#e8e8f0', note: `~${Math.round(maxTerm / 4.33)} months` },
-                  { label: 'Total Payback', value: fmt(totalPayback), color: '#e8e8f0', note: fmtD(merchantPaysWeekly) + ' \u00d7 ' + maxTerm + 'wk' },
+                  { label: 'Est. Term', value: `~${Math.round(maxTerm / 4.33)} months`, color: '#e8e8f0' },
+                  { label: 'Total Payback', value: fmt(disclosedPayback), color: '#e8e8f0', note: disclosedFactor.toFixed(2) + '\u00d7 factor' },
                   { label: 'Payment Reduction', value: fmtP(selectedReduction), color: selectedReduction > 0 ? '#4caf50' : '#ef5350' },
                   { label: 'APR Equivalent', value: aprEquiv.toFixed(1) + '%', color: aprColor, note: aprLabel },
                   { label: 'Enrollment Fee', value: fmt(enrollmentFee), color: '#00bcd4' },
@@ -703,14 +705,16 @@ export default function PricingTab({ a, positions, excludedIds, otherExcludedIds
                 <div style={{ width: 8, height: 8, borderRadius: '50%', background: '#CFA529' }} />
                 <div style={{ fontSize: 10, fontWeight: 700, color: '#CFA529', textTransform: 'uppercase', letterSpacing: 0.8 }}>FF Internal Only</div>
               </div>
-              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 6 }}>
+              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 6 }}>
                 {[
                   { label: 'Total Debt', value: fmt(totalBalance), color: '#ef5350' },
+                  { label: 'Disclosed Payback', value: fmt(disclosedPayback), color: '#e8e8f0', note: disclosedFactor.toFixed(2) + '\u00d7' },
+                  { label: 'Actual Collections', value: fmt(actualCollections), color: '#4caf50', note: fmtD(merchantPaysWeekly) + ' \u00d7 ' + maxTerm + 'wk' },
+                  { label: 'Agreement Term', value: maxTerm < 9999 ? `${maxTerm} wks` : '\u2014', color: '#e8e8f0', note: `${negotiationBuffer}+${maxFunderTerm}+${tailWeeks}` },
                   { label: 'TAD to Funders/wk', value: fmtD(selectedTAD), color: tierColors[selectedTierIdx], final: selectedTierIdx !== 3 ? fmtD(tad) : null },
                   { label: 'ISO Commission/wk', value: fmtD(isoCommWeekly), color: '#EAD068', note: fmt(commissionTotal) + ' total' },
                   { label: 'FF Factor Fee/wk', value: fmtD(ffFeeWeekly), color: '#CFA529', note: fmt(ffFeeTotal) + ' total' },
                   { label: 'FF Buffer/wk', value: fmtD(Math.max(0, tad - selectedTAD)), color: selectedTierIdx === 3 ? 'rgba(232,232,240,0.3)' : '#a78bfa', note: selectedTierIdx === 3 ? 'None at Final' : ((1 - selectedPct) * 100).toFixed(0) + '% of TAD' },
-                  { label: 'Agreement Term', value: maxTerm < 9999 ? `${maxTerm} wks` : '\u2014', color: '#e8e8f0', note: `${negotiationBuffer}+${maxFunderTerm}+${tailWeeks}` },
                 ].map((s, i) => (
                   <div key={i} style={S.kpiBox()}>
                     <div style={S.kpiLabel}>{s.label}</div>
