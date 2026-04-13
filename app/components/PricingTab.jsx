@@ -96,7 +96,7 @@ const S = {
 // ═════════════════════════════════════════════════════════════════════════════
 // PricingTab
 // ═════════════════════════════════════════════════════════════════════════════
-export default function PricingTab({ a, positions, excludedIds, otherExcludedIds, depositOverrides, agreementResults, enrolledPositions }) {
+export default function PricingTab({ a, positions, excludedIds, otherExcludedIds, depositOverrides, agreementResults, enrolledPositions, fileName }) {
   // ── Safety guard ──
   if (!a) return <div style={{ padding: 40, textAlign: 'center', color: 'rgba(232,232,240,0.4)' }}>No analysis data available.</div>;
 
@@ -143,7 +143,6 @@ export default function PricingTab({ a, positions, excludedIds, otherExcludedIds
   const grossProfit = revenue - cogs;
   const adb = a.balance_summary?.avg_daily_balance || a.calculated_metrics?.avg_daily_balance || 0;
   const biz = a.business_name || 'Business';
-
   // ── Deal Controls state ──
   const [isoPoints, setIsoPoints] = useState(11);
   const [ffFactorOverride, setFfFactorOverride] = useState(''); // blank = auto from term tiers
@@ -152,6 +151,10 @@ export default function PricingTab({ a, positions, excludedIds, otherExcludedIds
   const [selectedTierIdx, setSelectedTierIdx] = useState(0); // 0=Opening, 1=Mid1, 2=Mid2, 3=Final
   const [negotiationBuffer, setNegotiationBuffer] = useState(4);
   const [tailWeeks, setTailWeeks] = useState(4);
+  const [negFunderId, setNegFunderId] = useState(null);
+  const [copiedEmail, setCopiedEmail] = useState(null);
+  const [copiedOffer, setCopiedOffer] = useState(false);
+  const [showNegEmails, setShowNegEmails] = useState(false);
 
   // ── FF Factor term-based tiers ──
   const FF_FACTOR_TIERS = [
@@ -230,6 +233,14 @@ export default function PricingTab({ a, positions, excludedIds, otherExcludedIds
   const totalBalance = effectivePositions.reduce((s, dp) => s + dp._balance, 0);
   const totalCurrentWeekly = effectivePositions.reduce((s, dp) => s + dp._totalWeekly, 0);
   const currentDSR = revenue > 0 ? ((totalCurrentWeekly * 4.33) / revenue) * 100 : 0;
+
+  // ── Email generator variables ──
+  const opex = a.expense_categories?.total_operating_expenses || 0;
+  const includedMonthly = totalCurrentWeekly * 4.33;
+  const monthlyDeficit = revenue - cogs - opex - includedMonthly;
+  const adbDays = includedMonthly > 0 ? Math.round(adb / (includedMonthly / 30)) : 0;
+  const daysToDefault = monthlyDeficit < 0 ? Math.round(Math.abs(adb / (monthlyDeficit / 30))) : 999;
+  const withholdPct = revenue > 0 ? ((includedMonthly / revenue) * 100).toFixed(1) : '0';
 
   const toggleLock = useCallback((funderName) => {
     const key = normalizeFunderKey(funderName);
@@ -471,6 +482,347 @@ export default function PricingTab({ a, positions, excludedIds, otherExcludedIds
   const lockedCount = funderTiers.filter(ft => ft.isLocked).length;
   const unlockedCount = funderTiers.filter(ft => !ft.isLocked).length;
   const remainingTAD = Math.max(0, tad - totalLocked);
+
+  // ═══════════════════════════════════════════════════════════════
+  // EXPORT FUNCTIONS (merged from ExportTab)
+  // ═══════════════════════════════════════════════════════════════
+
+  function confidentialityCheck(text) {
+    const lower = (text || '').toLowerCase();
+    const forbidden = ['iso commission', 'iso points', 'iso fee', 'ff fee', 'ff revenue', 'funders first fee', 'iso_points', 'ff_fee', 'iso_comm'];
+    for (const term of forbidden) {
+      if (lower.includes(term)) {
+        console.error('CONFIDENTIALITY BLOCK: ISO/FF data detected in funder output');
+        return false;
+      }
+    }
+    return true;
+  }
+
+  const generateBriefHTML = (selectedIdx, tierIdx = 0) => {
+    const ft = funderTiers[selectedIdx];
+    if (!ft) return '';
+    const tier = ft.tiers[tierIdx] || ft.tiers[0];
+    const bank = a.bank_name || 'Bank';
+    const periods = (a.statement_periods || a.monthly_breakdown || []);
+    const monthRange = periods.length > 1
+      ? `${periods[0]?.month || ''} – ${periods[periods.length-1]?.month || ''}`
+      : (a.statement_month || '');
+    const proposedWeekly = tier.weeklyPayment;
+    const termWeeks = tier.proposedTermWeeks;
+    const termMonths = Math.round(termWeeks / 4.33);
+    const proposedBiWeekly = proposedWeekly * 2;
+    const defaultRecovery = Math.round(ft.balance * 0.35);
+    const defaultNet = Math.round(defaultRecovery * 0.7);
+    const rev = revenue;
+    const totalMCAMo = includedMonthly;
+    const f$ = (n) => '$' + Math.round(n).toLocaleString('en-US');
+    const fK = (n) => Math.abs(n) >= 1000 ? '$' + Math.round(Math.abs(n) / 1000) + 'K' : f$(Math.abs(n));
+    const totalIncWeekly = effectivePositions.reduce((s, dp) => s + dp._totalWeekly, 0);
+    const totalIncBalance = effectivePositions.reduce((s, dp) => s + dp._balance, 0);
+    const stackRows = effectivePositions.map((dp) => {
+      const isTarget = dp.funder_name === ft.name;
+      return `<tr${isTarget ? ' class="highlight-row"' : ''}>
+        <td><span class="funder-name">${dp.funder_name}</span>${isTarget ? ' <span class="position-tag tag-you">You</span>' : ''}</td>
+        <td>${f$(dp._totalWeekly)}</td>
+        <td>${f$(dp._balance)}</td>
+      </tr>`;
+    }).join('\n');
+    return `<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Funders First | Position Analysis Brief — ${ft.name}</title>
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+<link href="https://fonts.googleapis.com/css2?family=Questrial&family=Outfit:wght@300;400;500;600;700;800;900&display=swap" rel="stylesheet">
+<style>
+:root{--ff-gold:#CFA529;--ff-gold-light:#EAD068;--ff-teal:#00acc1;--ff-teal-dark:#00838f;--ff-teal-light:#4dd0e1;--ff-green:#2e7d32;--ff-red:#c62828;--ff-orange:#e65100;--ff-text:#1a1a1a;--ff-text-light:#333;--ff-text-muted:#555;--glass-bg:rgba(255,255,255,0.72);--glass-bg-strong:rgba(255,255,255,0.88);--glass-border:rgba(255,255,255,0.6);--glass-shadow:rgba(0,0,0,0.06)}
+*{margin:0;padding:0;box-sizing:border-box}@page{size:8.5in 11in;margin:0}
+body{font-family:'Outfit',sans-serif;background:#e8e8e8;color:var(--ff-text);line-height:1.5;-webkit-font-smoothing:antialiased}
+.page{width:8.5in;min-height:11in;margin:0 auto 0.25in;position:relative;overflow:hidden;page-break-after:always;box-shadow:0 4px 20px rgba(0,0,0,0.15);background:#f5f5f0}
+.page::before{content:'';position:absolute;inset:0;background-image:url('https://fundersfirst.com/wp-content/uploads/2026/01/Funders-First-BG.png');background-size:cover;background-position:center;opacity:0.4;pointer-events:none}
+.content{position:relative;z-index:1;padding:0.38in 0.45in;min-height:11in;display:flex;flex-direction:column}
+.doc-header{display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:0.22in;padding-bottom:0.18in;border-bottom:2px solid var(--ff-teal)}
+.doc-header-left img{height:32px;margin-bottom:6px}.doc-type{font-size:0.55rem;font-weight:700;text-transform:uppercase;letter-spacing:2.5px;color:var(--ff-teal-dark)}
+.doc-header-right{text-align:right}.doc-title{font-size:1.1rem;font-weight:800;color:var(--ff-text);line-height:1.2}
+.doc-subtitle{font-size:0.62rem;color:var(--ff-text-muted);margin-top:3px}
+.confidential-badge{display:inline-flex;align-items:center;gap:5px;padding:4px 10px;background:rgba(0,172,193,0.1);border:1px solid rgba(0,172,193,0.3);border-radius:20px;font-size:0.5rem;font-weight:700;color:var(--ff-teal-dark);text-transform:uppercase;letter-spacing:1px;margin-top:6px}
+.merchant-strip{background:linear-gradient(135deg,var(--ff-teal-dark),var(--ff-teal));border-radius:10px;padding:12px 18px;display:flex;justify-content:space-between;align-items:center;margin-bottom:0.18in}
+.merchant-strip-left .merchant-name{font-size:0.95rem;font-weight:800;color:#fff}.merchant-strip-left .merchant-meta{font-size:0.55rem;color:rgba(255,255,255,0.7);margin-top:2px}
+.merchant-strip-right{display:flex;gap:20px}.strip-stat{text-align:center}.strip-stat-value{font-size:1rem;font-weight:800;color:#fff;line-height:1}.strip-stat-label{font-size:0.48rem;color:rgba(255,255,255,0.65);text-transform:uppercase;letter-spacing:0.5px;margin-top:2px}
+.glass-card{background:var(--glass-bg-strong);border:1px solid var(--glass-border);border-radius:12px;padding:16px 18px;box-shadow:0 4px 16px var(--glass-shadow);margin-bottom:0.14in}
+.card-eyebrow{font-size:0.5rem;font-weight:700;text-transform:uppercase;letter-spacing:2px;color:var(--ff-teal-dark);margin-bottom:8px;display:flex;align-items:center;gap:6px}.card-eyebrow i{font-size:0.55rem}
+.stats-row{display:grid;grid-template-columns:repeat(4,1fr);gap:0.12in;margin-bottom:0.14in}
+.stat-box{background:var(--glass-bg-strong);border:1px solid var(--glass-border);border-radius:10px;padding:12px 10px;text-align:center;box-shadow:0 2px 8px var(--glass-shadow)}
+.stat-box-value{font-size:1.25rem;font-weight:800;line-height:1;margin-bottom:4px}.stat-box-value.teal{color:var(--ff-teal-dark)}.stat-box-value.red{color:var(--ff-red)}.stat-box-value.gold{color:var(--ff-gold)}.stat-box-value.orange{color:var(--ff-orange)}
+.stat-box-label{font-size:0.5rem;color:var(--ff-text-muted);text-transform:uppercase;letter-spacing:0.5px;line-height:1.3}
+.math-table{width:100%;border-collapse:collapse}.math-table tr{border-bottom:1px solid rgba(0,0,0,0.06)}.math-table tr:last-child{border-bottom:none}.math-table td{padding:7px 8px;font-size:0.66rem;color:var(--ff-text-light)}.math-table td:last-child{text-align:right;font-weight:600;color:var(--ff-text)}.math-table .total-row td{padding-top:10px;font-weight:700;color:var(--ff-text);font-size:0.72rem;border-top:2px solid rgba(0,0,0,0.1)}.math-table .deficit-row td{color:var(--ff-red);font-weight:700;font-size:0.72rem}.math-table .label-col{color:var(--ff-text-muted);font-weight:400}
+.stack-table{width:100%;border-collapse:collapse}.stack-table th{font-size:0.5rem;font-weight:700;text-transform:uppercase;letter-spacing:1px;color:var(--ff-text-muted);padding:6px 8px;text-align:left;border-bottom:2px solid rgba(0,0,0,0.08)}.stack-table th:not(:first-child){text-align:right}.stack-table td{padding:8px 8px;font-size:0.63rem;color:var(--ff-text-light);border-bottom:1px solid rgba(0,0,0,0.05)}.stack-table td:not(:first-child){text-align:right}.stack-table tr.highlight-row td{background:rgba(0,172,193,0.06);font-weight:700;color:var(--ff-teal-dark)}.stack-table .total-row td{font-weight:700;color:var(--ff-text);border-top:2px solid rgba(0,0,0,0.1);border-bottom:none;font-size:0.66rem}
+.funder-name{font-weight:600;color:var(--ff-text)}.position-tag{display:inline-block;padding:2px 6px;border-radius:4px;font-size:0.45rem;font-weight:700;text-transform:uppercase;letter-spacing:0.5px;margin-left:4px;vertical-align:middle}.tag-you{background:rgba(0,172,193,0.15);color:var(--ff-teal-dark)}
+.flags-grid{display:grid;grid-template-columns:1fr 1fr;gap:8px}.flag-item{display:flex;align-items:flex-start;gap:10px;padding:10px 12px;border-radius:8px;background:rgba(255,255,255,0.7);border:1px solid rgba(0,0,0,0.06)}.flag-icon{width:28px;height:28px;border-radius:7px;display:flex;align-items:center;justify-content:center;font-size:0.7rem;flex-shrink:0}.flag-icon.green{background:rgba(46,125,50,0.12);color:var(--ff-green)}.flag-icon.orange{background:rgba(230,81,0,0.12);color:var(--ff-orange)}.flag-icon.teal{background:rgba(0,172,193,0.12);color:var(--ff-teal-dark)}.flag-icon.gold{background:rgba(207,165,41,0.15);color:var(--ff-gold)}.flag-content h4{font-size:0.6rem;font-weight:700;color:var(--ff-text);margin-bottom:2px}.flag-content p{font-size:0.55rem;color:var(--ff-text-muted);line-height:1.4}
+.comparison-table{width:100%;border-collapse:collapse}.comparison-table th{padding:10px 14px;font-size:0.58rem;font-weight:700;text-align:center;text-transform:uppercase;letter-spacing:1px}.comparison-table th.accept-col{background:linear-gradient(135deg,var(--ff-teal-dark),var(--ff-teal));color:#fff;border-radius:8px 8px 0 0}.comparison-table th.decline-col{background:rgba(198,40,40,0.08);color:var(--ff-red);border-radius:8px 8px 0 0}.comparison-table td{padding:9px 14px;font-size:0.63rem;text-align:center;border-bottom:1px solid rgba(0,0,0,0.05)}.comparison-table td.row-label{text-align:left;font-weight:600;color:var(--ff-text-muted);font-size:0.58rem;text-transform:uppercase;letter-spacing:0.5px;background:rgba(255,255,255,0.5)}.comparison-table td.accept-val{background:rgba(0,172,193,0.05);font-weight:700;color:var(--ff-teal-dark)}.comparison-table td.decline-val{background:rgba(198,40,40,0.03);color:var(--ff-red);font-weight:600}.comparison-table .net-row td{font-weight:800;font-size:0.72rem;padding-top:12px;padding-bottom:12px;border-top:2px solid rgba(0,0,0,0.1)}.comparison-table .net-row td.accept-val{color:var(--ff-green);font-size:0.85rem}.comparison-table .net-row td.decline-val{color:var(--ff-red)}
+.proposal-box{background:linear-gradient(135deg,#f0fafa,#e8f7f9);border:2px solid var(--ff-teal);border-radius:12px;padding:16px 20px;margin-bottom:0.14in}.proposal-box-header{font-size:0.58rem;font-weight:700;text-transform:uppercase;letter-spacing:2px;color:var(--ff-teal-dark);margin-bottom:12px;display:flex;align-items:center;gap:8px}.proposal-terms{display:grid;grid-template-columns:repeat(4,1fr);gap:12px}.proposal-term{text-align:center}.proposal-term-value{font-size:1.05rem;font-weight:800;color:var(--ff-teal-dark);line-height:1;margin-bottom:3px}.proposal-term-label{font-size:0.5rem;color:var(--ff-text-muted);text-transform:uppercase;letter-spacing:0.5px}
+.notice-box{background:rgba(207,165,41,0.08);border-left:4px solid var(--ff-gold);border-radius:0 8px 8px 0;padding:10px 14px;margin-bottom:0.12in}.notice-box p{font-size:0.6rem;color:var(--ff-text-light);line-height:1.5}.notice-box strong{color:var(--ff-text)}
+.section-divider{display:flex;align-items:center;gap:10px;margin-bottom:0.12in}.section-divider-label{font-size:0.52rem;font-weight:700;text-transform:uppercase;letter-spacing:2px;color:var(--ff-teal-dark);white-space:nowrap}.section-divider-line{flex:1;height:1px;background:linear-gradient(to right,rgba(0,172,193,0.4),transparent)}
+.page-footer{margin-top:auto;padding-top:0.12in;border-top:1px solid rgba(0,0,0,0.07);display:flex;justify-content:space-between;align-items:center}.footer-contact{display:flex;gap:18px}.footer-contact-item{font-size:0.52rem;color:var(--ff-text-muted);display:flex;align-items:center;gap:5px}.footer-contact-item i{color:var(--ff-teal);font-size:0.48rem}.footer-right{font-size:0.48rem;color:var(--ff-text-muted);text-align:right;line-height:1.5}
+.rbfc-badge{display:inline-flex;align-items:center;gap:4px;padding:3px 8px;background:rgba(0,172,193,0.08);border:1px solid rgba(0,172,193,0.2);border-radius:12px;font-size:0.45rem;color:var(--ff-teal-dark);font-weight:600;text-transform:uppercase;letter-spacing:0.5px}
+.two-col{display:grid;grid-template-columns:1fr 1fr;gap:0.14in;margin-bottom:0.14in}.two-col .glass-card{margin-bottom:0}
+@media print{body{background:none}.page{margin:0;box-shadow:none;page-break-after:always}}
+</style>
+</head>
+<body>
+<!-- PAGE 1 -->
+<div class="page"><div class="content">
+<div class="doc-header">
+  <div class="doc-header-left">
+    <img src="https://fundersfirst.com/wp-content/uploads/2026/01/Funders-First-Inc.png" alt="Funders First">
+    <div class="doc-type"><i class="fas fa-file-alt"></i> &nbsp;Funder Position Analysis Brief</div>
+  </div>
+  <div class="doc-header-right">
+    <div class="doc-title">${biz}</div>
+    <div class="doc-subtitle">${bank} &middot; ${monthRange} &middot; Bank-Verified Analysis</div>
+    <div class="confidential-badge"><i class="fas fa-lock"></i> Confidential &middot; Prepared by Funders First Inc.</div>
+  </div>
+</div>
+<div class="merchant-strip">
+  <div class="merchant-strip-left">
+    <div class="merchant-name">${biz}</div>
+    <div class="merchant-meta">Analysis Date: ${new Date().toLocaleDateString('en-US', { month: 'long', year: 'numeric' })}</div>
+  </div>
+  <div class="merchant-strip-right">
+    <div class="strip-stat"><div class="strip-stat-value">${fK(rev)}</div><div class="strip-stat-label">Monthly Revenue</div></div>
+    <div class="strip-stat"><div class="strip-stat-value">${withholdPct}%</div><div class="strip-stat-label">MCA Withhold</div></div>
+    <div class="strip-stat"><div class="strip-stat-value">${adbDays} days</div><div class="strip-stat-label">ADB Coverage</div></div>
+    <div class="strip-stat"><div class="strip-stat-value">${daysToDefault < 999 ? daysToDefault + ' days' : 'N/A'}</div><div class="strip-stat-label">Est. To Default</div></div>
+  </div>
+</div>
+<div class="stats-row">
+  <div class="stat-box"><div class="stat-box-value teal">${f$(rev)}</div><div class="stat-box-label">True Monthly Revenue<br>(Bank-Verified)</div></div>
+  <div class="stat-box"><div class="stat-box-value red">${f$(totalMCAMo)}</div><div class="stat-box-label">Monthly MCA<br>Debt Service</div></div>
+  <div class="stat-box"><div class="stat-box-value orange">${f$(opex)}</div><div class="stat-box-label">Verified Monthly<br>Operating Expenses</div></div>
+  <div class="stat-box"><div class="stat-box-value red">${monthlyDeficit < 0 ? '(' + f$(Math.abs(monthlyDeficit)) + ')' : f$(monthlyDeficit)}</div><div class="stat-box-label">Monthly Cash<br>${monthlyDeficit < 0 ? 'Deficit' : 'Surplus'}</div></div>
+</div>
+<div class="section-divider"><div class="section-divider-label"><i class="fas fa-calculator"></i> &nbsp;Bank-Verified Cash Flow Reality</div><div class="section-divider-line"></div></div>
+<div class="two-col">
+  <div class="glass-card">
+    <div class="card-eyebrow"><i class="fas fa-chart-bar"></i> Monthly Revenue Breakdown</div>
+    <table class="math-table">
+      <tr><td class="label-col">Gross Monthly Revenue</td><td>${f$(rev)}</td></tr>
+      ${cogs > 0 ? `<tr><td class="label-col">Less: COGS / Inventory</td><td style="color:var(--ff-red)">(${f$(cogs)})</td></tr>` : ''}
+      <tr class="total-row"><td>Gross Profit</td><td>${f$(grossProfit)}</td></tr>
+      <tr><td class="label-col">Less: Verified Operating Expenses</td><td style="color:var(--ff-red)">(${f$(opex)})</td></tr>
+      <tr><td class="label-col">Less: Total MCA Debt Service</td><td style="color:var(--ff-red)">(${f$(totalMCAMo)})</td></tr>
+      <tr class="deficit-row"><td>Net Monthly Position</td><td>${monthlyDeficit < 0 ? '(' + f$(Math.abs(monthlyDeficit)) + ')' : f$(monthlyDeficit)}</td></tr>
+    </table>
+  </div>
+  <div class="glass-card">
+    <div class="card-eyebrow"><i class="fas fa-layer-group"></i> Full MCA Stack &mdash; All ${effectivePositions.length} Positions</div>
+    <table class="stack-table">
+      <thead><tr><th>Funder</th><th>Weekly Pmt</th><th>Est. Balance</th></tr></thead>
+      <tbody>
+        ${stackRows}
+        <tr class="total-row"><td>Total Stack</td><td>${f$(totalIncWeekly)}/wk</td><td>${f$(totalIncBalance)}</td></tr>
+      </tbody>
+    </table>
+  </div>
+</div>
+<div class="notice-box">
+  <p><strong>Mathematical Impossibility Notice:</strong> Bank statement analysis confirms ${f$(totalMCAMo)} in monthly MCA debt service against ${f$(grossProfit)} in monthly gross profit after ${f$(opex)} in verified operating expenses. ${daysToDefault < 999 ? `At current trajectory, account balances become critically depleted within ${daysToDefault} days &mdash; at which point all ${effectivePositions.length} funders lose recovery priority simultaneously.` : ''} This analysis is based on bank-verified transaction data, not merchant-reported estimates.</p>
+</div>
+<div class="section-divider"><div class="section-divider-label"><i class="fas fa-file-contract"></i> &nbsp;Agreement Provisions of Note</div><div class="section-divider-line"></div></div>
+<div class="flags-grid">
+  <div class="flag-item"><div class="flag-icon teal"><i class="fas fa-sync-alt"></i></div><div class="flag-content"><h4>Reconciliation Rights &mdash; Active Across Multiple Positions</h4><p>Several agreements contain reconciliation provisions allowing payment adjustment based on actual monthly revenue. Current payments have not been reconciled to verified revenue levels.</p></div></div>
+  <div class="flag-item"><div class="flag-icon orange"><i class="fas fa-layer-group"></i></div><div class="flag-content"><h4>Anti-Stacking Provisions &mdash; Present in Multiple Agreements</h4><p>Multiple funding agreements in this stack contain anti-stacking clauses. All positions were funded with concurrent exposure to other MCA obligations.</p></div></div>
+  <div class="flag-item"><div class="flag-icon green"><i class="fas fa-handshake"></i></div><div class="flag-content"><h4>100% Principal Recovery &mdash; Our Commitment</h4><p>Funders First does not negotiate principal reduction. Our proposal guarantees 100% repayment of your verified balance &mdash; we seek only modification of payment cadence and term length.</p></div></div>
+  <div class="flag-item"><div class="flag-icon gold"><i class="fas fa-gavel"></i></div><div class="flag-content"><h4>Enforcement Landscape &mdash; Evolving Regulatory Environment</h4><p>Recent legislative developments have affected the enforceability of certain MCA collection mechanisms. A negotiated resolution eliminates exposure to legal proceedings and ensures predictable recovery.</p></div></div>
+</div>
+<div class="page-footer">
+  <div class="footer-contact">
+    <div class="footer-contact-item"><i class="fas fa-phone"></i> 480-631-7691</div>
+    <div class="footer-contact-item"><i class="fas fa-envelope"></i> resolutions@fundersfirst.com</div>
+    <div class="footer-contact-item"><i class="fas fa-globe"></i> fundersfirst.com</div>
+  </div>
+  <div class="footer-right">
+    <div class="rbfc-badge"><i class="fas fa-certificate"></i> RBFC Advocate &mdash; Revenue Based Finance Coalition</div><br>
+    <span>Page 1 of 2 &middot; Confidential &mdash; Prepared for ${ft.name} Collections/Servicing</span>
+  </div>
+</div>
+</div></div>
+
+<!-- PAGE 2 -->
+<div class="page"><div class="content">
+<div class="doc-header">
+  <div class="doc-header-left">
+    <img src="https://fundersfirst.com/wp-content/uploads/2026/01/Funders-First-Inc.png" alt="Funders First">
+    <div class="doc-type"><i class="fas fa-file-alt"></i> &nbsp;Funder Position Analysis Brief &mdash; Page 2</div>
+  </div>
+  <div class="doc-header-right">
+    <div class="doc-title">Restructuring Proposal</div>
+    <div class="doc-subtitle">${ft.name} &middot; ${biz}</div>
+  </div>
+</div>
+<div class="section-divider"><div class="section-divider-label"><i class="fas fa-file-signature"></i> &nbsp;Our Opening Proposal &mdash; Your Position</div><div class="section-divider-line"></div></div>
+<div class="proposal-box" style="margin-bottom:0.14in;">
+  <div class="proposal-box-header"><i class="fas fa-check-circle"></i> Proposed Restructuring Terms &mdash; ${ft.name}</div>
+  <div class="proposal-terms">
+    <div class="proposal-term"><div class="proposal-term-value">${f$(ft.balance)}</div><div class="proposal-term-label">Total Repayment<br>(100% of Balance)</div></div>
+    <div class="proposal-term"><div class="proposal-term-value">${f$(proposedBiWeekly)}</div><div class="proposal-term-label">Bi-Weekly Payment<br>(Proposed)</div></div>
+    <div class="proposal-term"><div class="proposal-term-value">${termWeeks} weeks</div><div class="proposal-term-label">Proposed Term<br>(~${termMonths} months)</div></div>
+    <div class="proposal-term"><div class="proposal-term-value">72 hrs</div><div class="proposal-term-label">Payments Begin<br>Upon Agreement</div></div>
+  </div>
+</div>
+<div class="section-divider"><div class="section-divider-label"><i class="fas fa-balance-scale"></i> &nbsp;Recovery Scenario Comparison</div><div class="section-divider-line"></div></div>
+<div class="glass-card" style="padding:0;overflow:hidden;margin-bottom:0.14in;">
+  <table class="comparison-table">
+    <thead><tr>
+      <th style="width:30%;text-align:left;padding:12px 14px;background:rgba(255,255,255,0.6);font-size:0.52rem;color:var(--ff-text-muted);text-transform:uppercase;letter-spacing:1px;">Outcome Factor</th>
+      <th class="accept-col" style="width:35%;">&check; &nbsp;Accept Restructuring</th>
+      <th class="decline-col" style="width:35%;">Pursue Default / Collections</th>
+    </tr></thead>
+    <tbody>
+      <tr><td class="row-label">Total Recovery</td><td class="accept-val">${f$(ft.balance)} &nbsp;(100%)</td><td class="decline-val">~${f$(defaultRecovery)} &nbsp;(~35%)</td></tr>
+      <tr><td class="row-label">Recovery Timeline</td><td class="accept-val">${termMonths} months, structured</td><td class="decline-val">12&ndash;18+ months, contested</td></tr>
+      <tr><td class="row-label">Legal / Collection Costs</td><td class="accept-val">$0</td><td class="decline-val">$5,000 &ndash; $15,000+</td></tr>
+      <tr><td class="row-label">Collection Fees</td><td class="accept-val">$0</td><td class="decline-val">25% &ndash; 35% of recovery</td></tr>
+      <tr><td class="row-label">First Payment</td><td class="accept-val">Within 72 hours</td><td class="decline-val">6+ months from litigation start</td></tr>
+      <tr><td class="row-label">Regulatory Exposure</td><td class="accept-val">None &mdash; negotiated resolution</td><td class="decline-val">Heightened &mdash; enforcement climate</td></tr>
+      <tr><td class="row-label">Priority vs. Other ${effectivePositions.length - 1} Funders</td><td class="accept-val">Secured &mdash; structured first</td><td class="decline-val">Race to courthouse &mdash; uncertain</td></tr>
+      <tr class="net-row"><td class="row-label" style="font-size:0.65rem;">Net Recovery Difference</td><td class="accept-val">+${f$(ft.balance)}</td><td class="decline-val">~${f$(defaultNet)} net of fees &amp; costs</td></tr>
+    </tbody>
+  </table>
+</div>
+<div class="section-divider"><div class="section-divider-label"><i class="fas fa-info-circle"></i> &nbsp;Why This Structure Works For You</div><div class="section-divider-line"></div></div>
+<div class="two-col">
+  <div class="glass-card">
+    <div class="card-eyebrow"><i class="fas fa-shield-alt"></i> Our Commitment to Funders</div>
+    <p style="font-size:0.63rem;color:var(--ff-text-light);line-height:1.55;margin-bottom:8px;">Funders First operates under a single governing principle: <strong style="color:var(--ff-teal-dark);">100% repayment, always.</strong> We are not a debt settlement firm and we do not advise merchants to stop paying or dispute their obligations.</p>
+    <p style="font-size:0.63rem;color:var(--ff-text-light);line-height:1.55;margin-bottom:8px;">Our program works because it is mathematically honest: we extend the term, reduce the periodic payment, and ensure the merchant can continue operating &mdash; which is the only scenario where you receive 100 cents on the dollar.</p>
+    <p style="font-size:0.63rem;color:var(--ff-text-light);line-height:1.55;">We are advocates of the Revenue Based Finance Coalition and believe MCA is a legitimate and valuable funding tool.</p>
+  </div>
+  <div class="glass-card">
+    <div class="card-eyebrow"><i class="fas fa-clock"></i> The Default Scenario &mdash; What the Numbers Say</div>
+    <table class="math-table">
+      <tr><td class="label-col">Current monthly deficit</td><td style="color:var(--ff-red)">${monthlyDeficit < 0 ? '(' + f$(Math.abs(monthlyDeficit)) + ')' : f$(monthlyDeficit)}</td></tr>
+      <tr><td class="label-col">Est. days to critical depletion</td><td style="color:var(--ff-red)">${daysToDefault < 999 ? daysToDefault + ' days' : 'N/A'}</td></tr>
+      <tr><td class="label-col">Competing creditors (funders)</td><td>${effectivePositions.length} positions</td></tr>
+      <tr><td class="label-col">Typical MCA default recovery</td><td style="color:var(--ff-orange)">25&ndash;40%</td></tr>
+      <tr><td class="label-col">After collection fees (30%)</td><td style="color:var(--ff-red)">17&ndash;28%</td></tr>
+      <tr class="total-row"><td>Your net recovery (default path)</td><td style="color:var(--ff-red)">~${f$(Math.round(ft.balance * 0.17))}&ndash;${f$(Math.round(ft.balance * 0.28))}</td></tr>
+    </table>
+  </div>
+</div>
+<div class="notice-box">
+  <p><strong>Next Steps:</strong> We are prepared to begin ACH payments within 72 hours of reaching a written agreement. Please direct all communications to our office per the enclosed LNAA. To discuss terms or request modifications to this proposal, contact Gavin Roberts at <strong>480-631-7691</strong> or <strong>resolutions@fundersfirst.com</strong>. We are available Monday&ndash;Friday, 9AM&ndash;5PM MST and can accommodate calls outside these hours by appointment.</p>
+</div>
+<div style="margin-top:0.1in;padding:14px 18px;background:linear-gradient(135deg,var(--ff-teal-dark),var(--ff-teal));border-radius:10px;text-align:center;">
+  <p style="font-size:0.65rem;color:#fff;font-style:italic;line-height:1.6;">&ldquo;We believe revenue-based finance is a legitimate and valuable tool for small business growth. Our role is not to work against funders &mdash; it is to ensure merchants survive long enough to honor their obligations in full.&rdquo;</p>
+  <p style="font-size:0.52rem;color:rgba(255,255,255,0.7);margin-top:6px;text-transform:uppercase;letter-spacing:1px;">&mdash; Funders First Inc. &middot; Reducing Burdens, Not Obligations</p>
+</div>
+<div class="page-footer" style="margin-top:0.15in;">
+  <div class="footer-contact">
+    <div class="footer-contact-item"><i class="fas fa-phone"></i> 480-631-7691</div>
+    <div class="footer-contact-item"><i class="fas fa-envelope"></i> resolutions@fundersfirst.com</div>
+    <div class="footer-contact-item"><i class="fas fa-globe"></i> fundersfirst.com</div>
+  </div>
+  <div class="footer-right">
+    <div class="rbfc-badge"><i class="fas fa-certificate"></i> RBFC Advocate &mdash; Revenue Based Finance Coalition</div><br>
+    <span>Page 2 of 2 &middot; Confidential &mdash; Prepared for ${ft.name} Collections/Servicing</span>
+  </div>
+</div>
+</div></div>
+</body></html>`;
+  };
+
+  const generateNegotiationEmail = (funderIdx, tierIdx) => {
+    const ft2 = funderTiers[funderIdx];
+    if (!ft2) return '';
+    const tier = ft2.tiers[tierIdx];
+    if (!tier) return '';
+    const f$ = (n) => '$' + Math.round(n).toLocaleString('en-US');
+    const agMatch = matchAgreementToPosition(ft2.name, agreementResults);
+    const originDateStr = agMatch?.analysis?.funding_date || agMatch?.analysis?.effective_date || agMatch?.analysis?.contract_date || null;
+    const monthsSinceOrig = originDateStr ? Math.max(1, Math.round((Date.now() - new Date(originDateStr).getTime()) / (1000 * 60 * 60 * 24 * 30.44))) : null;
+    const originNote = originDateStr ? `\nNote: This merchant's position was originated on ${originDateStr}. Current cash flow trajectory reflects ${monthsSinceOrig} month${monthsSinceOrig !== 1 ? 's' : ''} of compounding debt service.` : '';
+    const statsBlock = `BANK-VERIFIED FINANCIAL OVERVIEW:\nBusiness: ${biz}\nTrue Monthly Revenue (bank-verified): ${fmt(revenue)}\nTotal Active Positions: ${effectivePositions.length}\nCombined Weekly Burden: ${fmt(totalCurrentWeekly)} (${effectivePositions.length} positions)\nWithhold % of Revenue: ${withholdPct}%\nADB Coverage: ${adbDays} days\nDays Until Likely Default: ${daysToDefault < 999 ? daysToDefault + ' days' : 'N/A'}${originNote}\n\nNOTE: All revenue figures are bank-statement verified — not merchant-reported estimates.`;
+    const contractWeekly = getContractWeekly(agMatch);
+    const currentWeeklyLabel = contractWeekly && contractWeekly > 0
+      ? `${f$(contractWeekly)} (per agreement)` : f$(ft2.originalWeekly);
+    const overpullDelta = contractWeekly && contractWeekly > 0
+      ? ft2.originalWeekly - contractWeekly : 0;
+    const hasOverpull = overpullDelta > contractWeekly * 0.01;
+    const overpullNote = hasOverpull
+      ? `\nNote: Recent debits of ${f$(ft2.originalWeekly)} exceed your contractual installment — this has been noted in our analysis.` : '';
+    const proposalBlock = `YOUR POSITION:\nYour Current Weekly Payment:    ${currentWeeklyLabel}\nProposed Weekly Payment:        ${f$(tier.weeklyPayment)}\nWeekly Reduction:               ${f$(tier.reductionDollars)} less per week\nPayment Reduction:              ${(parseFloat(tier.reductionPct) || 0).toFixed(1)}%\nYour Original Term:             ${ft2.originalTermWeeks} weeks\nProposed Term:                  ${tier.proposedTermWeeks} weeks\nTerm Extension:                 +${(parseFloat(tier.extensionPct) || 0).toFixed(1)}% longer\nTotal Repayment:                ${f$(ft2.balance)} — 100% of your balance\nPayments Begin:                 Within 72 hours of agreement${overpullNote}`;
+    const defaultRecovery = Math.round(ft2.balance * 0.35);
+    const defaultNet = Math.round(defaultRecovery * 0.7);
+    const comparisonBlock = `════════════════════════════════════════════════════════════════\n                     YOUR OPTIONS COMPARED\n════════════════════════════════════════════════════════════════\n   ACCEPT PROPOSAL                │  PURSUE DEFAULT/COLLECTIONS\n───────────────────────────────────────────────────────────────\n   Total Recovery:                │\n     ${f$(ft2.balance)} (100%)          │  ~${f$(defaultRecovery)} (~35%)\n   Your Weekly Payment:           │\n     ${f$(tier.weeklyPayment)}/wk             │  $0 (frozen/litigation)\n   Your Term:                     │\n     ${tier.proposedTermWeeks} weeks                │  12-18+ months contested\n   Legal Costs: $0                │  $5,000 - $15,000+\n   Collection Fees: $0            │  25-35% of recovery\n   First Payment: 72 hours        │  6+ months from litigation\n   Regulatory Exposure: None      │  Heightened\n───────────────────────────────────────────────────────────────\n   NET RECOVERY: +${f$(ft2.balance - defaultNet)} by accepting\n════════════════════════════════════════════════════════════════`;
+    const signature = `Best regards,\nGavin Roberts\nResolutions Manager\n480-631-7691\nresolutions@fundersfirst.com\nPhoenix, AZ\n\nRBFC Advocate | Revenue Based Finance Coalition`;
+    const lnaaNotice = `Per the enclosed LNAA, all communications regarding this account must now be directed to our office. Please do not contact the merchant directly.`;
+    let emailText = '';
+    if (tierIdx === 0) {
+      emailText = `Subject: Payment Modification Request – ${biz} – ${ft2.name}\n\nDear ${ft2.name} Collections/Servicing Team,\n\nWe are reaching out on behalf of ${biz} regarding their merchant cash advance position with your organization.\n\nIMPORTANT — WHO WE ARE:\nFunders First is NOT a debt settlement company. We do not advise merchants that MCAs are predatory, unfair, or that they don't owe what they contracted for. We believe in and support revenue-based finance as a legitimate funding tool for small businesses.\n\nThe issue here is over-stacking. This merchant is servicing ${effectivePositions.length} concurrent funding positions, consuming ${withholdPct}% of weekly revenue. This level of debt service is mathematically unsustainable and, without intervention, leads to default — which benefits no one.\n\nOur solution protects your investment by ensuring 100% repayment while giving the merchant breathing room to operate their business.\n\n${statsBlock}\n\n${proposalBlock}\n\n${comparisonBlock}\n\nWe are prepared to begin payments within 72 hours of reaching agreement.\n\nATTACHMENT: Please find enclosed our Limited Negotiation Authorization Agreement (LNAA), executed by ${biz}, authorizing Funders First to negotiate on their behalf.\n\n${lnaaNotice}\n\n${signature}`;
+    } else if (tierIdx === 1) {
+      const email1Tier = ft2.tiers[0];
+      emailText = `Subject: Revised Proposal – ${biz} – Improved Terms Available\n\nDear ${ft2.name} Collections/Servicing Team,\n\nFollowing our previous communication regarding ${biz}, we are presenting significantly improved terms for your consideration.\n\nNote: Cash position has continued to decline since our initial outreach. Estimated days to default: ${daysToDefault < 999 ? daysToDefault : 'critical'}.\n\n${statsBlock}\n\n${proposalBlock}\n\nThis offer represents a ${(parseFloat((tier.weeklyPayment - email1Tier.weeklyPayment) / email1Tier.weeklyPayment * 100) || 0).toFixed(0)}% increase in weekly payment over our opening proposal and reduces your term from ${email1Tier.proposedTermWeeks} to ${tier.proposedTermWeeks} weeks.\n\n${comparisonBlock}\n\nWe remain committed to ensuring you receive 100% of what is owed. Please respond so we can finalize terms and begin remittance immediately.\n\n${lnaaNotice}\n\n${signature}`;
+    } else {
+      const futureDate = new Date();
+      futureDate.setDate(futureDate.getDate() + 7);
+      const deadlineStr = futureDate.toLocaleDateString('en-US', { month: 'long', day: 'numeric', year: 'numeric' });
+      emailText = `Subject: Final Proposal – ${biz} – Maximum Allocation\n\nDear ${ft2.name} Collections/Servicing Team,\n\nThis represents our final proposal for the ${biz} restructuring. This is our maximum weekly allocation for your position.\n\n${statsBlock}\n\n${proposalBlock}\n\nThis is our maximum weekly allocation for your position. Your term at full allocation is ${tier.proposedTermWeeks} weeks — the shortest possible timeline under this program.\n\n${comparisonBlock}\n\nBased on current cash flow trajectory, this is the final opportunity to participate in a structured repayment. Positions not accommodated by ${deadlineStr} will be removed from the structured payment pool.\n\n${lnaaNotice}\n\n${signature}`;
+    }
+    if (!confidentialityCheck(emailText)) {
+      return 'ERROR: CONFIDENTIALITY BLOCK — ISO/FF data detected in funder output. This email cannot be generated.';
+    }
+    return emailText;
+  };
+
+  const copyOffer = () => {
+    if (funderTiers.length === 0) return;
+    const selTier = tierDefs[selectedTierIdx];
+    const termMonths = Math.round(maxTerm / 4.33);
+    const lines = [
+      `FUNDERS FIRST — ISO OFFER PITCH`,
+      `Merchant: ${biz}`,
+      `Total Debt Stack: ${fmt(totalBalance)} across ${effectivePositions.length} enrolled positions`,
+      `Current Weekly Burden: ${fmt(totalCurrentWeekly)}/wk`,
+      ``,
+      `Proposed Terms (${selTier.label} — ${(selTier.pct * 100).toFixed(0)}%):`,
+      `Merchant Weekly Payment: ${fmtD(merchantPaysWeekly)}/wk`,
+      `Payment Reduction: ${reductionPct_display.toFixed(1)}%`,
+      `Est. Term: ~${termMonths} months`,
+      `Total Payback: ${fmt(totalBalance + ffFeeTotal + commissionTotal)} (${(totalBalance > 0 ? ((totalBalance + ffFeeTotal + commissionTotal) / totalBalance) : 0).toFixed(2)}\u00d7 factor)`,
+      `Enrollment Fee: ${fmt(enrollmentFee)}`,
+      ``,
+      `ISO Commission (${isoPoints} pts): ${fmt(commissionTotal)} (${(commissionRate * 100).toFixed(1)}%)`,
+    ];
+    navigator.clipboard.writeText(lines.join('\n'));
+    setCopiedOffer(true);
+    setTimeout(() => setCopiedOffer(false), 2000);
+  };
+
+  const downloadCSV = () => {
+    const csvRows = [
+      ['field', 'value', 'notes'],
+      ['business_name', a.business_name, ''],
+      ['bank_name', a.bank_name, ''],
+      ['monthly_revenue', revenue, 'Bank-verified adjusted'],
+      ['total_mca_debt_service', includedMonthly, 'Monthly'],
+      ['avg_daily_balance', adb, ''],
+      ['dsr_percent', currentDSR.toFixed(1), ''],
+      ['total_positions', effectivePositions.length, 'Enrolled'],
+      ['total_balance', totalBalance, ''],
+      ['total_weekly_burden', totalCurrentWeekly, ''],
+      ['analysis_date', new Date().toISOString().split('T')[0], ''],
+    ].map(r => r.map(v => `"${String(v ?? '').replace(/"/g, '""')}"`).join(',')).join('\n');
+    const blob = new Blob([csvRows], { type: 'text/csv' });
+    const url = URL.createObjectURL(blob);
+    const a2 = document.createElement('a');
+    a2.href = url;
+    a2.download = `FF-Analysis-${(a.business_name || 'export').replace(/\s+/g, '-')}-${new Date().toISOString().split('T')[0]}.csv`;
+    a2.click();
+    URL.revokeObjectURL(url);
+  };
 
   if (enrolledActive.length === 0) {
     return (
@@ -1161,6 +1513,120 @@ export default function PricingTab({ a, positions, excludedIds, otherExcludedIds
         <button style={{ padding: '10px 22px', borderRadius: 8, border: '1px solid rgba(255,255,255,0.15)', cursor: 'pointer', fontSize: 13, fontFamily: 'inherit', background: 'rgba(255,255,255,0.08)', color: '#e8e8f0', letterSpacing: 0.5 }}>
           Import from Analysis
         </button>
+      </div>
+
+      {/* ═══════════════ FUNDER NEGOTIATION EMAILS ═══════════════ */}
+      <div style={S.divider} />
+      <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginBottom: 16 }}>
+        <div style={S.section}>Funder Negotiation Emails</div>
+        <button onClick={() => setShowNegEmails(v => !v)} style={{ padding: '4px 12px', borderRadius: 6, fontSize: 11, fontWeight: 600, border: '1px solid rgba(255,255,255,0.15)', background: 'rgba(255,255,255,0.08)', color: '#e8e8f0', cursor: 'pointer', fontFamily: 'inherit', marginLeft: 'auto' }}>
+          {showNegEmails ? '\u25B2 Collapse' : '\u25BC Expand'}
+        </button>
+      </div>
+
+      {showNegEmails && (
+        <div style={{ background: 'rgba(0,229,255,0.04)', border: '1px solid rgba(0,229,255,0.15)', borderRadius: 12, padding: 20, marginBottom: 20 }}>
+          <div style={{ display: 'flex', gap: 12, alignItems: 'center', flexWrap: 'wrap', marginBottom: 16 }}>
+            <div>
+              <label style={{ fontSize: 11, color: 'rgba(232,232,240,0.5)', display: 'block', marginBottom: 4 }}>Select Funder:</label>
+              <select value={negFunderId ?? ''} onChange={e => setNegFunderId(e.target.value === '' ? null : Number(e.target.value))} style={{ padding: '8px 12px', borderRadius: 6, border: '1px solid rgba(0,229,255,0.3)', background: 'rgba(0,0,0,0.3)', color: '#e8e8f0', fontSize: 13, fontFamily: 'inherit', minWidth: 280 }}>
+                <option value="">Select a funder…</option>
+                {funderTiers.map((ft3, i) => <option key={i} value={i}>{ft3.name} — {fmt(ft3.balance)} bal — {fmtD(ft3.tiers[selectedTierIdx]?.weeklyPayment || 0)}/wk</option>)}
+              </select>
+            </div>
+          </div>
+
+          {negFunderId !== null && funderTiers[negFunderId] && (() => {
+            const selFt = funderTiers[negFunderId];
+            return (
+              <div>
+                <div style={{ background: 'rgba(0,0,0,0.2)', borderRadius: 8, padding: 14, marginBottom: 16, fontSize: 12, color: 'rgba(232,232,240,0.7)', lineHeight: 1.8 }}>
+                  <div style={{ fontSize: 16, color: '#00e5ff', fontWeight: 700, marginBottom: 6 }}>{selFt.name}</div>
+                  <div>Balance: <strong style={{ color: '#e8e8f0' }}>{fmt(selFt.balance)}</strong> · Original: <strong style={{ color: '#ef9a9a' }}>{fmt(selFt.originalWeekly)}/wk</strong> · Allocation: <strong style={{ color: '#00e5ff' }}>{fmtD(selFt.tiers[selectedTierIdx]?.weeklyPayment || 0)}/wk</strong></div>
+                  <div>Total Repayment (all tiers): <strong style={{ color: '#4caf50' }}>{fmt(selFt.balance)}</strong> (100%)</div>
+                </div>
+
+                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 12, marginBottom: 16 }}>
+                  {[0, 1, 2, 3].map(ti => {
+                    const t = selFt.tiers[ti];
+                    if (!t) return null;
+                    return (
+                      <div key={ti} style={{ background: `${tierColors[ti]}08`, border: `1px solid ${tierColors[ti]}44`, borderRadius: 10, padding: 14 }}>
+                        <div style={{ fontSize: 12, fontWeight: 700, color: tierColors[ti], marginBottom: 8 }}>{tierDefs[ti].label} ({(tierDefs[ti].pct * 100).toFixed(0)}%)</div>
+                        <div style={{ fontSize: 11, color: 'rgba(232,232,240,0.6)', lineHeight: 1.8, marginBottom: 10 }}>
+                          <div>Payment: <strong style={{ color: tierColors[ti] }}>{fmtD(t.weeklyPayment)}/wk</strong></div>
+                          <div>Reduction: <strong>{(parseFloat(t.reductionPct) || 0).toFixed(1)}%</strong> ({fmtD(t.reductionDollars)} less)</div>
+                          <div>Term: <strong>{t.proposedTermWeeks} wks</strong> ({Math.round(t.proposedTermWeeks / 4.33)} mo)</div>
+                          <div>Extension: +{(parseFloat(t.extensionPct) || 0).toFixed(0)}%</div>
+                          <div>Repayment: <strong style={{ color: '#4caf50' }}>{fmt(t.totalRepayment)}</strong></div>
+                        </div>
+                        <div style={{ display: 'flex', gap: 6 }}>
+                          <button onClick={() => { const txt = generateNegotiationEmail(negFunderId, ti); navigator.clipboard.writeText(txt); setCopiedEmail(`${negFunderId}-${ti}`); setTimeout(() => setCopiedEmail(null), 2000); }} style={{ flex: 1, padding: '6px 12px', borderRadius: 6, border: 'none', cursor: 'pointer', fontSize: 11, fontWeight: 600, fontFamily: 'inherit', background: 'linear-gradient(135deg, #00acc1, #00e5ff)', color: '#0a0a0f' }}>
+                            {copiedEmail === `${negFunderId}-${ti}` ? '\u2713 Copied!' : 'Copy Email'}
+                          </button>
+                          <button onClick={() => { const html = generateBriefHTML(negFunderId, ti); const w = window.open('', '_blank'); w.document.write(html); w.document.close(); }} style={{ padding: '6px 10px', borderRadius: 6, border: '1px solid rgba(255,255,255,0.15)', cursor: 'pointer', fontSize: 10, fontFamily: 'inherit', background: 'rgba(255,255,255,0.08)', color: '#e8e8f0' }}>
+                            PDF
+                          </button>
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+
+                <div style={{ background: 'rgba(0,0,0,0.3)', borderRadius: 8, padding: 16, maxHeight: 500, overflowY: 'auto' }}>
+                  <div style={{ display: 'flex', gap: 8, marginBottom: 10 }}>
+                    {[0, 1, 2, 3].map(ti => (
+                      <button key={ti} style={{ padding: '4px 10px', borderRadius: 6, fontSize: 10, fontWeight: 600, cursor: 'default', border: `1px solid ${tierColors[ti]}`, background: `${tierColors[ti]}22`, color: tierColors[ti], fontFamily: 'inherit' }}>
+                        {tierDefs[ti].label} — {selFt.tiers[ti]?.proposedTermWeeks || '—'} wks
+                      </button>
+                    ))}
+                  </div>
+                  <pre style={{ margin: 0, fontFamily: 'inherit', fontSize: 11, color: 'rgba(232,232,240,0.85)', whiteSpace: 'pre-wrap', lineHeight: 1.6 }}>
+                    {generateNegotiationEmail(negFunderId, 0)}
+                  </pre>
+                </div>
+              </div>
+            );
+          })()}
+        </div>
+      )}
+
+      {/* ═══════════════ EXPORT ═══════════════ */}
+      <div style={S.divider} />
+      <div style={S.section}>Export</div>
+      <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap', marginBottom: 16 }}>
+        <button onClick={downloadCSV} style={{ padding: '10px 22px', borderRadius: 8, border: 'none', cursor: 'pointer', fontSize: 13, fontWeight: 600, fontFamily: 'inherit', background: 'linear-gradient(135deg, #00acc1, #00e5ff)', color: '#0a0a0f', letterSpacing: 0.5 }}>
+          {'\u2B07'} Download CSV
+        </button>
+        <button onClick={copyOffer} style={{ padding: '10px 22px', borderRadius: 8, border: 'none', cursor: 'pointer', fontSize: 13, fontWeight: 600, fontFamily: 'inherit', background: 'linear-gradient(135deg, #CFA529, #EAD068)', color: '#0a0a0f', letterSpacing: 0.5 }}>
+          {copiedOffer ? '\u2713 Copied!' : '\uD83D\uDCCB Copy ISO Pitch'}
+        </button>
+        <button onClick={() => navigator.clipboard.writeText(JSON.stringify(a, null, 2))} style={{ padding: '10px 22px', borderRadius: 8, border: '1px solid rgba(255,255,255,0.15)', cursor: 'pointer', fontSize: 13, fontFamily: 'inherit', background: 'rgba(255,255,255,0.08)', color: '#e8e8f0', letterSpacing: 0.5 }}>
+          {'\uD83D\uDCCB'} Copy Full JSON
+        </button>
+      </div>
+
+      {/* ═══════════════ ANALYSIS METADATA ═══════════════ */}
+      <div style={S.section}>Analysis Metadata</div>
+      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10, marginBottom: 20 }}>
+        {[
+          { label: 'Source File', value: fileName || '\u2014' },
+          { label: 'Analyzed', value: new Date().toLocaleString() },
+          { label: 'Statement Period', value: a.statement_month
+              ? a.statement_month
+              : a.statement_periods?.length > 1
+                ? `${a.statement_periods[0]?.month || ''} \u2014 ${a.statement_periods[a.statement_periods.length - 1]?.month || ''}`
+                : a.statement_periods?.[0]?.month
+                  || (a.monthly_breakdown?.length > 1
+                    ? `${a.monthly_breakdown[0]?.month || ''} \u2014 ${a.monthly_breakdown[a.monthly_breakdown.length - 1]?.month || ''}`
+                    : a.monthly_breakdown?.[0]?.month || '\u2014') },
+          { label: 'Positions Enrolled', value: `${effectivePositions.length} positions` },
+        ].map((s, i) => (
+          <div key={i} style={{ background: 'rgba(0,0,0,0.2)', borderRadius: 8, padding: '8px 12px' }}>
+            <div style={{ fontSize: 10, color: 'rgba(232,232,240,0.4)', textTransform: 'uppercase', letterSpacing: 0.5, marginBottom: 4 }}>{s.label}</div>
+            <div style={{ fontSize: 13, color: '#e8e8f0', wordBreak: 'break-all' }}>{s.value}</div>
+          </div>
+        ))}
       </div>
     </div>
   );
