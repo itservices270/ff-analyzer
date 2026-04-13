@@ -139,6 +139,13 @@ function getTagColor(posture) {
   return map[posture] || 'grey';
 }
 
+function toWeeklyEquiv(payment, frequency) {
+  if (frequency === 'daily') return payment * 5;
+  if (frequency === 'bi-weekly') return payment / 2;
+  if (frequency === 'monthly') return payment / 4.33;
+  return payment;
+}
+
 function normalizeFunderKey(name) {
   return (name || '').toLowerCase().replace(/[^a-z0-9]/g, '').replace(/advance\d*|position[a-z]?|pos[a-z]?|\(.*?\)/g, '').trim();
 }
