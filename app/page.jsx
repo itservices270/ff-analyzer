@@ -3422,8 +3422,8 @@ function ExportTab({ a, fileName, positions, excludedIds, otherExcludedIds, depo
 
   // ── Unified Deal Controls (matches PricingTab) ──
   const [isoPoints, setIsoPoints] = useLocalState(11);
-  const [negotiationBuffer, setNegotiationBuffer] = useLocalState(3);
-  const [tailWeeks, setTailWeeks] = useLocalState(8);
+  const [negotiationBuffer, setNegotiationBuffer] = useLocalState(4);
+  const [tailWeeks, setTailWeeks] = useLocalState(4);
   const [ffFactorOverride, setFfFactorOverride] = useLocalState('');
   const [selectedTierIdx, setSelectedTierIdx] = useLocalState(0);
 
@@ -4171,19 +4171,19 @@ ${signature}`;
         </div>
 
         {/* Current → Proposed */}
-        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 24, marginBottom: 14, background: 'rgba(0,0,0,0.15)', borderRadius: 10, padding: '12px 16px' }}>
+        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 24, marginBottom: 14, background: 'rgba(0,0,0,0.15)', borderRadius: 10, padding: '14px 20px' }}>
           <div style={{ textAlign: 'center' }}>
-            <div style={{ fontSize: 9, color: 'rgba(232,232,240,0.4)', textTransform: 'uppercase', letterSpacing: 0.5, marginBottom: 4 }}>Current Weekly Burden</div>
-            <div style={{ fontSize: 22, fontWeight: 800, color: '#ef5350' }}>{fmt(includedCurrentWeekly)}</div>
+            <div style={{ fontSize: 11, color: 'rgba(232,232,240,0.4)', textTransform: 'uppercase', letterSpacing: 0.5, marginBottom: 4 }}>Current Weekly Burden</div>
+            <div style={{ fontSize: 28, fontWeight: 800, color: '#ef5350' }}>{fmt(includedCurrentWeekly)}</div>
           </div>
-          <div style={{ fontSize: 24, color: reductionDisplay > 0 ? '#4caf50' : '#ef5350' }}>{'\u2192'}</div>
+          <div style={{ fontSize: 32, color: reductionDisplay > 0 ? '#4caf50' : '#ef5350' }}>{'\u2192'}</div>
           <div style={{ textAlign: 'center' }}>
-            <div style={{ fontSize: 9, color: 'rgba(232,232,240,0.4)', textTransform: 'uppercase', letterSpacing: 0.5, marginBottom: 4 }}>Merchant Pays FF</div>
-            <div style={{ fontSize: 22, fontWeight: 800, color: '#22c55e' }}>{fmtD(merchantWeeklyToFF)}</div>
+            <div style={{ fontSize: 11, color: 'rgba(232,232,240,0.4)', textTransform: 'uppercase', letterSpacing: 0.5, marginBottom: 4 }}>Merchant Pays FF</div>
+            <div style={{ fontSize: 28, fontWeight: 800, color: '#22c55e' }}>{fmtD(merchantWeeklyToFF)}</div>
           </div>
           <div style={{ textAlign: 'center' }}>
-            <div style={{ fontSize: 9, color: 'rgba(232,232,240,0.4)', textTransform: 'uppercase', letterSpacing: 0.5, marginBottom: 4 }}>Reduction</div>
-            <div style={{ fontSize: 22, fontWeight: 800, color: reductionDisplay > 0 ? '#4caf50' : '#ef5350' }}>{reductionDisplay.toFixed(1)}%</div>
+            <div style={{ fontSize: 11, color: 'rgba(232,232,240,0.4)', textTransform: 'uppercase', letterSpacing: 0.5, marginBottom: 4 }}>Reduction</div>
+            <div style={{ fontSize: 28, fontWeight: 800, color: reductionDisplay > 0 ? '#4caf50' : '#ef5350' }}>{reductionDisplay.toFixed(1)}%</div>
           </div>
         </div>
 
@@ -4191,52 +4191,57 @@ ${signature}`;
         {(() => {
           const aprColor = aprEquiv <= 24 ? '#4caf50' : aprEquiv <= 30 ? '#f59e0b' : '#ef5350';
           const aprLabel = aprEquiv <= 19 ? 'Below market' : aprEquiv <= 24 ? 'Competitive' : aprEquiv <= 30 ? 'Above market' : 'High';
+          const actualTermWeeks = merchantWeeklyToFF > 0 ? Math.ceil(disclosedPayback / merchantWeeklyToFF) : 0;
           return (
             <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12, marginBottom: 12 }}>
-              <div style={{ background: 'rgba(0,0,0,0.2)', borderRadius: 10, padding: 14, border: '1px solid rgba(76,175,80,0.2)' }}>
+              <div style={{ background: 'rgba(0,0,0,0.2)', borderRadius: 10, padding: 20, border: '1px solid rgba(76,175,80,0.2)' }}>
                 <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 10 }}>
-                  <div style={{ width: 7, height: 7, borderRadius: '50%', background: '#4caf50' }} />
-                  <div style={{ fontSize: 9, fontWeight: 700, color: '#4caf50', textTransform: 'uppercase', letterSpacing: 0.8 }}>ISO / Merchant Facing</div>
+                  <div style={{ width: 8, height: 8, borderRadius: '50%', background: '#4caf50' }} />
+                  <div style={{ fontSize: 12, fontWeight: 700, color: '#4caf50', textTransform: 'uppercase', letterSpacing: 0.8 }}>ISO / Merchant Facing</div>
                 </div>
-                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 5 }}>
+                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 10 }}>
                   {[
-                    { label: 'Weekly Payment', value: fmtD(merchantWeeklyToFF), color: '#4caf50' },
+                    { label: 'Weekly Payment', value: fmtD(merchantWeeklyToFF), color: '#4caf50', hero: true },
                     { label: 'Est. Term', value: `~${Math.round(agreementTerm / 4.33)} months`, color: '#e8e8f0' },
                     { label: 'Total Payback', value: fmt(disclosedPayback), color: '#e8e8f0', note: disclosedFactor.toFixed(2) + '\u00d7' },
-                    { label: 'Reduction', value: fmtP(reductionDisplay), color: reductionDisplay > 0 ? '#4caf50' : '#ef5350' },
+                    { label: 'Reduction', value: fmtP(reductionDisplay), color: reductionDisplay > 0 ? '#4caf50' : '#ef5350', hero: true },
                     { label: 'APR Equiv', value: aprEquiv.toFixed(1) + '%', color: aprColor, note: aprLabel },
                     { label: 'Enrollment', value: fmt(enrollmentFee), color: '#00bcd4' },
                   ].map((s2, i) => (
-                    <div key={i} style={{ background: 'rgba(0,0,0,0.15)', borderRadius: 6, padding: '6px 8px', textAlign: 'center' }}>
-                      <div style={{ fontSize: 8, color: 'rgba(232,232,240,0.4)', textTransform: 'uppercase', letterSpacing: 0.3, marginBottom: 2 }}>{s2.label}</div>
-                      <div style={{ fontSize: 13, fontWeight: 700, color: s2.color }}>{s2.value}</div>
-                      {s2.note && <div style={{ fontSize: 8, color: 'rgba(232,232,240,0.3)', marginTop: 1 }}>{s2.note}</div>}
+                    <div key={i} style={{ background: 'rgba(0,0,0,0.15)', borderRadius: 8, padding: '12px 14px', textAlign: 'center' }}>
+                      <div style={{ fontSize: 11, color: 'rgba(232,232,240,0.4)', textTransform: 'uppercase', letterSpacing: 0.3, marginBottom: 4 }}>{s2.label}</div>
+                      <div style={{ fontSize: s2.hero ? 24 : 20, fontWeight: s2.hero ? 800 : 700, color: s2.color }}>{s2.value}</div>
+                      {s2.note && <div style={{ fontSize: 10, color: 'rgba(232,232,240,0.3)', marginTop: 2 }}>{s2.note}</div>}
                     </div>
                   ))}
                 </div>
               </div>
-              <div style={{ background: 'rgba(0,0,0,0.2)', borderRadius: 10, padding: 14, border: '1px solid rgba(207,165,41,0.2)' }}>
+              <div style={{ background: 'rgba(0,0,0,0.2)', borderRadius: 10, padding: 20, border: '1px solid rgba(207,165,41,0.2)' }}>
                 <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 10 }}>
-                  <div style={{ width: 7, height: 7, borderRadius: '50%', background: '#CFA529' }} />
-                  <div style={{ fontSize: 9, fontWeight: 700, color: '#CFA529', textTransform: 'uppercase', letterSpacing: 0.8 }}>FF Internal Only</div>
+                  <div style={{ width: 8, height: 8, borderRadius: '50%', background: '#CFA529' }} />
+                  <div style={{ fontSize: 12, fontWeight: 700, color: '#CFA529', textTransform: 'uppercase', letterSpacing: 0.8 }}>FF Internal Only</div>
                 </div>
-                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 5 }}>
+                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 10 }}>
                   {[
-                    { label: 'Total Debt', value: fmt(includedDebt), color: '#ef5350' },
-                    { label: 'Disclosed', value: fmt(disclosedPayback), color: '#e8e8f0', note: disclosedFactor.toFixed(2) + '\u00d7' },
-                    { label: 'Collections', value: fmt(actualCollections), color: '#4caf50', note: fmtD(merchantWeeklyToFF) + '\u00d7' + agreementTerm + 'wk' },
-                    { label: 'Term', value: `${agreementTerm} wks`, color: '#e8e8f0', note: `${negotiationBuffer}+${maxFunderTerm}+${tailWeeks}` },
+                    { label: 'Total Debt', value: fmt(includedDebt), color: '#ef5350', hero: true },
+                    { label: 'Disclosed Payback', value: fmt(disclosedPayback), color: '#e8e8f0', note: disclosedFactor.toFixed(2) + '\u00d7' },
+                    { label: 'Actual Collections', value: fmt(actualCollections), color: '#4caf50', note: fmtD(merchantWeeklyToFF) + '\u00d7' + agreementTerm + 'wk' },
+                    { label: 'Agreement Term', value: `${agreementTerm} wks`, color: '#e8e8f0', note: `${negotiationBuffer}+${maxFunderTerm}+${tailWeeks}` },
+                    { label: 'Actual Term', value: `${actualTermWeeks} wks`, color: '#e8e8f0', note: `~${Math.round(actualTermWeeks / 4.33)} months` },
                     { label: 'TAD/wk', value: fmtD(selectedTAD), color: tierColors[selectedTierIdx] },
                     { label: 'ISO/wk', value: fmtD(isoCommWeekly), color: '#EAD068', note: fmt(commissionTotal) },
                     { label: 'FF Fee/wk', value: fmtD(ffFeeWeekly), color: '#CFA529', note: fmt(ffFeeTotal) },
                     { label: 'Buffer/wk', value: fmtD(ffBufferWeekly), color: selectedTierIdx === 3 ? 'rgba(232,232,240,0.3)' : '#a78bfa' },
                   ].map((s2, i) => (
-                    <div key={i} style={{ background: 'rgba(0,0,0,0.15)', borderRadius: 6, padding: '6px 8px', textAlign: 'center' }}>
-                      <div style={{ fontSize: 8, color: 'rgba(232,232,240,0.4)', textTransform: 'uppercase', letterSpacing: 0.3, marginBottom: 2 }}>{s2.label}</div>
-                      <div style={{ fontSize: 13, fontWeight: 700, color: s2.color }}>{s2.value}</div>
-                      {s2.note && <div style={{ fontSize: 8, color: 'rgba(232,232,240,0.3)', marginTop: 1 }}>{s2.note}</div>}
+                    <div key={i} style={{ background: 'rgba(0,0,0,0.15)', borderRadius: 8, padding: '12px 14px', textAlign: 'center' }}>
+                      <div style={{ fontSize: 11, color: 'rgba(232,232,240,0.4)', textTransform: 'uppercase', letterSpacing: 0.3, marginBottom: 4 }}>{s2.label}</div>
+                      <div style={{ fontSize: s2.hero ? 22 : 18, fontWeight: s2.hero ? 800 : 700, color: s2.color }}>{s2.value}</div>
+                      {s2.note && <div style={{ fontSize: 10, color: 'rgba(232,232,240,0.3)', marginTop: 2 }}>{s2.note}</div>}
                     </div>
                   ))}
+                </div>
+                <div style={{ fontSize: 12, color: 'rgba(232,232,240,0.3)', textAlign: 'center', marginTop: 10 }}>
+                  Funders: {fmtD(selectedTAD)} + ISO: {fmtD(isoCommWeekly)} + FF: {fmtD(ffFeeWeekly)} + Buffer: {fmtD(ffBufferWeekly)} = {fmtD(merchantWeeklyToFF)}/wk
                 </div>
               </div>
             </div>
