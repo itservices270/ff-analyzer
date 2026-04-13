@@ -156,6 +156,14 @@ export default function PricingTab({ a, positions, excludedIds, otherExcludedIds
   const [copiedOffer, setCopiedOffer] = useState(false);
   const [showNegEmails, setShowNegEmails] = useState(false);
 
+  // ── Supabase Save/Load state ──
+  const [savedDealId, setSavedDealId] = useState(null);
+  const [saveStatus, setSaveStatus] = useState(null); // null | 'saving' | 'saved' | 'error'
+  const [saveError, setSaveError] = useState(null);
+  const [showLoadModal, setShowLoadModal] = useState(false);
+  const [dealList, setDealList] = useState([]);
+  const [loadingDeals, setLoadingDeals] = useState(false);
+
   // ── FF Factor term-based tiers ──
   const FF_FACTOR_TIERS = [
     { maxWeeks: 26, factor: 1.119, label: '≤6 months' },
@@ -482,6 +490,223 @@ export default function PricingTab({ a, positions, excludedIds, otherExcludedIds
   const lockedCount = funderTiers.filter(ft => ft.isLocked).length;
   const unlockedCount = funderTiers.filter(ft => !ft.isLocked).length;
   const remainingTAD = Math.max(0, tad - totalLocked);
+
+  // ═══════════════════════════════════════════════════════════════
+  // SUPABASE SAVE / LOAD HANDLERS
+  // ═══════════════════════════════════════════════════════════════
+
+  const buildDealPayload = useCallback(() => {
+    const positionRows = effectivePositions.map((dp, idx) => ({
+      funder_name: dp.funder_name,
+      funder_legal_name: dp._agMatch?.analysis?.funder_legal_name || dp.funder_name,
+      account_number: dp._agMatch?.analysis?.account_number || dp.account_number || '',
+      agreement_date: dp._agMatch?.analysis?.agreement_date || dp.agreement_date || null,
+      position_order: idx + 1,
+      purchase_price: parseFloat(dp._agMatch?.analysis?.financial_terms?.purchase_price) || 0,
+      purchased_amount: parseFloat(dp._agMatch?.analysis?.financial_terms?.purchased_amount) || 0,
+      factor_rate: parseFloat(dp._agMatch?.analysis?.financial_terms?.factor_rate) || parseFloat(dp.factor_rate) || 0,
+      specified_percentage: parseFloat(dp._agMatch?.analysis?.financial_terms?.specified_receivable_percentage) || parseFloat(dp.specified_percentage) || 0,
+      origination_fee: parseFloat(dp._agMatch?.analysis?.financial_terms?.origination_fee) || 0,
+      prior_balance_payoff: parseFloat(dp._agMatch?.analysis?.financial_terms?.prior_balance_payoff) || 0,
+      net_funding: parseFloat(dp._agMatch?.analysis?.financial_terms?.net_funding) || 0,
+      current_weekly_payment: dp._totalWeekly,
+      payment_frequency: dp.frequency || 'weekly',
+      daily_payment: dp.frequency === 'daily' ? dp.payment_amount : (dp._totalWeekly / 5),
+      estimated_balance: dp._balance,
+      funder_claimed_balance: parseFloat(dp.funder_claimed_balance) || 0,
+      ach_descriptor: dp.ach_descriptor || dp._agMatch?.analysis?.ach_descriptor || '',
+      status: 'active',
+      source: 'analyzer',
+      notes: dp.notes || '',
+    }));
+
+    return {
+      merchant_name: a.business_name || biz,
+      merchant_dba: a.business_name || biz,
+      merchant_ein: a.ein || '',
+      merchant_state: a.state || '',
+      merchant_industry: a.industry || '',
+      merchant_contact_name: a.owner_name || '',
+      merchant_contact_email: a.owner_email || '',
+      merchant_contact_phone: a.owner_phone || '',
+      iso_name: '',
+      iso_contact: '',
+      iso_commission_points: isoPoints,
+      monthly_revenue: revenue,
+      monthly_cogs: cogs,
+      gross_profit: grossProfit,
+      avg_daily_balance: adb,
+      notes: `Saved from Analyzer — ${fileName || 'analysis'}`,
+      positions: positionRows,
+    };
+  }, [effectivePositions, a, biz, isoPoints, revenue, cogs, grossProfit, adb, fileName]);
+
+  const buildPricingSnapshot = useCallback(() => ({
+    iso_points: isoPoints,
+    ff_factor_override: ffFactorOverride,
+    ff_fee_override: ffFeeOverride,
+    enforcement_weighting: enforcementWeighting,
+    selected_tier_idx: selectedTierIdx,
+    negotiation_buffer: negotiationBuffer,
+    tail_weeks: tailWeeks,
+    locked_positions: lockedPositions,
+    position_overrides: positionOverrides,
+    score_overrides: scoreOverrides,
+    // Computed outputs
+    total_balance: totalBalance,
+    total_current_weekly: totalCurrentWeekly,
+    merchant_weekly: merchantWeeklyAtFinal,
+    tad_final: tadFinal,
+    agreement_term: maxTerm,
+    max_funder_term: maxFunderTerm,
+    effective_ff_rate: effectiveFFRate,
+    commission_rate: commissionRate,
+    commission_total: commissionTotal,
+    ff_fee_total: ffFeeTotal,
+    enrollment_fee: enrollmentFee,
+    proposed_dsr: proposedDSR,
+    reduction_pct: reductionPct_display,
+    funder_tiers: funderTiers.map(ft => ({
+      name: ft.name,
+      balance: ft.balance,
+      share_pct: ft.sharePct,
+      adjusted_share: ft.adjustedShare,
+      tiers: ft.tiers.map(t => ({ label: t.label, pct: t.pct, payment: t.payment, term_weeks: t.termWeeks })),
+      is_locked: ft.isLocked,
+      locked_payment: ft.lockedPayment,
+    })),
+  }), [isoPoints, ffFactorOverride, ffFeeOverride, enforcementWeighting, selectedTierIdx,
+    negotiationBuffer, tailWeeks, lockedPositions, positionOverrides, scoreOverrides,
+    totalBalance, totalCurrentWeekly, merchantWeeklyAtFinal, tadFinal, maxTerm, maxFunderTerm,
+    effectiveFFRate, commissionRate, commissionTotal, ffFeeTotal, enrollmentFee, proposedDSR,
+    reductionPct_display, funderTiers]);
+
+  const handleSaveDeal = useCallback(async (alsoPrice = false) => {
+    setSaveStatus('saving');
+    setSaveError(null);
+    try {
+      let dealId = savedDealId;
+
+      if (!dealId) {
+        // Create new deal
+        const payload = buildDealPayload();
+        const res = await fetch('/api/deals', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload),
+        });
+        if (!res.ok) {
+          const err = await res.json();
+          throw new Error(err.error || 'Failed to create deal');
+        }
+        const deal = await res.json();
+        dealId = deal.id;
+        setSavedDealId(dealId);
+      } else {
+        // Update existing deal
+        const payload = buildDealPayload();
+        const { positions: posRows, ...dealFields } = payload;
+        dealFields.updated_at = new Date().toISOString();
+        const res = await fetch(`/api/deals/${dealId}`, {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(dealFields),
+        });
+        if (!res.ok) {
+          const err = await res.json();
+          throw new Error(err.error || 'Failed to update deal');
+        }
+      }
+
+      // Save analyzer session data + pricing snapshot
+      const sessionData = {
+        analysis: a,
+        pricing_snapshot: buildPricingSnapshot(),
+        saved_at: new Date().toISOString(),
+        file_name: fileName,
+      };
+      await fetch(`/api/deals/${dealId}/save-analysis`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ analyzer_session_data: sessionData }),
+      });
+
+      // Optionally run server-side pricing
+      if (alsoPrice) {
+        const priceRes = await fetch(`/api/deals/${dealId}/price`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            iso_commission_points: isoPoints,
+            use_enforceability_weighting: enforcementWeighting,
+          }),
+        });
+        if (!priceRes.ok) {
+          const err = await priceRes.json();
+          throw new Error(err.error || 'Pricing failed');
+        }
+      }
+
+      setSaveStatus('saved');
+      setTimeout(() => setSaveStatus(null), 3000);
+    } catch (err) {
+      console.error('Save deal error:', err);
+      setSaveError(err.message);
+      setSaveStatus('error');
+      setTimeout(() => setSaveStatus(null), 5000);
+    }
+  }, [savedDealId, buildDealPayload, buildPricingSnapshot, a, fileName, isoPoints, enforcementWeighting]);
+
+  const handleLoadDealList = useCallback(async () => {
+    setShowLoadModal(true);
+    setLoadingDeals(true);
+    try {
+      const res = await fetch('/api/deals?status=');
+      if (!res.ok) throw new Error('Failed to fetch deals');
+      const deals = await res.json();
+      setDealList(Array.isArray(deals) ? deals : []);
+    } catch (err) {
+      console.error('Load deals error:', err);
+      setDealList([]);
+    } finally {
+      setLoadingDeals(false);
+    }
+  }, []);
+
+  const handleSelectDeal = useCallback(async (dealId) => {
+    setShowLoadModal(false);
+    setSaveStatus('saving');
+    try {
+      const res = await fetch(`/api/deals/${dealId}`);
+      if (!res.ok) throw new Error('Failed to load deal');
+      const deal = await res.json();
+      setSavedDealId(deal.id);
+
+      // Restore pricing state from analyzer_session_data if available
+      const session = deal.analyzer_session_data;
+      if (session?.pricing_snapshot) {
+        const snap = session.pricing_snapshot;
+        if (snap.iso_points != null) setIsoPoints(snap.iso_points);
+        if (snap.ff_factor_override != null) setFfFactorOverride(snap.ff_factor_override);
+        if (snap.ff_fee_override != null) setFfFeeOverride(snap.ff_fee_override);
+        if (snap.enforcement_weighting != null) setEnforcementWeighting(snap.enforcement_weighting);
+        if (snap.selected_tier_idx != null) setSelectedTierIdx(snap.selected_tier_idx);
+        if (snap.negotiation_buffer != null) setNegotiationBuffer(snap.negotiation_buffer);
+        if (snap.tail_weeks != null) setTailWeeks(snap.tail_weeks);
+        if (snap.locked_positions) setLockedPositions(snap.locked_positions);
+        if (snap.position_overrides) setPositionOverrides(snap.position_overrides);
+        if (snap.score_overrides) setScoreOverrides(snap.score_overrides);
+      }
+
+      setSaveStatus('saved');
+      setTimeout(() => setSaveStatus(null), 3000);
+    } catch (err) {
+      console.error('Load deal error:', err);
+      setSaveError(err.message);
+      setSaveStatus('error');
+      setTimeout(() => setSaveStatus(null), 5000);
+    }
+  }, []);
 
   // ═══════════════════════════════════════════════════════════════
   // EXPORT FUNCTIONS (merged from ExportTab)
@@ -1500,20 +1725,76 @@ body{font-family:'Outfit',sans-serif;background:#e8e8e8;color:var(--ff-text);lin
 
       {/* ═══════════════ DEAL ACTIONS BAR ═══════════════ */}
       <div style={S.divider} />
-      <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap' }}>
-        <button style={{ padding: '10px 22px', borderRadius: 8, border: 'none', cursor: 'pointer', fontSize: 13, fontWeight: 600, fontFamily: 'inherit', background: 'linear-gradient(135deg, #00acc1, #00e5ff)', color: '#0a0a0f', letterSpacing: 0.5 }}>
-          Save Deal
+      <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap', alignItems: 'center' }}>
+        <button
+          onClick={() => handleSaveDeal(false)}
+          disabled={saveStatus === 'saving'}
+          style={{ padding: '10px 22px', borderRadius: 8, border: 'none', cursor: saveStatus === 'saving' ? 'wait' : 'pointer', fontSize: 13, fontWeight: 600, fontFamily: 'inherit', background: 'linear-gradient(135deg, #00acc1, #00e5ff)', color: '#0a0a0f', letterSpacing: 0.5, opacity: saveStatus === 'saving' ? 0.6 : 1 }}>
+          {saveStatus === 'saving' ? 'Saving...' : savedDealId ? 'Update Deal' : 'Save Deal'}
         </button>
-        <button style={{ padding: '10px 22px', borderRadius: 8, border: 'none', cursor: 'pointer', fontSize: 13, fontWeight: 600, fontFamily: 'inherit', background: 'linear-gradient(135deg, #CFA529, #EAD068)', color: '#0a0a0f', letterSpacing: 0.5 }}>
-          Save &amp; Price
+        <button
+          onClick={() => handleSaveDeal(true)}
+          disabled={saveStatus === 'saving'}
+          style={{ padding: '10px 22px', borderRadius: 8, border: 'none', cursor: saveStatus === 'saving' ? 'wait' : 'pointer', fontSize: 13, fontWeight: 600, fontFamily: 'inherit', background: 'linear-gradient(135deg, #CFA529, #EAD068)', color: '#0a0a0f', letterSpacing: 0.5, opacity: saveStatus === 'saving' ? 0.6 : 1 }}>
+          {saveStatus === 'saving' ? 'Saving...' : 'Save & Price'}
         </button>
-        <button style={{ padding: '10px 22px', borderRadius: 8, border: '1px solid rgba(255,255,255,0.15)', cursor: 'pointer', fontSize: 13, fontFamily: 'inherit', background: 'rgba(255,255,255,0.08)', color: '#e8e8f0', letterSpacing: 0.5 }}>
+        <button
+          onClick={handleLoadDealList}
+          style={{ padding: '10px 22px', borderRadius: 8, border: '1px solid rgba(255,255,255,0.15)', cursor: 'pointer', fontSize: 13, fontFamily: 'inherit', background: 'rgba(255,255,255,0.08)', color: '#e8e8f0', letterSpacing: 0.5 }}>
           Load Deal
         </button>
-        <button style={{ padding: '10px 22px', borderRadius: 8, border: '1px solid rgba(255,255,255,0.15)', cursor: 'pointer', fontSize: 13, fontFamily: 'inherit', background: 'rgba(255,255,255,0.08)', color: '#e8e8f0', letterSpacing: 0.5 }}>
-          Import from Analysis
-        </button>
+        {savedDealId && (
+          <span style={{ fontSize: 11, color: 'rgba(0,229,255,0.6)', fontFamily: 'monospace' }}>
+            ID: {savedDealId.slice(0, 8)}…
+          </span>
+        )}
+        {saveStatus === 'saved' && (
+          <span style={{ fontSize: 12, color: '#4caf50', fontWeight: 600 }}>✓ Saved</span>
+        )}
+        {saveStatus === 'error' && (
+          <span style={{ fontSize: 12, color: '#ef5350', fontWeight: 500 }}>✗ {saveError || 'Error'}</span>
+        )}
       </div>
+
+      {/* ═══════════════ LOAD DEAL MODAL ═══════════════ */}
+      {showLoadModal && (
+        <div style={{ position: 'fixed', top: 0, left: 0, right: 0, bottom: 0, background: 'rgba(0,0,0,0.7)', zIndex: 9999, display: 'flex', alignItems: 'center', justifyContent: 'center' }} onClick={() => setShowLoadModal(false)}>
+          <div style={{ background: '#12121a', border: '1px solid rgba(255,255,255,0.12)', borderRadius: 16, padding: 24, width: '90%', maxWidth: 600, maxHeight: '70vh', overflow: 'auto' }} onClick={e => e.stopPropagation()}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 }}>
+              <div style={{ fontSize: 16, fontWeight: 700, color: '#e8e8f0' }}>Load Saved Deal</div>
+              <button onClick={() => setShowLoadModal(false)} style={{ background: 'none', border: 'none', color: 'rgba(232,232,240,0.5)', cursor: 'pointer', fontSize: 18 }}>✕</button>
+            </div>
+            {loadingDeals ? (
+              <div style={{ textAlign: 'center', padding: 40, color: 'rgba(232,232,240,0.4)' }}>Loading deals…</div>
+            ) : dealList.length === 0 ? (
+              <div style={{ textAlign: 'center', padding: 40, color: 'rgba(232,232,240,0.4)' }}>No saved deals found.</div>
+            ) : (
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+                {dealList.map(d => (
+                  <button key={d.id} onClick={() => handleSelectDeal(d.id)} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '12px 16px', background: 'rgba(255,255,255,0.04)', border: '1px solid rgba(255,255,255,0.08)', borderRadius: 10, cursor: 'pointer', textAlign: 'left', fontFamily: 'inherit', transition: 'background 0.15s' }}
+                    onMouseEnter={e => e.currentTarget.style.background = 'rgba(0,229,255,0.08)'}
+                    onMouseLeave={e => e.currentTarget.style.background = 'rgba(255,255,255,0.04)'}>
+                    <div>
+                      <div style={{ fontSize: 14, fontWeight: 600, color: '#e8e8f0' }}>{d.merchant_name || d.merchant_dba || 'Unnamed'}</div>
+                      <div style={{ fontSize: 11, color: 'rgba(232,232,240,0.4)', marginTop: 2 }}>
+                        {d.position_count || 0} positions · {fmt(d.total_balance || 0)} · {d.status}
+                      </div>
+                    </div>
+                    <div style={{ textAlign: 'right' }}>
+                      <div style={{ fontSize: 12, color: d.merchant_weekly_payment ? '#00e5ff' : 'rgba(232,232,240,0.3)' }}>
+                        {d.merchant_weekly_payment ? `${fmt(d.merchant_weekly_payment)}/wk` : 'Not priced'}
+                      </div>
+                      <div style={{ fontSize: 10, color: 'rgba(232,232,240,0.3)', marginTop: 2 }}>
+                        {d.updated_at ? new Date(d.updated_at).toLocaleDateString() : ''}
+                      </div>
+                    </div>
+                  </button>
+                ))}
+              </div>
+            )}
+          </div>
+        </div>
+      )}
 
       {/* ═══════════════ FUNDER NEGOTIATION EMAILS ═══════════════ */}
       <div style={S.divider} />
