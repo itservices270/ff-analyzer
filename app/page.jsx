@@ -1825,53 +1825,21 @@ function NegotiationTab({ a, positions, excludedIds, otherExcludedIds, depositOv
           </div>
         );
 
-        // Deduplicate enrolled positions
-        const dedupEnrolled = [];
-        const seenKeys = new Set();
-        enrolledActive.forEach(p => {
-          const key = normalizeFunderKey(p.funder_name);
-          const matchKey = key.length >= 6 ? key : (p.funder_name || '').toLowerCase().split(/\s+/)[0];
-          let found = false;
-          for (const dp of dedupEnrolled) {
-            const dpKey = normalizeFunderKey(dp.funder_name);
-            if (matchKey.length >= 6 && dpKey.length >= 6 && (matchKey.includes(dpKey.slice(0, 6)) || dpKey.includes(matchKey.slice(0, 6)))) {
-              const advWeekly = toWeeklyEquiv(p.payment_amount_current || p.payment_amount || 0, p.frequency);
-              const advAgMatch = matchAgreementToPosition(p.funder_name, agreementResults);
-              const advBalance = advAgMatch?.analysis?.financial_terms?.purchased_amount
-                ? Math.round(advAgMatch.analysis.financial_terms.purchased_amount)
-                : Math.round(advWeekly * 52);
-              dp._totalWeekly += advWeekly;
-              dp._balance += advBalance;
-              dp._advCount++;
-              dp._advances.push({
-                label: p.funder_name,
-                balance: advBalance,
-                weekly: advWeekly,
-                agreementDate: advAgMatch?.analysis?.effective_date || advAgMatch?.analysis?.funding_date || null,
-              });
-              found = true;
-              break;
-            }
-          }
-          if (!found) {
-            const agMatch = matchAgreementToPosition(p.funder_name, agreementResults);
-            const agBalance = agMatch?.analysis?.financial_terms?.purchased_amount;
-            const weekly = toWeeklyEquiv(p.payment_amount_current || p.payment_amount || 0, p.frequency);
-            const bal = agBalance ? Math.round(agBalance) : Math.round(weekly * 52);
-            dedupEnrolled.push({
-              ...p,
-              funder_name: p.funder_name.replace(/\s*\(Advance\s*\d+\)/i, '').replace(/\s*\(Position\s*[A-Z]\)/i, '').trim(),
-              _totalWeekly: weekly,
-              _advCount: 1,
-              _balance: bal,
-              _advances: [{
-                label: p.funder_name,
-                balance: bal,
-                weekly: weekly,
-                agreementDate: agMatch?.analysis?.effective_date || agMatch?.analysis?.funding_date || null,
-              }],
-            });
-          }
+        // Each position stays separate — no merging (matches PricingTab)
+        const dedupEnrolled = enrolledActive.map(p => {
+          const agMatch = matchAgreementToPosition(p.funder_name, agreementResults);
+          const weekly = toWeeklyEquiv(p.payment_amount_current || p.payment_amount || 0, p.frequency);
+          const bal = p.estimated_balance
+            || (agMatch?.analysis?.financial_terms?.purchased_amount
+              ? Math.round(agMatch.analysis.financial_terms.purchased_amount)
+              : Math.round(weekly * 52));
+          return {
+            ...p,
+            _totalWeekly: weekly,
+            _advCount: 1,
+            _balance: bal,
+            _advances: [{ label: p.funder_name, balance: bal, weekly }],
+          };
         });
 
         const totalBalance = dedupEnrolled.reduce((s, dp) => s + dp._balance, 0);
@@ -1881,12 +1849,12 @@ function NegotiationTab({ a, positions, excludedIds, otherExcludedIds, depositOv
         const sustainableWeekly = Math.round(totalWeeklyBurden * 0.4);
         const tad = sustainableWeekly;
 
-        // Per-funder tiers using proportional allocation
+        // Per-funder tiers using proportional allocation (4 tiers matching PricingTab)
         const fTiers = dedupEnrolled.map(dp => {
           const alloc = totalBalance > 0 ? tad * (dp._balance / totalBalance) : 0;
           const origWeekly = dp._totalWeekly;
           const origTerm = origWeekly > 0 ? Math.round(dp._balance / origWeekly) : 52;
-          const tiers = [0.5, 0.75, 1.0].map(pct => {
+          const tiers = [0.80, 0.90, 0.95, 1.00].map(pct => {
             const wkPmt = alloc * pct;
             const term = wkPmt > 0 ? Math.ceil(dp._balance / wkPmt) : 9999;
             return {
@@ -1894,6 +1862,7 @@ function NegotiationTab({ a, positions, excludedIds, otherExcludedIds, depositOv
               reductionPct: origWeekly > 0 ? ((origWeekly - wkPmt) / origWeekly) * 100 : 0,
               reductionDollars: origWeekly - wkPmt,
               extensionPct: origTerm > 0 ? ((term / origTerm) - 1) * 100 : 0,
+              totalRepayment: dp._balance,
             };
           });
           return { name: dp.funder_name, balance: dp._balance, originalWeekly: origWeekly, allocation: alloc, origTerm, tiers, _advCount: dp._advCount };
@@ -2268,8 +2237,8 @@ function NegotiationEmailEngine({ fTiers, revenue, a, totalWeeklyBurden, enrolle
   const [negFunderId, setNegFunderId] = useState(null);
   const [copiedEmail, setCopiedEmail] = useState(null);
 
-  const negTierColors = ['#00bcd4', '#f59e0b', '#ef5350'];
-  const negTierLabels = ['Opening (80%)', 'Revised (90%)', 'Final (100%)'];
+  const negTierColors = ['#00bcd4', '#7c3aed', '#f59e0b', '#22c55e'];
+  const negTierLabels = ['Opening (80%)', 'Middle 1 (90%)', 'Middle 2 (95%)', 'Final (100%)'];
 
   const biz = a.business_name || 'Business';
   const withholdPct = revenue > 0 ? ((totalWeeklyBurden * 4.33 / revenue) * 100).toFixed(1) : '0';
@@ -2335,7 +2304,7 @@ function NegotiationEmailEngine({ fTiers, revenue, a, totalWeeklyBurden, enrolle
           <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 12 }}>
             <thead>
               <tr style={{ borderBottom: '1px solid rgba(255,255,255,0.1)' }}>
-                {['Funder', 'Balance', 'Current Pmt', 'Orig Remaining', '80% Term', '90% Term', '100% Term'].map(h => (
+                {['Funder', 'Balance', 'Current Pmt', 'Orig Term', '80%', '90%', '95%', '100%'].map(h => (
                   <th key={h} style={{ padding: '6px 8px', textAlign: h === 'Funder' ? 'left' : 'right', fontSize: 10, color: 'rgba(232,232,240,0.4)', fontWeight: 600, textTransform: 'uppercase', letterSpacing: 0.5 }}>{h}</th>
                 ))}
               </tr>
@@ -2343,13 +2312,13 @@ function NegotiationEmailEngine({ fTiers, revenue, a, totalWeeklyBurden, enrolle
             <tbody>
               {fTiers.map((ft, i) => (
                 <tr key={i} style={{ borderBottom: '1px solid rgba(255,255,255,0.04)' }}>
-                  <td style={{ padding: '8px 8px', color: '#e8e8f0', fontWeight: 600 }}>{ft.name}{ft._advCount > 1 ? ` (${ft._advCount} advances)` : ''}</td>
+                  <td style={{ padding: '8px 8px', color: '#e8e8f0', fontWeight: 600 }}>{ft.name}</td>
                   <td style={{ padding: '8px 8px', color: '#ef9a9a', textAlign: 'right' }}>{fmt(ft.balance)}</td>
                   <td style={{ padding: '8px 8px', color: 'rgba(232,232,240,0.5)', textAlign: 'right' }}>{fmt(ft.originalWeekly)}/wk</td>
-                  <td style={{ padding: '8px 8px', color: 'rgba(232,232,240,0.4)', textAlign: 'right' }}>{ft.originalTermWeeks} wks</td>
-                  <td style={{ padding: '8px 8px', color: negTierColors[0], textAlign: 'right' }}>{ft.tiers[0].proposedTermWeeks} wks</td>
-                  <td style={{ padding: '8px 8px', color: negTierColors[1], textAlign: 'right' }}>{ft.tiers[1].proposedTermWeeks} wks</td>
-                  <td style={{ padding: '8px 8px', color: negTierColors[2], textAlign: 'right', fontWeight: 700 }}>{ft.tiers[2].proposedTermWeeks} wks</td>
+                  <td style={{ padding: '8px 8px', color: 'rgba(232,232,240,0.4)', textAlign: 'right' }}>{ft.origTerm} wks</td>
+                  {[0, 1, 2, 3].map(ti => (
+                    <td key={ti} style={{ padding: '8px 8px', color: negTierColors[ti], textAlign: 'right', fontWeight: ti === 3 ? 700 : 400 }}>{ft.tiers[ti]?.proposedTermWeeks || '—'} wks</td>
+                  ))}
                 </tr>
               ))}
             </tbody>
@@ -2389,10 +2358,11 @@ function NegotiationEmailEngine({ fTiers, revenue, a, totalWeeklyBurden, enrolle
                 <div>Total Repayment (all tiers): <strong style={{ color: '#4caf50' }}>{fmt(selFt.balance)}</strong> (100%)</div>
               </div>
 
-              {/* 3 email preview cards */}
-              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))', gap: 12, marginBottom: 16 }}>
-                {[0, 1, 2].map(ti => {
+              {/* 4 email preview cards */}
+              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 12, marginBottom: 16 }}>
+                {[0, 1, 2, 3].map(ti => {
                   const t = selFt.tiers[ti];
+                  if (!t) return null;
                   return (
                     <div key={ti} style={{ background: `${negTierColors[ti]}08`, border: `1px solid ${negTierColors[ti]}44`, borderRadius: 10, padding: 14 }}>
                       <div style={{ fontSize: 12, fontWeight: 700, color: negTierColors[ti], marginBottom: 8 }}>{negTierLabels[ti]}</div>
