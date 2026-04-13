@@ -3606,15 +3606,17 @@ function ExportTab({ a, fileName, positions, excludedIds, otherExcludedIds, depo
       return { ...fd, name: fd.name, balance: fd.balance, originalWeekly: fd.actualWeekly, effectiveWeekly: fd.effectiveWeekly, contractWeekly: fd.contractWeekly, originalTermWeeks: origTermWeeks, share, tiers };
     });
 
-    let longestTerm = 0;
-    fTiers.forEach(ft => {
-      const finalAlloc = ft.tiers?.[ft.tiers.length - 1]?.weeklyPayment || 0;
-      if (finalAlloc > 0) {
-        const funderTerm = Math.ceil(ft.balance / finalAlloc);
-        if (funderTerm > longestTerm) longestTerm = funderTerm;
+    // Derive maxFunderTerm from proportional allocation (stable regardless of weighting)
+    let longestTermProportional = 0;
+    funderData.forEach(fd => {
+      const proportionalShare = totalEffectiveWeekly > 0 ? fd.effectiveWeekly / totalEffectiveWeekly : 0;
+      const proportionalAlloc = tadEst * proportionalShare;
+      if (proportionalAlloc > 0) {
+        const funderTerm = Math.ceil(fd.balance / proportionalAlloc);
+        if (funderTerm > longestTermProportional) longestTermProportional = funderTerm;
       }
     });
-    const maxFunderTerm = longestTerm || prelimTermEst;
+    const maxFunderTerm = longestTermProportional || prelimTermEst;
     const agreementTerm = negotiationBuffer + maxFunderTerm + tailWeeks;
     const isoCommWeekly = agreementTerm > 0 ? commissionTotal / agreementTerm : 0;
     const ffFeeWeekly = agreementTerm > 0 ? ffFeeTotal / agreementTerm : 0;

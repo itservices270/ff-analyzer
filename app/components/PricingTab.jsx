@@ -386,20 +386,19 @@ export default function PricingTab({ a, positions, excludedIds, otherExcludedIds
       { enforcementWeighting, scoreMap }
     );
 
-    // Pass 2: derive maxTerm (longest funder term) and shortestTerm from tier allocations
-    let longestTerm = 0;
-    let shortestTerm = Infinity;
-    rawTiers.forEach(ft => {
-      // Funder term = balance / final tier allocation
-      const finalAlloc = ft.tiers?.[ft.tiers.length - 1]?.weeklyPayment || 0;
-      if (finalAlloc > 0) {
-        const funderTerm = Math.ceil(ft._balance / finalAlloc);
-        if (funderTerm > longestTerm) longestTerm = funderTerm;
-        if (funderTerm < shortestTerm) shortestTerm = funderTerm;
+    // Pass 2: derive maxFunderTerm from PROPORTIONAL allocation (not EW-weighted)
+    // This ensures agreement term never changes when EW is toggled — EW only affects per-funder splits
+    const totalEffectiveWeekly = preparedPositions.reduce((s, p) => s + (p._effectiveWeekly || p._totalWeekly), 0);
+    let longestTermProportional = 0;
+    preparedPositions.forEach(p => {
+      const proportionalShare = totalEffectiveWeekly > 0 ? (p._effectiveWeekly || p._totalWeekly) / totalEffectiveWeekly : 0;
+      const proportionalAlloc = tadEst * proportionalShare;
+      if (proportionalAlloc > 0) {
+        const funderTerm = Math.ceil(p._balance / proportionalAlloc);
+        if (funderTerm > longestTermProportional) longestTermProportional = funderTerm;
       }
     });
-    if (shortestTerm === Infinity) shortestTerm = 0;
-    const maxFunderTerm = longestTerm || actualTerm;
+    const maxFunderTerm = longestTermProportional || actualTerm;
     const agreementTerm = negotiationBuffer + maxFunderTerm + tailWeeks;
 
     // Weekly splits: both ISO and FF fee spread evenly over full agreement term

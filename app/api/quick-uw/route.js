@@ -50,6 +50,7 @@ For each statement month:
 
 Classification guidance for large deposits:
 - EXCLUDE (is_revenue: false): Round-number wires ($50K, $100K, $200K), credits containing "WIRE" + "ADVANCE"/"FUNDING"/"CAPITAL"/"LOAN"/"PROCEEDS"/"GRP", credits matching known MCA funder descriptors, NSF return credits, internal transfers, "AMF TEAM"/"AMFTEAM" (staffing, not revenue)
+- CHECK DEPOSITS: Physical checks ("CHECK" + number) over $25K → is_revenue: false (likely owner capital, insurance, transfers). CHECK $5K-$25K → flag for review, lean toward excluding. Multiple large CHECKs ($50K+) in one month → exclude (capital infusions). Round-number CHECKs ($10K/$25K/$50K/$100K exactly) → exclude (capital transfer). Bare "DEPOSIT" with no descriptor → lean toward excluding if over $10K. When in doubt about CHECK/DEPOSIT items, err on EXCLUDING — better for user to manually include than overstate revenue.
 - INCLUDE (is_revenue: true): Card processing (Square, Clover, Stripe, PayPal), "THREE SQUARE"/"LE-USA TECHNOL"/"Cantaloupe"/"CANTALOUPE PAYOUTS" (vending processors), cash deposits/route collections, customer payments/invoices, vendor rebates, ACH credits NOT matching any known funder descriptor
 
 ## TASK 2: MCA POSITIONS

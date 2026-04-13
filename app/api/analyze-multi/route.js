@@ -186,6 +186,16 @@ When excluding, set:
 • include: false
 • note: explain why excluded (e.g., "One-time $150K wire from credit union — loan proceeds")
 
+CHECK DEPOSIT CLASSIFICATION RULES:
+• Physical check deposits (descriptors starting with "CHECK" followed by a number, or "DEPOSIT" with no merchant/payer name) require EXTRA SCRUTINY for revenue classification.
+• CHECK deposits over $25,000: Default confidence to 50 or below. These are likely owner capital contributions, insurance proceeds, equipment sales, or inter-account transfers — NOT recurring operating revenue. Set is_excluded: true unless there is a clear pattern of similar-sized checks at regular intervals that clearly represent customer payments.
+• CHECK deposits between $5,000 and $25,000: Default confidence to 65. May be legitimate revenue (large customer payments, route collections) but flag for review.
+• CHECK deposits under $5,000: Can be classified normally (likely customer payments or petty cash deposits).
+• Multiple large CHECK deposits ($50K+) in a single month are almost certainly NOT revenue — they suggest capital infusions, loan proceeds, or asset sales. Exclude them.
+• Round-number CHECK deposits ($10,000, $25,000, $50,000, $100,000 exactly) are strong indicators of capital transfers, not revenue. Default to excluded.
+• DEPOSIT entries with no descriptor or just "DEPOSIT" followed by a count: Default confidence to 60. These are often ATM/cash deposits and may or may not be revenue.
+IMPORTANT: When in doubt about CHECK or DEPOSIT items, err on the side of EXCLUDING them (is_excluded: true) with a lower confidence score. It is much better for the user to manually include a legitimate revenue item than to have inflated revenue numbers that make the merchant look healthier than they are. Overstating revenue directly harms the restructuring analysis.
+
 PROTECTED REVENUE ACH PATTERNS — ALWAYS COUNT AS REVENUE (never exclude):
 • "ROUTE" / "ROUTE COLLECTION" / "ROUTE PMT" → customer route collections, TRUE REVENUE
 • "CUSTOMER" / "CUST PMT" / "CUST PAYMENT" → customer payments, TRUE REVENUE
