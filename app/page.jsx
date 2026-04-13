@@ -139,6 +139,10 @@ function getTagColor(posture) {
   return map[posture] || 'grey';
 }
 
+function normalizeFunderKey(name) {
+  return (name || '').toLowerCase().replace(/[^a-z0-9]/g, '').replace(/advance\d*|position[a-z]?|pos[a-z]?|\(.*?\)/g, '').trim();
+}
+
 // ─── Agreement ↔ Position Matching & Payment Compliance ─────────────────────
 function matchAgreementToPosition(positionName, agreementResults) {
   if (!positionName || !agreementResults || agreementResults.length === 0) return null;
