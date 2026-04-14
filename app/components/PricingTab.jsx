@@ -158,11 +158,15 @@ export default function PricingTab({ a, positions, excludedIds, otherExcludedIds
 
   // ── Supabase Save/Load state ──
   const [savedDealId, setSavedDealId] = useState(null);
+  const [dealStatus, setDealStatus] = useState(null); // null | 'analysis' | 'priced' | 'approved' | 'enrolled'
   const [saveStatus, setSaveStatus] = useState(null); // null | 'saving' | 'saved' | 'error'
   const [saveError, setSaveError] = useState(null);
   const [showLoadModal, setShowLoadModal] = useState(false);
   const [dealList, setDealList] = useState([]);
   const [loadingDeals, setLoadingDeals] = useState(false);
+  const [showApproveConfirm, setShowApproveConfirm] = useState(false);
+
+  const isApproved = dealStatus === 'approved' || dealStatus === 'enrolled';
 
   // ── FF Factor term-based tiers ──
   const FF_FACTOR_TIERS = [
@@ -681,6 +685,7 @@ export default function PricingTab({ a, positions, excludedIds, otherExcludedIds
       if (!res.ok) throw new Error('Failed to load deal');
       const deal = await res.json();
       setSavedDealId(deal.id);
+      setDealStatus(deal.status || null);
 
       // Restore pricing state from analyzer_session_data if available
       const session = deal.analyzer_session_data;
@@ -707,6 +712,95 @@ export default function PricingTab({ a, positions, excludedIds, otherExcludedIds
       setTimeout(() => setSaveStatus(null), 5000);
     }
   }, []);
+
+  const handleApproveDeal = useCallback(async () => {
+    setShowApproveConfirm(false);
+    setSaveStatus('saving');
+    setSaveError(null);
+    try {
+      // Step 1: Save deal first (creates if needed)
+      let dealId = savedDealId;
+      if (!dealId) {
+        const payload = buildDealPayload();
+        const res = await fetch('/api/deals', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload),
+        });
+        if (!res.ok) throw new Error((await res.json()).error || 'Failed to create deal');
+        const deal = await res.json();
+        dealId = deal.id;
+        setSavedDealId(dealId);
+      }
+
+      // Step 2: Run server-side pricing to lock position-level numbers
+      const priceRes = await fetch(`/api/deals/${dealId}/price`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          iso_commission_points: isoPoints,
+          use_enforceability_weighting: enforcementWeighting,
+        }),
+      });
+      if (!priceRes.ok) throw new Error((await priceRes.json()).error || 'Pricing failed');
+
+      // Step 3: Save full analyzer session + pricing snapshot
+      const sessionData = {
+        analysis: a,
+        pricing_snapshot: buildPricingSnapshot(),
+        approved_at: new Date().toISOString(),
+        file_name: fileName,
+      };
+      await fetch(`/api/deals/${dealId}/save-analysis`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ analyzer_session_data: sessionData }),
+      });
+
+      // Step 4: Set status to approved + write locked pricing fields
+      const approvalPayload = {
+        status: 'approved',
+        merchant_weekly_payment: merchantWeeklyAtFinal,
+        max_funder_term_weeks: maxFunderTerm,
+        proposed_dsr: proposedDSR,
+        effective_factor_rate: effectiveFFRate,
+        iso_commission_points: isoPoints,
+        total_balance: totalBalance,
+        total_weekly_burden: totalCurrentWeekly,
+        tad_100: tadFinal,
+        approved_at: new Date().toISOString(),
+        approved_by: 'analyzer',
+        // Locked pricing fields — these won't change after approval
+        locked_merchant_weekly: merchantWeeklyAtFinal,
+        locked_agreement_term: maxTerm,
+        locked_ff_factor: effectiveFFRate,
+        locked_iso_points: isoPoints,
+        locked_commission_total: commissionTotal,
+        locked_ff_fee_total: ffFeeTotal,
+        locked_enrollment_fee: enrollmentFee,
+        locked_total_payback: totalPayback,
+      };
+
+      const approveRes = await fetch(`/api/deals/${dealId}`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(approvalPayload),
+      });
+      if (!approveRes.ok) throw new Error((await approveRes.json()).error || 'Approval failed');
+
+      setDealStatus('approved');
+      setSaveStatus('saved');
+      setTimeout(() => setSaveStatus(null), 5000);
+    } catch (err) {
+      console.error('Approve deal error:', err);
+      setSaveError(err.message);
+      setSaveStatus('error');
+      setTimeout(() => setSaveStatus(null), 5000);
+    }
+  }, [savedDealId, buildDealPayload, buildPricingSnapshot, a, fileName, isoPoints,
+    enforcementWeighting, merchantWeeklyAtFinal, maxFunderTerm, proposedDSR, effectiveFFRate,
+    totalBalance, totalCurrentWeekly, tadFinal, maxTerm, commissionTotal, ffFeeTotal,
+    enrollmentFee, totalPayback]);
 
   // ═══════════════════════════════════════════════════════════════
   // EXPORT FUNCTIONS (merged from ExportTab)
@@ -1723,19 +1817,46 @@ body{font-family:'Outfit',sans-serif;background:#e8e8e8;color:var(--ff-text);lin
         </table>
       </div>
 
+      {/* ═══════════════ APPROVED BANNER ═══════════════ */}
+      {isApproved && (
+        <div style={{
+          background: 'linear-gradient(135deg, rgba(207,165,41,0.12), rgba(234,208,104,0.08))',
+          border: '1px solid rgba(207,165,41,0.3)',
+          borderRadius: 12, padding: '14px 20px', marginBottom: 16,
+          display: 'flex', justifyContent: 'space-between', alignItems: 'center',
+        }}>
+          <div>
+            <div style={{ fontSize: 14, fontWeight: 700, color: '#EAD068', marginBottom: 2 }}>
+              ✓ Deal Approved {dealStatus === 'enrolled' ? '& Enrolled' : ''}
+            </div>
+            <div style={{ fontSize: 12, color: 'rgba(232,232,240,0.5)' }}>
+              Pricing is locked. {dealStatus === 'approved' ? 'Enroll this deal in the CRM to begin onboarding.' : 'Merchant onboarding is active.'}
+            </div>
+          </div>
+          <div style={{
+            padding: '6px 14px', borderRadius: 20, fontSize: 11, fontWeight: 700,
+            background: dealStatus === 'enrolled' ? 'rgba(0,172,193,0.15)' : 'rgba(207,165,41,0.15)',
+            color: dealStatus === 'enrolled' ? '#00e5ff' : '#EAD068',
+            textTransform: 'uppercase', letterSpacing: 0.5,
+          }}>
+            {dealStatus}
+          </div>
+        </div>
+      )}
+
       {/* ═══════════════ DEAL ACTIONS BAR ═══════════════ */}
       <div style={S.divider} />
       <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap', alignItems: 'center' }}>
         <button
           onClick={() => handleSaveDeal(false)}
-          disabled={saveStatus === 'saving'}
-          style={{ padding: '10px 22px', borderRadius: 8, border: 'none', cursor: saveStatus === 'saving' ? 'wait' : 'pointer', fontSize: 13, fontWeight: 600, fontFamily: 'inherit', background: 'linear-gradient(135deg, #00acc1, #00e5ff)', color: '#0a0a0f', letterSpacing: 0.5, opacity: saveStatus === 'saving' ? 0.6 : 1 }}>
+          disabled={saveStatus === 'saving' || isApproved}
+          style={{ padding: '10px 22px', borderRadius: 8, border: 'none', cursor: saveStatus === 'saving' || isApproved ? 'not-allowed' : 'pointer', fontSize: 13, fontWeight: 600, fontFamily: 'inherit', background: 'linear-gradient(135deg, #00acc1, #00e5ff)', color: '#0a0a0f', letterSpacing: 0.5, opacity: saveStatus === 'saving' || isApproved ? 0.4 : 1 }}>
           {saveStatus === 'saving' ? 'Saving...' : savedDealId ? 'Update Deal' : 'Save Deal'}
         </button>
         <button
           onClick={() => handleSaveDeal(true)}
-          disabled={saveStatus === 'saving'}
-          style={{ padding: '10px 22px', borderRadius: 8, border: 'none', cursor: saveStatus === 'saving' ? 'wait' : 'pointer', fontSize: 13, fontWeight: 600, fontFamily: 'inherit', background: 'linear-gradient(135deg, #CFA529, #EAD068)', color: '#0a0a0f', letterSpacing: 0.5, opacity: saveStatus === 'saving' ? 0.6 : 1 }}>
+          disabled={saveStatus === 'saving' || isApproved}
+          style={{ padding: '10px 22px', borderRadius: 8, border: 'none', cursor: saveStatus === 'saving' || isApproved ? 'not-allowed' : 'pointer', fontSize: 13, fontWeight: 600, fontFamily: 'inherit', background: 'linear-gradient(135deg, #CFA529, #EAD068)', color: '#0a0a0f', letterSpacing: 0.5, opacity: saveStatus === 'saving' || isApproved ? 0.4 : 1 }}>
           {saveStatus === 'saving' ? 'Saving...' : 'Save & Price'}
         </button>
         <button
@@ -1743,18 +1864,67 @@ body{font-family:'Outfit',sans-serif;background:#e8e8e8;color:var(--ff-text);lin
           style={{ padding: '10px 22px', borderRadius: 8, border: '1px solid rgba(255,255,255,0.15)', cursor: 'pointer', fontSize: 13, fontFamily: 'inherit', background: 'rgba(255,255,255,0.08)', color: '#e8e8f0', letterSpacing: 0.5 }}>
           Load Deal
         </button>
+        {/* ── Approve Button ── */}
+        {!isApproved && (
+          <button
+            onClick={() => setShowApproveConfirm(true)}
+            disabled={saveStatus === 'saving' || effectivePositions.length === 0}
+            style={{
+              padding: '10px 22px', borderRadius: 8, cursor: saveStatus === 'saving' || effectivePositions.length === 0 ? 'not-allowed' : 'pointer',
+              fontSize: 13, fontWeight: 700, fontFamily: 'inherit', letterSpacing: 0.5,
+              background: 'linear-gradient(135deg, rgba(207,165,41,0.15), rgba(234,208,104,0.1))',
+              border: '2px solid rgba(207,165,41,0.5)',
+              color: '#EAD068',
+              opacity: saveStatus === 'saving' || effectivePositions.length === 0 ? 0.4 : 1,
+            }}>
+            ✓ Approve Deal
+          </button>
+        )}
         {savedDealId && (
           <span style={{ fontSize: 11, color: 'rgba(0,229,255,0.6)', fontFamily: 'monospace' }}>
             ID: {savedDealId.slice(0, 8)}…
           </span>
         )}
         {saveStatus === 'saved' && (
-          <span style={{ fontSize: 12, color: '#4caf50', fontWeight: 600 }}>✓ Saved</span>
+          <span style={{ fontSize: 12, color: '#4caf50', fontWeight: 600 }}>✓ {isApproved ? 'Approved & Locked' : 'Saved'}</span>
         )}
         {saveStatus === 'error' && (
           <span style={{ fontSize: 12, color: '#ef5350', fontWeight: 500 }}>✗ {saveError || 'Error'}</span>
         )}
       </div>
+
+      {/* ═══════════════ APPROVE CONFIRMATION MODAL ═══════════════ */}
+      {showApproveConfirm && (
+        <div style={{ position: 'fixed', top: 0, left: 0, right: 0, bottom: 0, background: 'rgba(0,0,0,0.7)', zIndex: 9999, display: 'flex', alignItems: 'center', justifyContent: 'center' }} onClick={() => setShowApproveConfirm(false)}>
+          <div style={{ background: '#12121a', border: '1px solid rgba(207,165,41,0.3)', borderRadius: 16, padding: 28, width: '90%', maxWidth: 500 }} onClick={e => e.stopPropagation()}>
+            <div style={{ fontSize: 18, fontWeight: 700, color: '#EAD068', marginBottom: 16 }}>Approve Deal?</div>
+            <div style={{ fontSize: 13, color: 'rgba(232,232,240,0.7)', lineHeight: 1.7, marginBottom: 20 }}>
+              This will <strong style={{ color: '#e8e8f0' }}>lock all pricing values</strong> and set the deal status to <strong style={{ color: '#EAD068' }}>Approved</strong>.
+              After approval, the deal can be enrolled in the CRM to begin merchant onboarding.
+            </div>
+            <div style={{ background: 'rgba(0,0,0,0.3)', borderRadius: 10, padding: '14px 16px', marginBottom: 20 }}>
+              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8, fontSize: 12 }}>
+                <div><span style={{ color: 'rgba(232,232,240,0.4)' }}>Merchant:</span> <strong>{biz}</strong></div>
+                <div><span style={{ color: 'rgba(232,232,240,0.4)' }}>Positions:</span> <strong>{effectivePositions.length}</strong></div>
+                <div><span style={{ color: 'rgba(232,232,240,0.4)' }}>Total Debt:</span> <strong>{fmt(totalBalance)}</strong></div>
+                <div><span style={{ color: 'rgba(232,232,240,0.4)' }}>Weekly:</span> <strong style={{ color: '#00e5ff' }}>{fmt(merchantWeeklyAtFinal)}</strong></div>
+                <div><span style={{ color: 'rgba(232,232,240,0.4)' }}>Term:</span> <strong>{maxTerm} wks</strong></div>
+                <div><span style={{ color: 'rgba(232,232,240,0.4)' }}>ISO Pts:</span> <strong>{isoPoints}</strong></div>
+                <div><span style={{ color: 'rgba(232,232,240,0.4)' }}>FF Factor:</span> <strong>{(effectiveFFRate || 0).toFixed(3)}</strong></div>
+                <div><span style={{ color: 'rgba(232,232,240,0.4)' }}>DSR:</span> <strong>{proposedDSR.toFixed(1)}%</strong></div>
+              </div>
+            </div>
+            <div style={{ display: 'flex', gap: 12, justifyContent: 'flex-end' }}>
+              <button onClick={() => setShowApproveConfirm(false)} style={{ padding: '10px 22px', borderRadius: 8, border: '1px solid rgba(255,255,255,0.15)', background: 'rgba(255,255,255,0.06)', color: '#e8e8f0', cursor: 'pointer', fontSize: 13, fontFamily: 'inherit' }}>
+                Cancel
+              </button>
+              <button onClick={handleApproveDeal} style={{ padding: '10px 28px', borderRadius: 8, border: 'none', background: 'linear-gradient(135deg, #CFA529, #EAD068)', color: '#0a0a0f', cursor: 'pointer', fontSize: 13, fontWeight: 700, fontFamily: 'inherit', letterSpacing: 0.5 }}>
+                Approve & Lock
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* ═══════════════ LOAD DEAL MODAL ═══════════════ */}
       {showLoadModal && (
