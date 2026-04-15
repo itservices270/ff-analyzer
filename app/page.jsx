@@ -3,6 +3,7 @@ import React, { useState, useEffect, useCallback, useRef, useMemo } from 'react'
 import { INDUSTRY_PROFILES, buildIndustryPromptBlock } from './data/industry-profiles';
 import NegotiationChat from './components/NegotiationChat';
 import PricingTab from './components/PricingTab';
+import DealQueue from './components/DealQueue';
 import { scoreAllPositions, detectSameDayStack, calculateAdjustedTAD } from '../lib/scoringEngine';
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
@@ -3649,6 +3650,9 @@ export default function FFAnalyzer() {
   const [enrolledPositions, setEnrolledPositions] = useState(null); // null = all enrolled (default)
   const [selectedIndustry, setSelectedIndustry] = useState('general');
   const [chatOpen, setChatOpen] = useState(false);
+  // Deal Queue — the deal currently loaded from the queue (null = standalone mode)
+  const [activeDeal, setActiveDeal] = useState(null);
+  const [dealQueueError, setDealQueueError] = useState(null);
   const inputRef = useRef(null);
 
   const TABS = ['📊 Revenue', '📈 Trend', '🏦 MCA Positions', '⚠️ Risk', '📋 Agreements', '🔄 Cross-Ref', '🤝 Negotiation', '💰 Pricing', '📇 Funder Intel', '🎯 Confidence'];
@@ -4061,6 +4065,187 @@ export default function FFAnalyzer() {
     return data;
   }
 
+  // ─── Deal Queue ──────────────────────────────────────────────────────────────
+  // Load a deal from the queue: pre-populate positions, set active deal,
+  // and flip status in_submissions → in_underwriting so it disappears
+  // from other UWs' queues.
+  const handleSelectDeal = useCallback(async (queueDeal) => {
+    setDealQueueError(null);
+    try {
+      // Fetch full deal record (joined positions + all columns)
+      const res = await fetch(`/api/deals/${queueDeal.id}`);
+      if (!res.ok) throw new Error(`Failed to load deal (${res.status})`);
+      const deal = await res.json();
+
+      const dealPositions = Array.isArray(deal.positions) ? deal.positions : [];
+
+      // Map DB positions into the shape the MCA Positions tab expects.
+      // Mark them isManual so a subsequent reanalyze() preserves them
+      // alongside the analyzer-detected positions.
+      const preloaded = dealPositions.map((p, i) => {
+        const weekly = parseFloat(p.current_weekly_payment) || 0;
+        return {
+          _id: i,
+          _db_position_id: p.id,
+          funder_name: p.funder_name || '',
+          payment_amount_current: weekly,
+          payment_amount: weekly,
+          frequency: p.payment_frequency || 'weekly',
+          estimated_balance: parseFloat(p.estimated_balance) || 0,
+          estimated_monthly_total: weekly * 4.33,
+          isManual: true,
+          _source: 'deal_queue',
+        };
+      });
+
+      setActiveDeal({
+        id: deal.id,
+        merchant_name: deal.merchant_name || deal.merchant_dba || '—',
+        iso_name: deal.iso_name || queueDeal.iso_name || null,
+        position_count: deal.position_count ?? dealPositions.length,
+        total_balance: deal.total_balance || 0,
+        positions: dealPositions,
+        status: deal.status,
+      });
+      setPositions(preloaded);
+      setExcludedIds([]);
+      setOtherExcludedIds([]);
+
+      // Flip to in_underwriting if still in_submissions/submitted. This is
+      // best-effort — never block the user on a failed status update.
+      const s = (deal.status || '').toLowerCase();
+      if (s === 'in_submissions' || s === 'submitted') {
+        try {
+          await fetch(`/api/deals/${deal.id}`, {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ status: 'in_underwriting' }),
+          });
+        } catch (e) {
+          console.warn('[deal queue] status flip failed:', e);
+        }
+      }
+    } catch (err) {
+      console.error('[deal queue] load failed:', err);
+      setDealQueueError(err.message);
+    }
+  }, []);
+
+  // Fuzzy funder-name matcher — used to pair analyzer-detected positions
+  // with the ISO-submitted ones already on the deal.
+  const matchFunder = (a, b) => {
+    const na = (a || '').toLowerCase().replace(/[^a-z0-9]/g, '');
+    const nb = (b || '').toLowerCase().replace(/[^a-z0-9]/g, '');
+    if (!na || !nb) return false;
+    return na.includes(nb.slice(0, 6)) || nb.includes(na.slice(0, 6));
+  };
+
+  // Write analyzer-derived enrichment back to the deal's positions in Supabase.
+  // Called automatically after analyze()/reanalyze() when a deal is active.
+  const enrichDealPositions = useCallback(async (analysisData) => {
+    if (!activeDeal?.id) return;
+    const dealPositions = activeDeal.positions || [];
+    if (dealPositions.length === 0) return;
+
+    const detected = (analysisData?.mca_positions || []);
+    if (detected.length === 0) return;
+
+    // Agreement + cross-ref results keyed by funder name
+    const agreementByFunder = {};
+    (agreementResults || []).forEach((ar) => {
+      const name = ar?.funder_name || ar?.analysis?.funder_name;
+      if (name) agreementByFunder[name] = ar.analysis || ar;
+    });
+    const crossRefRecs =
+      crossRefResult?.analysis?.restructuring_recommendation?.per_funder_recommendation ||
+      crossRefResult?.restructuring_recommendation?.per_funder_recommendation ||
+      [];
+
+    const updates = [];
+    for (const dbPos of dealPositions) {
+      // 1) find the analyzer-detected position that matches this DB row
+      const det = detected.find((d) => matchFunder(d.funder_name, dbPos.funder_name));
+      if (!det) continue;
+
+      const fields = {};
+
+      // bank-statement analysis
+      const weekly = parseFloat(det.payment_amount_current || det.payment_amount) || 0;
+      const freq = (det.frequency || 'weekly').toLowerCase();
+      if (weekly > 0) {
+        let weeklyNormalized = weekly;
+        if (freq === 'daily') weeklyNormalized = weekly * 5;
+        else if (freq === 'biweekly' || freq === 'bi-weekly') weeklyNormalized = weekly / 2;
+        else if (freq === 'monthly') weeklyNormalized = weekly / 4.33;
+        fields.current_weekly_payment = Math.round(weeklyNormalized * 100) / 100;
+        fields.daily_payment = freq === 'daily' ? weekly : weeklyNormalized / 5;
+      }
+      if (det.frequency) fields.payment_frequency = freq;
+      if (det.ach_descriptor) fields.ach_descriptor = det.ach_descriptor;
+      if (det.estimated_balance) fields.estimated_balance = parseFloat(det.estimated_balance) || 0;
+
+      // agreement analysis
+      const ag = agreementByFunder[det.funder_name] || Object.values(agreementByFunder).find((a) =>
+        matchFunder(a?.funder_name, det.funder_name)
+      );
+      if (ag) {
+        if (ag.purchase_price != null) fields.purchase_price = parseFloat(ag.purchase_price) || 0;
+        if (ag.purchased_amount != null) fields.purchased_amount = parseFloat(ag.purchased_amount) || 0;
+        if (ag.factor_rate != null) fields.factor_rate = parseFloat(ag.factor_rate) || 0;
+        if (ag.specified_percentage != null) fields.specified_percentage = parseFloat(ag.specified_percentage) || 0;
+        if (ag.origination_fee != null) fields.origination_fee = parseFloat(ag.origination_fee) || 0;
+        if (ag.net_funding != null) fields.net_funding = parseFloat(ag.net_funding) || 0;
+        if (ag.has_reconciliation != null) fields.has_reconciliation = !!ag.has_reconciliation;
+        if (ag.reconciliation_days != null) fields.reconciliation_days = parseInt(ag.reconciliation_days, 10) || 0;
+        if (ag.has_anti_stacking != null) fields.has_anti_stacking = !!ag.has_anti_stacking;
+        if (ag.anti_stacking_penalty != null) fields.anti_stacking_penalty = parseFloat(ag.anti_stacking_penalty) || 0;
+        if (ag.has_coj != null) fields.has_coj = !!ag.has_coj;
+        if (ag.coj_enforceable != null) fields.coj_enforceable = !!ag.coj_enforceable;
+        if (ag.governing_law) fields.governing_law = ag.governing_law;
+        if (ag.has_arbitration != null) fields.has_arbitration = !!ag.has_arbitration;
+      }
+
+      // cross-reference scores
+      const cr = crossRefRecs.find((r) => matchFunder(r.funder, det.funder_name));
+      if (cr) {
+        if (cr.enforceability_score != null) fields.enforceability_score = cr.enforceability_score;
+        if (cr.aggressiveness_score != null) fields.aggressiveness_score = cr.aggressiveness_score;
+        if (cr.recovery_stake_score != null) fields.recovery_stake_score = cr.recovery_stake_score;
+        if (cr.composite_score != null) fields.composite_score = cr.composite_score;
+        if (cr.funder_intel_grade) fields.funder_intel_grade = cr.funder_intel_grade;
+      }
+
+      if (Object.keys(fields).length > 0) {
+        updates.push({ position_id: dbPos.id, fields });
+      }
+    }
+
+    if (updates.length === 0) return;
+
+    try {
+      const res = await fetch(`/api/deals/${activeDeal.id}/enrich-positions`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ updates }),
+      });
+      if (!res.ok) {
+        const body = await res.json().catch(() => ({}));
+        console.warn('[enrich] non-ok response:', res.status, body);
+      } else {
+        const body = await res.json();
+        console.log(`[enrich] wrote ${body.updated}/${updates.length} positions back to deal ${activeDeal.id}`);
+      }
+    } catch (err) {
+      console.error('[enrich] network error:', err);
+    }
+  }, [activeDeal, agreementResults, crossRefResult]);
+
+  // Auto-run enrichment once analysis results are ready for an active deal.
+  useEffect(() => {
+    if (!activeDeal?.id || !result?.analysis) return;
+    enrichDealPositions(result.analysis);
+  }, [result, activeDeal?.id, enrichDealPositions]);
+
   // ─── Analyze ─────────────────────────────────────────────────────────────────
   const analyze = async () => {
     const ready = uploadedFiles.filter(f => f.status === 'ready' && (f.text || (f.images && f.images.length > 0)));
@@ -4222,6 +4407,7 @@ export default function FFAnalyzer() {
     setPositions([]); setExcludedIds([]); setOtherExcludedIds([]); setDepositOverrides({});
     setShowRevenueReview(false); setReviewDismissed(false);
     setUploadedAgreements([]); setAgreementResults([]); setCrossRefResult(null);
+    setActiveDeal(null); setDealQueueError(null);
     if (inputRef.current) inputRef.current.value = '';
   };
 
@@ -4248,8 +4434,102 @@ export default function FFAnalyzer() {
             <div style={{ fontSize: 11, color: 'rgba(232,232,240,0.35)', letterSpacing: 1.5 }}>FF ANALYZER v2</div>
           </div>
         </div>
-        <span style={S.badge}>BANK STATEMENT & MCA AGREEMENT ANALYSIS</span>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+          <span style={S.badge}>BANK STATEMENT & MCA AGREEMENT ANALYSIS</span>
+          <DealQueue activeDealId={activeDeal?.id || null} onSelectDeal={handleSelectDeal} />
+        </div>
       </div>
+
+      {/* Active deal banner — shown whenever a queue deal is loaded */}
+      {activeDeal && (
+        <div
+          style={{
+            display: 'flex',
+            alignItems: 'center',
+            gap: 14,
+            padding: '12px 18px',
+            marginBottom: 14,
+            background: 'rgba(0,229,255,0.06)',
+            border: '1px solid rgba(0,229,255,0.3)',
+            borderRadius: 12,
+          }}
+        >
+          <div
+            style={{
+              width: 36,
+              height: 36,
+              borderRadius: 8,
+              background: 'rgba(0,229,255,0.12)',
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'center',
+              fontSize: 16,
+              color: '#00e5ff',
+            }}
+          >📂</div>
+          <div style={{ flex: 1, minWidth: 0 }}>
+            <div
+              style={{
+                fontSize: 10,
+                fontWeight: 700,
+                letterSpacing: 1,
+                color: 'rgba(0,229,255,0.65)',
+                textTransform: 'uppercase',
+              }}
+            >Working on</div>
+            <div
+              style={{
+                fontSize: 14,
+                fontWeight: 600,
+                color: '#fff',
+                marginTop: 2,
+                overflow: 'hidden',
+                textOverflow: 'ellipsis',
+                whiteSpace: 'nowrap',
+              }}
+            >
+              {activeDeal.merchant_name}
+              <span style={{ color: 'rgba(255,255,255,0.4)', fontWeight: 400, marginLeft: 10 }}>
+                — {activeDeal.position_count} position{activeDeal.position_count !== 1 ? 's' : ''} — ${Math.round(activeDeal.total_balance || 0).toLocaleString('en-US')}
+              </span>
+            </div>
+            {activeDeal.iso_name && (
+              <div style={{ fontSize: 11, color: 'rgba(255,255,255,0.45)', marginTop: 2 }}>
+                ISO: {activeDeal.iso_name}
+              </div>
+            )}
+          </div>
+          <button
+            type="button"
+            onClick={() => setActiveDeal(null)}
+            style={{
+              padding: '6px 12px',
+              background: 'transparent',
+              border: '1px solid rgba(255,255,255,0.2)',
+              borderRadius: 8,
+              color: 'rgba(255,255,255,0.6)',
+              fontSize: 10,
+              letterSpacing: 0.5,
+              textTransform: 'uppercase',
+              cursor: 'pointer',
+              fontFamily: 'inherit',
+            }}
+          >Unload</button>
+        </div>
+      )}
+      {dealQueueError && (
+        <div
+          style={{
+            padding: '10px 14px',
+            marginBottom: 14,
+            background: 'rgba(239,83,80,0.08)',
+            border: '1px solid rgba(239,83,80,0.3)',
+            borderRadius: 10,
+            color: '#ef9a9a',
+            fontSize: 12,
+          }}
+        >Deal queue: {dealQueueError}</div>
+      )}
 
       {!result && !loading && (
         <div>
@@ -4588,7 +4868,7 @@ export default function FFAnalyzer() {
             {activeTab === 4 && <AgreementsTab agreementResults={agreementResults} />}
             {activeTab === 5 && <CrossReferenceTab crossRefResult={crossRefResult} crossRefError={crossRefError} agreementResults={agreementResults} positions={positions} a={result.analysis} />}
             {activeTab === 6 && <NegotiationTab a={result.analysis} positions={positions} excludedIds={excludedIds} otherExcludedIds={otherExcludedIds} depositOverrides={depositOverrides} agreementResults={agreementResults} enrolledPositions={enrolledPositions} />}
-            {activeTab === 7 && <PricingTab a={result.analysis} positions={positions} excludedIds={excludedIds} otherExcludedIds={otherExcludedIds} depositOverrides={depositOverrides} agreementResults={agreementResults} enrolledPositions={enrolledPositions} fileName={result.file_name || 'analysis'} />}
+            {activeTab === 7 && <PricingTab a={result.analysis} positions={positions} excludedIds={excludedIds} otherExcludedIds={otherExcludedIds} depositOverrides={depositOverrides} agreementResults={agreementResults} enrolledPositions={enrolledPositions} fileName={result.file_name || 'analysis'} initialDealId={activeDeal?.id || null} />}
             {activeTab === 8 && <FunderIntelTab positions={positions} agreementResults={agreementResults} />}
             {activeTab === 9 && <ConfidenceTab a={result.analysis} positions={positions} excludedIds={excludedIds} depositOverrides={depositOverrides} agreementResults={agreementResults} />}
           </div>
