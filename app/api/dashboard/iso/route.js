@@ -20,7 +20,8 @@ export async function GET(request) {
       .select(`
         id, merchant_name, merchant_dba, status, enrollment_status,
         total_balance, total_weekly_burden, current_dsr, proposed_dsr,
-        merchant_weekly_payment, position_count, created_at, updated_at,
+        merchant_weekly_payment, iso_commission_total, iso_commission_points,
+        position_count, created_at, updated_at,
         positions(id, funder_name, estimated_balance, current_weekly_payment, agreement_status, status)
       `)
       .eq('iso_wp_user_id', wpUserId)
@@ -30,29 +31,74 @@ export async function GET(request) {
       return jsonResponse({ error: dealsError.message }, 500, request);
     }
 
-    // Compute summary stats
-    const activeDealIds = [];
+    // Status groups used by the redesigned ISO home page
+    const EARNED_STATUSES = new Set(['enrolled', 'modified_payment', 'graduated']);
+    const PIPELINE_STATUSES = new Set([
+      'approved',
+      'priced',
+      'agreement_requested',
+      'agreement_signed',
+      'final_review',
+      'welcome_call',
+      'enrollment_fee_rcvd',
+    ]);
+    const ACTIVE_DISPLAY_STATUSES = new Set([
+      'in_submissions',
+      'submitted',
+      'in_underwriting',
+      'analysis',
+      'uw_needs_info',
+      'approved',
+      'priced',
+      'agreement_requested',
+      'agreement_signed',
+      'final_review',
+      'welcome_call',
+      'enrollment_fee_rcvd',
+      'enrolled',
+      'active',
+      'modified_payment',
+    ]);
+
     let activeCount = 0;
     let enrolledCount = 0;
     let submittedCount = 0;
-    const needsAttention = [];
+    let commissionEarned = 0;
+    let commissionPotential = 0;
+    let pipelineCount = 0;
+    let totalMerchantSavings = 0;
 
     for (const deal of deals || []) {
-      if (deal.status === 'active' || deal.status === 'enrolled' || deal.status === 'priced') {
-        activeCount++;
-        activeDealIds.push(deal.id);
+      const status = (deal.status || '').toLowerCase();
+      const enrollment = (deal.enrollment_status || '').toLowerCase();
+
+      if (ACTIVE_DISPLAY_STATUSES.has(status)) activeCount++;
+      if (status === 'enrolled' || status === 'active' || enrollment === 'enrolled') {
+        enrolledCount++;
       }
-      if (deal.enrollment_status === 'enrolled') enrolledCount++;
-      if (deal.enrollment_status === 'submitted' || deal.status === 'submitted') submittedCount++;
-      if (deal.enrollment_status === 'pending' || deal.enrollment_status === 'priced') {
-        needsAttention.push({
-          id: deal.id,
-          merchant_name: deal.merchant_name,
-          merchant_dba: deal.merchant_dba,
-          enrollment_status: deal.enrollment_status,
-          status: deal.status,
-          updated_at: deal.updated_at,
-        });
+      if (status === 'in_submissions' || status === 'submitted' || enrollment === 'submitted') {
+        submittedCount++;
+      }
+
+      if (EARNED_STATUSES.has(status)) {
+        commissionEarned += parseFloat(deal.iso_commission_total) || 0;
+      }
+
+      if (PIPELINE_STATUSES.has(status)) {
+        pipelineCount++;
+        commissionPotential += (parseFloat(deal.total_balance) || 0) * 0.10;
+      }
+
+      // Merchant savings = original weekly burden minus new locked merchant
+      // weekly. `current_weekly_payment` on the deal row isn't a thing — the
+      // per-position column of that name is already aggregated into
+      // `total_weekly_burden`, which is what we want here.
+      if (status === 'enrolled' || status === 'active') {
+        const before = parseFloat(deal.total_weekly_burden) || 0;
+        const after = parseFloat(deal.merchant_weekly_payment) || 0;
+        if (before > 0 && after > 0 && before > after) {
+          totalMerchantSavings += before - after;
+        }
       }
     }
 
@@ -64,10 +110,11 @@ export async function GET(request) {
       .order('created_at', { ascending: false })
       .limit(10);
 
-    // Build recent activity from deals (last 10 status changes)
+    // Build recent activity from deals (last 10 status changes) — kept for
+    // any other consumer that still references it
     const recentActivity = (deals || [])
       .slice(0, 10)
-      .map(d => ({
+      .map((d) => ({
         deal_id: d.id,
         merchant_name: d.merchant_name,
         status: d.status,
@@ -80,7 +127,10 @@ export async function GET(request) {
       enrolled_deals: enrolledCount,
       submitted_deals: submittedCount,
       total_deals: (deals || []).length,
-      needs_attention: needsAttention,
+      commission_earned: Math.round(commissionEarned),
+      commission_potential: Math.round(commissionPotential),
+      pipeline_count: pipelineCount,
+      total_merchant_savings: Math.round(totalMerchantSavings),
       recent_activity: recentActivity,
       recent_commissions: recentCommissions || [],
       deals: deals || [],
