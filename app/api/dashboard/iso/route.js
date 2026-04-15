@@ -15,18 +15,33 @@ export async function GET(request) {
     }
 
     // God Mode: if the requesting user is an admin, drop the ISO filter
-    // so they see every deal in the system instead of just their own.
+    // so they see every deal in the system. The source of truth is the
+    // Supabase Auth user record's user_metadata.role — the public `users`
+    // table may not have a role column populated, so we query the auth
+    // admin API directly with the service-role client.
     let isAdmin = false;
     try {
-      const { data: meRow } = await supabase
-        .from('users')
-        .select('role')
-        .eq('id', wpUserId)
-        .maybeSingle();
-      if ((meRow?.role || '').toLowerCase() === 'admin') isAdmin = true;
-    } catch {
-      // non-fatal — default to ISO-filtered view on lookup errors
+      const { data: authLookup, error: authErr } = await supabase.auth.admin.getUserById(wpUserId);
+      if (!authErr) {
+        const meta = authLookup?.user?.user_metadata || {};
+        const appMeta = authLookup?.user?.app_metadata || {};
+        const role = (meta.role || appMeta.role || '').toString().toLowerCase();
+        if (role === 'admin') isAdmin = true;
+      }
+      // Fallback — if some admins were provisioned with a public.users row
+      // instead of auth metadata, honor that too.
+      if (!isAdmin) {
+        const { data: meRow } = await supabase
+          .from('users')
+          .select('role')
+          .eq('id', wpUserId)
+          .maybeSingle();
+        if ((meRow?.role || '').toLowerCase() === 'admin') isAdmin = true;
+      }
+    } catch (e) {
+      console.warn('[dashboard/iso] admin role lookup failed:', e?.message);
     }
+    console.log('[dashboard/iso] wp_user_id=%s isAdmin=%s', wpUserId, isAdmin);
 
     // Get all deals for this ISO (or all deals if admin God Mode)
     let dealsQuery = supabase

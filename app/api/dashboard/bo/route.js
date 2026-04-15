@@ -14,18 +14,30 @@ export async function GET(request) {
       return jsonResponse({ error: 'wp_user_id is required' }, 400, request);
     }
 
-    // God Mode: admins get an unfiltered view of every merchant deal
+    // God Mode: admins get an unfiltered view of every merchant deal.
+    // Source of truth is Supabase Auth user_metadata.role via the admin
+    // API (service-role client). Public users table is a fallback.
     let isAdmin = false;
     try {
-      const { data: meRow } = await supabase
-        .from('users')
-        .select('role')
-        .eq('id', wpUserId)
-        .maybeSingle();
-      if ((meRow?.role || '').toLowerCase() === 'admin') isAdmin = true;
-    } catch {
-      // non-fatal — default to merchant-filtered view on lookup errors
+      const { data: authLookup, error: authErr } = await supabase.auth.admin.getUserById(wpUserId);
+      if (!authErr) {
+        const meta = authLookup?.user?.user_metadata || {};
+        const appMeta = authLookup?.user?.app_metadata || {};
+        const role = (meta.role || appMeta.role || '').toString().toLowerCase();
+        if (role === 'admin') isAdmin = true;
+      }
+      if (!isAdmin) {
+        const { data: meRow } = await supabase
+          .from('users')
+          .select('role')
+          .eq('id', wpUserId)
+          .maybeSingle();
+        if ((meRow?.role || '').toLowerCase() === 'admin') isAdmin = true;
+      }
+    } catch (e) {
+      console.warn('[dashboard/bo] admin role lookup failed:', e?.message);
     }
+    console.log('[dashboard/bo] wp_user_id=%s isAdmin=%s', wpUserId, isAdmin);
 
     // Get the deal(s) for this merchant (or the 25 most recent in God Mode)
     let dealsQuery = supabase
