@@ -1,5 +1,6 @@
 import { supabase } from '../../../../lib/supabase';
 import { jsonResponse, optionsResponse } from '../../../../lib/cors';
+import { sendNewDealEmail } from '../../../../lib/notifications';
 
 export async function OPTIONS(request) {
   return optionsResponse(request);
@@ -111,17 +112,24 @@ export async function POST(request) {
     if (positions.length > 0) {
       const positionRows = positions.map((p, idx) => {
         const balance = parseFloat(p.estimated_balance) || 0;
-        const payment = parseFloat(p.current_payment) || 0;
+        const payment = parseFloat(p.current_weekly_payment) || 0;
+        const freq = (p.frequency || 'weekly').toLowerCase();
+        // Normalize user-entered payment to weekly for storage
+        let weeklyPayment = payment;
+        if (freq === 'daily') weeklyPayment = payment * 5;
+        else if (freq === 'bi-weekly' || freq === 'biweekly') weeklyPayment = payment / 2;
+        else if (freq === 'monthly') weeklyPayment = payment / 4.33;
+
         totalBalance += balance;
-        totalWeeklyBurden += p.frequency === 'daily' ? payment * 5 : payment;
+        totalWeeklyBurden += weeklyPayment;
 
         return {
           deal_id: deal.id,
           funder_name: p.funder_name,
           estimated_balance: balance,
-          current_weekly_payment: p.frequency === 'daily' ? payment * 5 : payment,
-          daily_payment: p.frequency === 'daily' ? payment : payment / 5,
-          payment_frequency: p.frequency || 'weekly',
+          current_weekly_payment: weeklyPayment,
+          daily_payment: freq === 'daily' ? payment : weeklyPayment / 5,
+          payment_frequency: freq,
           payments_modified: p.payments_modified || false,
           position_order: idx + 1,
           status: 'active',
@@ -164,6 +172,32 @@ export async function POST(request) {
       .select('*, positions(*)')
       .eq('id', deal.id)
       .single();
+
+    // Best-effort ops notification — never block or fail the submit on email errors
+    try {
+      let isoName = null;
+      if (iso_wp_user_id) {
+        const { data: isoUser } = await supabase
+          .from('users')
+          .select('first_name, last_name, email')
+          .eq('id', iso_wp_user_id)
+          .maybeSingle();
+        if (isoUser) {
+          isoName =
+            [isoUser.first_name, isoUser.last_name].filter(Boolean).join(' ').trim() ||
+            isoUser.email ||
+            null;
+        }
+      }
+
+      await sendNewDealEmail({
+        deal: fullDeal || deal,
+        isoName,
+        totalEstimatedDebt: totalBalance,
+      });
+    } catch (notifyErr) {
+      console.error('[submit] notification dispatch failed:', notifyErr);
+    }
 
     return jsonResponse(fullDeal, 201, request);
   } catch (err) {

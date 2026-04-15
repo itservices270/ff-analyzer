@@ -1,5 +1,5 @@
 'use client';
-import React, { useState, useMemo, useCallback } from 'react';
+import React, { useState, useMemo, useCallback, useEffect } from 'react';
 import { scoreAllPositions } from '../../lib/scoringEngine';
 import { autoScorePosition, getCompositeScore, getRecoveryStakeScore } from '../../lib/funder-intel';
 import { getGraduatedCommissionRate, calculateTierAllocations } from '../../lib/pricing-engine';
@@ -96,7 +96,7 @@ const S = {
 // ═════════════════════════════════════════════════════════════════════════════
 // PricingTab
 // ═════════════════════════════════════════════════════════════════════════════
-export default function PricingTab({ a, positions, excludedIds, otherExcludedIds, depositOverrides, agreementResults, enrolledPositions, fileName }) {
+export default function PricingTab({ a, positions, excludedIds, otherExcludedIds, depositOverrides, agreementResults, enrolledPositions, fileName, initialDealId = null }) {
   // ── Safety guard ──
   if (!a) return <div style={{ padding: 40, textAlign: 'center', color: 'rgba(232,232,240,0.4)' }}>No analysis data available.</div>;
 
@@ -157,7 +157,19 @@ export default function PricingTab({ a, positions, excludedIds, otherExcludedIds
   const [showNegEmails, setShowNegEmails] = useState(false);
 
   // ── Supabase Save/Load state ──
-  const [savedDealId, setSavedDealId] = useState(null);
+  const [savedDealId, setSavedDealId] = useState(initialDealId);
+
+  // When the parent loads a deal from the Deal Queue, adopt its id so
+  // Save/Update/Approve all reference the existing deal instead of
+  // creating a fresh one.
+  useEffect(() => {
+    if (initialDealId && initialDealId !== savedDealId) {
+      setSavedDealId(initialDealId);
+    }
+    // intentionally not depending on savedDealId — we only react to
+    // external deal-id changes coming from the parent
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [initialDealId]);
   const [dealStatus, setDealStatus] = useState(null); // null | 'analysis' | 'priced' | 'approved' | 'enrolled'
   const [saveStatus, setSaveStatus] = useState(null); // null | 'saving' | 'saved' | 'error'
   const [saveError, setSaveError] = useState(null);
