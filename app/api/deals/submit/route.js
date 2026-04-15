@@ -1,5 +1,6 @@
 import { supabase } from '../../../../lib/supabase';
 import { jsonResponse, optionsResponse } from '../../../../lib/cors';
+import { sendNewDealEmail } from '../../../../lib/notifications';
 
 export async function OPTIONS(request) {
   return optionsResponse(request);
@@ -171,6 +172,32 @@ export async function POST(request) {
       .select('*, positions(*)')
       .eq('id', deal.id)
       .single();
+
+    // Best-effort ops notification — never block or fail the submit on email errors
+    try {
+      let isoName = null;
+      if (iso_wp_user_id) {
+        const { data: isoUser } = await supabase
+          .from('users')
+          .select('first_name, last_name, email')
+          .eq('id', iso_wp_user_id)
+          .maybeSingle();
+        if (isoUser) {
+          isoName =
+            [isoUser.first_name, isoUser.last_name].filter(Boolean).join(' ').trim() ||
+            isoUser.email ||
+            null;
+        }
+      }
+
+      await sendNewDealEmail({
+        deal: fullDeal || deal,
+        isoName,
+        totalEstimatedDebt: totalBalance,
+      });
+    } catch (notifyErr) {
+      console.error('[submit] notification dispatch failed:', notifyErr);
+    }
 
     return jsonResponse(fullDeal, 201, request);
   } catch (err) {
