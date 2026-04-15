@@ -48,12 +48,12 @@ export async function GET(request) {
       .from('deals')
       .select(`
         id, merchant_name, merchant_dba, status, enrollment_status,
-        total_balance, total_weekly_burden, current_weekly_payment,
+        total_balance, total_weekly_burden, original_weekly_burden,
         current_dsr, proposed_dsr,
         merchant_weekly_payment, iso_commission_total, iso_commission_points,
         proposed_reduction_pct, agreement_token,
         iso_locked_at, iso_locked_commission, iso_locked_merchant_weekly,
-        iso_locked_reduction_pct, iso_locked_points,
+        iso_locked_reduction_pct, iso_locked_points, iso_locked_term,
         owner_first, owner_last, owner_email, owner_phone,
         position_count, created_at, updated_at,
         positions(id, funder_name, estimated_balance, current_weekly_payment, payment_frequency, agreement_status, status)
@@ -207,20 +207,13 @@ export async function GET(request) {
         updated_at: d.updated_at,
       }));
 
-    // Enrich each deal with messages/documents and aliases the redesigned
-    // pipeline page expects: owner_cell, per-deal current_weekly_payment
-    // (aliased from total_weekly_burden), and a `balance` alias on each
-    // position (aliased from estimated_balance).
+    // Enrich each deal with messages/documents and a `balance` alias on
+    // each position (aliased from estimated_balance). No more
+    // owner_cell / current_weekly_payment aliases — the frontend now
+    // reads owner_phone and total_weekly_burden directly, matching the
+    // real Supabase schema.
     const enrichedDeals = (deals || []).map((d) => ({
       ...d,
-      owner_cell: d.owner_phone || null,
-      // Prefer the real column once it's been written at lock time; fall
-      // back to total_weekly_burden for legacy rows that never had the
-      // column populated.
-      current_weekly_payment:
-        parseFloat(d.current_weekly_payment) ||
-        parseFloat(d.total_weekly_burden) ||
-        0,
       positions: (d.positions || []).map((p) => ({
         ...p,
         balance: parseFloat(p.estimated_balance) || 0,
