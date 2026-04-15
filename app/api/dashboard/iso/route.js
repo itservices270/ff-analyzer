@@ -14,37 +14,8 @@ export async function GET(request) {
       return jsonResponse({ error: 'wp_user_id is required' }, 400, request);
     }
 
-    // God Mode: if the requesting user is an admin, drop the ISO filter
-    // so they see every deal in the system. The source of truth is the
-    // Supabase Auth user record's user_metadata.role — the public `users`
-    // table may not have a role column populated, so we query the auth
-    // admin API directly with the service-role client.
-    let isAdmin = false;
-    try {
-      const { data: authLookup, error: authErr } = await supabase.auth.admin.getUserById(wpUserId);
-      if (!authErr) {
-        const meta = authLookup?.user?.user_metadata || {};
-        const appMeta = authLookup?.user?.app_metadata || {};
-        const role = (meta.role || appMeta.role || '').toString().toLowerCase();
-        if (role === 'admin') isAdmin = true;
-      }
-      // Fallback — if some admins were provisioned with a public.users row
-      // instead of auth metadata, honor that too.
-      if (!isAdmin) {
-        const { data: meRow } = await supabase
-          .from('users')
-          .select('role')
-          .eq('id', wpUserId)
-          .maybeSingle();
-        if ((meRow?.role || '').toLowerCase() === 'admin') isAdmin = true;
-      }
-    } catch (e) {
-      console.warn('[dashboard/iso] admin role lookup failed:', e?.message);
-    }
-    console.log('[dashboard/iso] wp_user_id=%s isAdmin=%s', wpUserId, isAdmin);
-
-    // Get all deals for this ISO (or all deals if admin God Mode)
-    let dealsQuery = supabase
+    // Get all deals for this ISO
+    const { data: deals, error: dealsError } = await supabase
       .from('deals')
       .select(`
         id, merchant_name, merchant_dba, status, enrollment_status,
@@ -58,13 +29,8 @@ export async function GET(request) {
         position_count, created_at, updated_at,
         positions(id, funder_name, estimated_balance, current_weekly_payment, payment_frequency, agreement_status, status)
       `)
+      .eq('iso_wp_user_id', wpUserId)
       .order('updated_at', { ascending: false });
-
-    if (!isAdmin) {
-      dealsQuery = dealsQuery.eq('iso_wp_user_id', wpUserId);
-    }
-
-    const { data: deals, error: dealsError } = await dealsQuery;
 
     if (dealsError) {
       return jsonResponse({ error: dealsError.message }, 500, request);
@@ -184,16 +150,13 @@ export async function GET(request) {
       }
     }
 
-    // Recent commission payments for this ISO (all ISOs when in God Mode)
-    let commissionsQuery = supabase
+    // Recent commission payments for this ISO
+    const { data: recentCommissions } = await supabase
       .from('iso_commissions')
       .select('id, deal_id, amount, status, payment_date, created_at')
+      .eq('iso_wp_user_id', wpUserId)
       .order('created_at', { ascending: false })
       .limit(10);
-    if (!isAdmin) {
-      commissionsQuery = commissionsQuery.eq('iso_wp_user_id', wpUserId);
-    }
-    const { data: recentCommissions } = await commissionsQuery;
 
     // Build recent activity from deals (last 10 status changes) — kept for
     // any other consumer that still references it
