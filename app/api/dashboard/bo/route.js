@@ -14,8 +14,21 @@ export async function GET(request) {
       return jsonResponse({ error: 'wp_user_id is required' }, 400, request);
     }
 
-    // Get the deal(s) for this merchant
-    const { data: deals, error: dealsError } = await supabase
+    // God Mode: admins get an unfiltered view of every merchant deal
+    let isAdmin = false;
+    try {
+      const { data: meRow } = await supabase
+        .from('users')
+        .select('role')
+        .eq('id', wpUserId)
+        .maybeSingle();
+      if ((meRow?.role || '').toLowerCase() === 'admin') isAdmin = true;
+    } catch {
+      // non-fatal — default to merchant-filtered view on lookup errors
+    }
+
+    // Get the deal(s) for this merchant (or the 25 most recent in God Mode)
+    let dealsQuery = supabase
       .from('deals')
       .select(`
         id, merchant_name, merchant_dba, status, enrollment_status,
@@ -28,8 +41,15 @@ export async function GET(request) {
           settled_amount, settled_date, payments_made, payments_remaining
         )
       `)
-      .eq('wp_user_id', wpUserId)
       .order('created_at', { ascending: false });
+
+    if (isAdmin) {
+      dealsQuery = dealsQuery.limit(25);
+    } else {
+      dealsQuery = dealsQuery.eq('wp_user_id', wpUserId);
+    }
+
+    const { data: deals, error: dealsError } = await dealsQuery;
 
     if (dealsError) {
       return jsonResponse({ error: dealsError.message }, 500, request);

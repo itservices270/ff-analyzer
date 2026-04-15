@@ -14,8 +14,22 @@ export async function GET(request) {
       return jsonResponse({ error: 'wp_user_id is required' }, 400, request);
     }
 
-    // Get all deals for this ISO
-    const { data: deals, error: dealsError } = await supabase
+    // God Mode: if the requesting user is an admin, drop the ISO filter
+    // so they see every deal in the system instead of just their own.
+    let isAdmin = false;
+    try {
+      const { data: meRow } = await supabase
+        .from('users')
+        .select('role')
+        .eq('id', wpUserId)
+        .maybeSingle();
+      if ((meRow?.role || '').toLowerCase() === 'admin') isAdmin = true;
+    } catch {
+      // non-fatal — default to ISO-filtered view on lookup errors
+    }
+
+    // Get all deals for this ISO (or all deals if admin God Mode)
+    let dealsQuery = supabase
       .from('deals')
       .select(`
         id, merchant_name, merchant_dba, status, enrollment_status,
@@ -26,8 +40,13 @@ export async function GET(request) {
         position_count, created_at, updated_at,
         positions(id, funder_name, estimated_balance, current_weekly_payment, payment_frequency, agreement_status, status)
       `)
-      .eq('iso_wp_user_id', wpUserId)
       .order('updated_at', { ascending: false });
+
+    if (!isAdmin) {
+      dealsQuery = dealsQuery.eq('iso_wp_user_id', wpUserId);
+    }
+
+    const { data: deals, error: dealsError } = await dealsQuery;
 
     if (dealsError) {
       return jsonResponse({ error: dealsError.message }, 500, request);
@@ -147,13 +166,16 @@ export async function GET(request) {
       }
     }
 
-    // Recent commission payments for this ISO
-    const { data: recentCommissions } = await supabase
+    // Recent commission payments for this ISO (all ISOs when in God Mode)
+    let commissionsQuery = supabase
       .from('iso_commissions')
       .select('id, deal_id, amount, status, payment_date, created_at')
-      .eq('iso_wp_user_id', wpUserId)
       .order('created_at', { ascending: false })
       .limit(10);
+    if (!isAdmin) {
+      commissionsQuery = commissionsQuery.eq('iso_wp_user_id', wpUserId);
+    }
+    const { data: recentCommissions } = await commissionsQuery;
 
     // Build recent activity from deals (last 10 status changes) — kept for
     // any other consumer that still references it
