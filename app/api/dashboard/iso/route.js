@@ -33,9 +33,12 @@ export async function GET(request) {
       .from('deals')
       .select(`
         id, merchant_name, merchant_dba, status, enrollment_status,
-        total_balance, total_weekly_burden, current_dsr, proposed_dsr,
+        total_balance, total_weekly_burden, current_weekly_payment,
+        current_dsr, proposed_dsr,
         merchant_weekly_payment, iso_commission_total, iso_commission_points,
         proposed_reduction_pct, agreement_token,
+        iso_locked_at, iso_locked_commission, iso_locked_merchant_weekly,
+        iso_locked_reduction_pct, iso_locked_points,
         owner_first, owner_last, owner_email, owner_phone,
         position_count, created_at, updated_at,
         positions(id, funder_name, estimated_balance, current_weekly_payment, payment_frequency, agreement_status, status)
@@ -196,7 +199,13 @@ export async function GET(request) {
     const enrichedDeals = (deals || []).map((d) => ({
       ...d,
       owner_cell: d.owner_phone || null,
-      current_weekly_payment: parseFloat(d.total_weekly_burden) || 0,
+      // Prefer the real column once it's been written at lock time; fall
+      // back to total_weekly_burden for legacy rows that never had the
+      // column populated.
+      current_weekly_payment:
+        parseFloat(d.current_weekly_payment) ||
+        parseFloat(d.total_weekly_burden) ||
+        0,
       positions: (d.positions || []).map((p) => ({
         ...p,
         balance: parseFloat(p.estimated_balance) || 0,
