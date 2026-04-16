@@ -222,6 +222,52 @@ export async function GET(request) {
       documents: documentsByDeal[d.id] || [],
     }));
 
+    // ISO account data — documents, bank info, reps. Fetched in parallel.
+    // Tables may not exist yet; swallow missing-table errors gracefully.
+    const isMissingTable = (err) =>
+      !!err && ((err.code || '').startsWith('42P') || /relation .* does not exist/i.test(err.message || ''));
+
+    let isoDocuments = [];
+    let bankInfo = null;
+    let isoReps = [];
+
+    if (!isAdmin) {
+      // Only fetch ISO-specific account data for real ISOs, not God Mode
+      const [docsRes, bankRes, repsRes] = await Promise.all([
+        supabase
+          .from('iso_documents')
+          .select('id, doc_type, file_name, file_url, created_at')
+          .eq('iso_user_id', wpUserId),
+        supabase
+          .from('iso_bank_info')
+          .select('account_holder, bank_name, routing_number, account_number, account_type')
+          .eq('iso_user_id', wpUserId)
+          .maybeSingle(),
+        supabase
+          .from('iso_reps')
+          .select('id, first_name, last_name, title, email, phone, is_active')
+          .eq('iso_user_id', wpUserId)
+          .order('is_active', { ascending: false })
+          .order('last_name', { ascending: true }),
+      ]);
+
+      if (docsRes.error) {
+        if (!isMissingTable(docsRes.error)) console.warn('[dashboard/iso] iso_documents query failed:', docsRes.error.message);
+      } else {
+        isoDocuments = docsRes.data || [];
+      }
+      if (bankRes.error) {
+        if (!isMissingTable(bankRes.error)) console.warn('[dashboard/iso] iso_bank_info query failed:', bankRes.error.message);
+      } else {
+        bankInfo = bankRes.data || null;
+      }
+      if (repsRes.error) {
+        if (!isMissingTable(repsRes.error)) console.warn('[dashboard/iso] iso_reps query failed:', repsRes.error.message);
+      } else {
+        isoReps = repsRes.data || [];
+      }
+    }
+
     return jsonResponse({
       active_deals: activeCount,
       enrolled_deals: enrolledCount,
@@ -234,6 +280,9 @@ export async function GET(request) {
       recent_activity: recentActivity,
       recent_commissions: recentCommissions || [],
       deals: enrichedDeals,
+      iso_documents: isoDocuments,
+      bank_info: bankInfo,
+      reps: isoReps,
     }, 200, request);
   } catch (err) {
     return jsonResponse({ error: err.message }, 500, request);
