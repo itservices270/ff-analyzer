@@ -18,6 +18,7 @@ export async function POST(request) {
       positions = [],
       documents = [],
       iso_wp_user_id,
+      assigned_rep_id,
     } = body;
 
     if (!business_name || !iso_wp_user_id) {
@@ -91,6 +92,7 @@ export async function POST(request) {
         owner_state,
         owner_zip,
         iso_wp_user_id,
+        assigned_rep_id: assigned_rep_id || null,
         user_id: merchantUserId,
         status: 'submitted',
         enrollment_status: 'submitted',
@@ -190,10 +192,22 @@ export async function POST(request) {
         }
       }
 
+      // Look up the assigned rep so we can include their contact info
+      let repInfo = null;
+      if (assigned_rep_id) {
+        const { data: repRow } = await supabase
+          .from('iso_reps')
+          .select('first_name, last_name, title, email, phone')
+          .eq('id', assigned_rep_id)
+          .maybeSingle();
+        if (repRow) repInfo = repRow;
+      }
+
       await sendNewDealEmail({
         deal: fullDeal || deal,
         isoName,
         totalEstimatedDebt: totalBalance,
+        repInfo,
       });
     } catch (notifyErr) {
       console.error('[submit] notification dispatch failed:', notifyErr);
