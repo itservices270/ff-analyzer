@@ -1,13 +1,15 @@
 import { supabase } from '../../../../lib/supabase';
+import { resolveUser } from '../../../../lib/auth';
 import { NextResponse } from 'next/server';
 
 // GET /api/iso/reps — list reps for the authenticated ISO
 export async function GET(request) {
   try {
-    const userId = request.headers.get('x-user-id') ||
-      new URL(request.url).searchParams.get('user_id');
-    if (!userId) {
-      return NextResponse.json({ error: 'user_id required' }, { status: 400 });
+    let userId;
+    try {
+      ({ userId } = await resolveUser(request));
+    } catch (e) {
+      return NextResponse.json({ error: e.error || 'unauthorized' }, { status: e.status || 401 });
     }
 
     const { data, error } = await supabase
@@ -34,11 +36,14 @@ export async function GET(request) {
 // Body JSON: { first_name, last_name, title, email, phone, user_id }
 export async function POST(request) {
   try {
-    const body = await request.json();
-    const userId = body.user_id || request.headers.get('x-user-id');
-    if (!userId) {
-      return NextResponse.json({ error: 'user_id required' }, { status: 400 });
+    let userId;
+    try {
+      ({ userId } = await resolveUser(request.clone()));
+    } catch (e) {
+      return NextResponse.json({ error: e.error || 'unauthorized' }, { status: e.status || 401 });
     }
+
+    const body = await request.json();
 
     const { first_name, last_name, title, email, phone } = body;
     if (!first_name?.trim() || !last_name?.trim() || !email?.trim()) {
