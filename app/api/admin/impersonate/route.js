@@ -46,23 +46,26 @@ export async function GET(request) {
       return NextResponse.json({ impersonating: null });
     }
 
-    // Hydrate target user for display
+    // Hydrate target user for display. public.users does NOT have a
+    // business_name column (verified from schema: person fields only).
+    // Business/company names live on deals — merchant_dba / merchant_name
+    // for merchants, iso_name for ISOs. Fetch the user row first to
+    // resolve identity + role, then pull the display name from the most
+    // recent matching deal.
     const targetId = caller.userId;
     const { data: targetRow } = await supabase
       .from('users')
-      .select('id, email, first_name, last_name, business_name, role')
+      .select('id, email, first_name, last_name, role')
       .eq('id', targetId)
       .maybeSingle();
 
     // Fallback to auth metadata if public.users row is missing
     let full_name = null;
     let email = null;
-    let business_name = null;
     let role = null;
     if (targetRow) {
       full_name = [targetRow.first_name, targetRow.last_name].filter(Boolean).join(' ').trim() || null;
       email = targetRow.email;
-      business_name = targetRow.business_name || null;
       role = targetRow.role;
     } else {
       try {
@@ -75,6 +78,29 @@ export async function GET(request) {
           role = meta.role || u.app_metadata?.role || null;
         }
       } catch {}
+    }
+
+    // Resolve business_name from the most recently updated deal.
+    // Picker only supports business_owner + iso_partner, so skip for
+    // any other role (shouldn't happen, but be defensive).
+    let business_name = null;
+    if (role === 'business_owner' || role === 'iso_partner') {
+      const dealColumn = role === 'iso_partner' ? 'iso_wp_user_id' : 'wp_user_id';
+      const bizSelect = role === 'iso_partner'
+        ? 'iso_name, updated_at'
+        : 'merchant_dba, merchant_name, updated_at';
+      const { data: recentDeal } = await supabase
+        .from('deals')
+        .select(bizSelect)
+        .eq(dealColumn, targetId)
+        .order('updated_at', { ascending: false })
+        .limit(1)
+        .maybeSingle();
+      if (recentDeal) {
+        business_name = role === 'iso_partner'
+          ? (recentDeal.iso_name || null)
+          : (recentDeal.merchant_dba || recentDeal.merchant_name || null);
+      }
     }
 
     return NextResponse.json({
