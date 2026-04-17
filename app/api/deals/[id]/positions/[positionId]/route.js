@@ -1,9 +1,15 @@
 import { supabase } from '../../../../../../lib/supabase';
 import { NextResponse } from 'next/server';
+import { assertNotImpersonating } from '../../../../../../lib/auth';
 
 // PUT — Update a position
 export async function PUT(request, { params }) {
   try {
+    try {
+      await assertNotImpersonating(request);
+    } catch (e) {
+      return NextResponse.json({ error: e.error }, { status: e.status });
+    }
     const { id: deal_id, positionId } = await params;
     const body = await request.json();
 
@@ -67,6 +73,11 @@ export async function PUT(request, { params }) {
 // DELETE — Soft delete position (set status to excluded or paid_off)
 export async function DELETE(request, { params }) {
   try {
+    try {
+      await assertNotImpersonating(request);
+    } catch (e) {
+      return NextResponse.json({ error: e.error }, { status: e.status });
+    }
     const { id: deal_id, positionId } = await params;
     const body = await request.json().catch(() => ({}));
     const newStatus = body.status === 'paid_off' ? 'paid_off' : 'excluded';

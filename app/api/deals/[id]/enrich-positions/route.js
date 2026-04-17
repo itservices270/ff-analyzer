@@ -1,5 +1,6 @@
 import { supabase } from '../../../../../lib/supabase';
 import { NextResponse } from 'next/server';
+import { assertNotImpersonating } from '../../../../../lib/auth';
 
 // Allowlist of columns the analyzer is permitted to write back.
 // Anything outside this list is silently dropped.
@@ -51,6 +52,11 @@ function sanitize(fields) {
 // cannot enrich positions outside the currently-loaded deal.
 export async function POST(request, { params }) {
   try {
+    try {
+      await assertNotImpersonating(request);
+    } catch (e) {
+      return NextResponse.json({ error: e.error }, { status: e.status });
+    }
     const { id: dealId } = await params;
     const body = await request.json();
     const updates = Array.isArray(body?.updates) ? body.updates : [];

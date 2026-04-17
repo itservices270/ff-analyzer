@@ -1,9 +1,15 @@
 import { supabase } from '../../../../../lib/supabase';
 import { NextResponse } from 'next/server';
+import { assertNotImpersonating } from '../../../../../lib/auth';
 
 // POST — Save the full analyzer session JSON to deal
 export async function POST(request, { params }) {
   try {
+    try {
+      await assertNotImpersonating(request);
+    } catch (e) {
+      return NextResponse.json({ error: e.error }, { status: e.status });
+    }
     const { id } = await params;
     const body = await request.json();
     const { analyzer_session_data } = body;

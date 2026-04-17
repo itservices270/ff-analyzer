@@ -1,11 +1,16 @@
 import { supabase } from '../../../../../lib/supabase';
-import { resolveUser } from '../../../../../lib/auth';
+import { resolveUser, assertNotImpersonating } from '../../../../../lib/auth';
 import { NextResponse } from 'next/server';
 
 // PUT /api/iso/reps/[repId] — update an existing rep
 // Body JSON: any of { first_name, last_name, title, email, phone, is_active }
 export async function PUT(request, { params }) {
   try {
+    try {
+      await assertNotImpersonating(request);
+    } catch (e) {
+      return NextResponse.json({ error: e.error }, { status: e.status });
+    }
     let userId;
     try {
       ({ userId } = await resolveUser(request.clone()));
@@ -57,6 +62,11 @@ export async function PUT(request, { params }) {
 // DELETE /api/iso/reps/[repId] — hard delete a rep (only if no deals assigned)
 export async function DELETE(request, { params }) {
   try {
+    try {
+      await assertNotImpersonating(request);
+    } catch (e) {
+      return NextResponse.json({ error: e.error }, { status: e.status });
+    }
     let userId;
     try {
       ({ userId } = await resolveUser(request));

@@ -1,10 +1,16 @@
 import { supabase } from '../../../../../lib/supabase';
 import { calculatePricing, calculateEnforceabilityWeighted } from '../../../../../lib/pricing-engine';
 import { NextResponse } from 'next/server';
+import { assertNotImpersonating } from '../../../../../lib/auth';
 
 // POST — Run pricing engine on a deal
 export async function POST(request, { params }) {
   try {
+    try {
+      await assertNotImpersonating(request);
+    } catch (e) {
+      return NextResponse.json({ error: e.error }, { status: e.status });
+    }
     const { id } = await params;
     const body = await request.json();
     const {

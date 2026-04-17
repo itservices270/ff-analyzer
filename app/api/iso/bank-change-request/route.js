@@ -1,5 +1,5 @@
 import { supabase } from '../../../../lib/supabase';
-import { resolveUser } from '../../../../lib/auth';
+import { resolveUser, assertNotImpersonating } from '../../../../lib/auth';
 import { sendResendEmail } from '../../../../lib/notifications';
 import { NextResponse } from 'next/server';
 
@@ -19,6 +19,11 @@ function safeFileName(name) {
 // account_type, notes, supporting_doc (file), user_id
 export async function POST(request) {
   try {
+    try {
+      await assertNotImpersonating(request);
+    } catch (e) {
+      return NextResponse.json({ error: e.error }, { status: e.status });
+    }
     let userId;
     try {
       ({ userId } = await resolveUser(request.clone()));
