@@ -9,32 +9,79 @@ export async function OPTIONS(request) {
 }
 
 // ── Auth user helpers ──────────────────────────────────────────────
-// Find an existing auth.users row by email using the admin listUsers
-// API. Supabase doesn't expose a direct "get by email" on the admin
-// SDK, and `supabase.from('auth.users')` isn't reliably exposed
-// through PostgREST — so we paginate listUsers. User count is small
-// today; bump perPage or paginate if it grows past a few thousand.
+// Resolve an auth.users row by email. Two-path lookup:
+//
+//   Path 1 — public.users (authoritative for users created via this
+//   route). This submit handler always writes auth.users and then
+//   upserts public.users with the SAME UUID as the primary key, so
+//   public.users is a reliable email→id index for anything we've
+//   previously created. Deterministic, no pagination, no consistency
+//   lag. A public.users hit without a matching auth.users row is a
+//   legacy orphan from a pre-fix submit; fall through to Path 2.
+//
+//   Path 2 — paginated listUsers fallback. Catches users created
+//   through other admin tooling (Supabase dashboard, backfill
+//   scripts). Capped at 20,000 users via 20 pages × 1000.
+//
+// Why the previous single-page listUsers approach broke:
+//   - `listUsers({ page: 1, perPage: 1000 })` missed newly-created
+//     users in two cases — pagination (auth.users > 1000 rows) and
+//     eventual-consistency lag between createUser and listUsers.
+//     Test 6 (duplicate-email idempotency) caught this in preview.
 async function findAuthUserByEmail(email) {
   if (!email) return null;
-  const normalized = email.toLowerCase();
+  const normalizedEmail = email.toLowerCase();
+
+  // Path 1: public.users by email → getUserById to confirm.
   try {
-    const { data, error } = await supabase.auth.admin.listUsers({
-      page: 1,
-      perPage: 1000,
-    });
-    if (error) {
-      console.warn('[deals/submit] auth listUsers failed:', error.message);
-      return null;
+    const { data: profile, error: profileErr } = await supabase
+      .from('users')
+      .select('id')
+      .eq('email', normalizedEmail)
+      .maybeSingle();
+
+    if (profileErr) {
+      console.warn('[findAuthUserByEmail] public.users lookup failed:', profileErr.message);
+    } else if (profile?.id) {
+      const { data: authData, error: authErr } =
+        await supabase.auth.admin.getUserById(profile.id);
+      if (authErr) {
+        console.warn(
+          '[findAuthUserByEmail] getUserById failed for',
+          profile.id,
+          ':',
+          authErr.message
+        );
+      } else if (authData?.user) {
+        return authData.user;
+      }
+      // public hit + auth miss → legacy orphan; fall through to Path 2
     }
-    return (
-      (data?.users || []).find(
-        (u) => (u.email || '').toLowerCase() === normalized
-      ) || null
-    );
   } catch (err) {
-    console.warn('[deals/submit] auth listUsers threw:', err?.message);
-    return null;
+    console.warn('[findAuthUserByEmail] public.users path threw:', err?.message);
   }
+
+  // Path 2: paginated listUsers fallback.
+  try {
+    const perPage = 1000;
+    for (let page = 1; page <= 20; page++) {
+      const { data, error } = await supabase.auth.admin.listUsers({ page, perPage });
+      if (error) {
+        console.warn('[findAuthUserByEmail] listUsers page', page, 'failed:', error.message);
+        return null;
+      }
+      const users = data?.users || [];
+      const match = users.find(
+        (u) => (u.email || '').toLowerCase() === normalizedEmail
+      );
+      if (match) return match;
+      if (users.length < perPage) return null; // last page
+    }
+  } catch (err) {
+    console.warn('[findAuthUserByEmail] listUsers path threw:', err?.message);
+  }
+
+  return null;
 }
 
 // Random temp password — the merchant never sees this. They get in
@@ -106,14 +153,57 @@ export async function POST(request) {
             last_name: owner_last || null,
           },
         });
-        if (authErr || !created?.user) {
+
+        if (authErr) {
+          // Duplicate-recovery: if the lookup missed an existing user
+          // but Supabase Auth rejects the duplicate, re-resolve via
+          // findAuthUserByEmail (which will hit the public.users path
+          // this time IF a prior submit wrote the mirror row, or the
+          // listUsers fallback otherwise). Handles the race between
+          // two near-simultaneous submits AND the listUsers
+          // consistency-lag case that Test 6 exposed on the preview.
+          const msg = (authErr.message || '').toLowerCase();
+          const isDuplicate =
+            msg.includes('already been registered') ||
+            msg.includes('already exists') ||
+            authErr.code === 'email_exists' ||
+            authErr.status === 422;
+
+          if (isDuplicate) {
+            console.warn(
+              '[deals/submit] createUser reported duplicate for',
+              owner_email,
+              '— recovering via findAuthUserByEmail'
+            );
+            authUser = await findAuthUserByEmail(owner_email);
+            if (!authUser) {
+              console.error(
+                '[deals/submit] duplicate reported but user not resolvable for',
+                owner_email
+              );
+              return jsonResponse(
+                { error: 'Could not resolve merchant account after duplicate-email error' },
+                500,
+                request
+              );
+            }
+          } else {
+            console.error('[deals/submit] createUser failed:', authErr.message);
+            return jsonResponse(
+              { error: 'Failed to create merchant auth user: ' + authErr.message },
+              500,
+              request
+            );
+          }
+        } else if (!created?.user) {
           return jsonResponse(
-            { error: 'Failed to create merchant auth user: ' + (authErr?.message || 'unknown') },
+            { error: 'Failed to create merchant auth user: no user returned' },
             500,
             request
           );
+        } else {
+          authUser = created.user;
         }
-        authUser = created.user;
       }
       merchantUserId = authUser.id;
 
