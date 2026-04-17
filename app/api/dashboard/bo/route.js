@@ -1,14 +1,57 @@
 import { supabase } from '../../../../lib/supabase';
 import { jsonResponse, optionsResponse } from '../../../../lib/cors';
+import { resolveUser } from '../../../../lib/auth';
+
+// Merchant (business_owner) dashboard endpoint.
+//
+// Scope — deal-level fields ONLY. Explicitly does NOT read or
+// expose the `positions` table, individual funder data, TAD splits,
+// FF/ISO fees, or anything else that violates the April 14, 2026
+// BO content rules. Removing positions here is defense-in-depth so
+// a future client-side bug can't leak funder-level info that never
+// leaves the server.
+//
+// If you need per-funder data for an ISO/admin view, use
+// /api/dashboard/iso or /api/deals/:id — NOT this route.
 
 export async function OPTIONS(request) {
   return optionsResponse(request);
 }
 
+const UUID_RE =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+// Only the deal columns the BO frontend renders — no positions, no
+// fees, no factor rate, no TAD. Keep this list tight so drifting new
+// columns in `deals` don't accidentally start reaching merchants.
+const BO_DEAL_COLUMNS = [
+  // identity
+  'id', 'merchant_name', 'merchant_dba',
+  'status', 'enrollment_status',
+  // hero row + progress
+  'merchant_weekly_payment',
+  'weeks_completed', 'program_term_weeks',
+  // savings block
+  'original_weekly_burden', 'total_weekly_burden',
+  // payments disclosure (set at agreement signing / admin enrollment)
+  'disclosed_payback',
+  'cost_display_value', 'cost_display_label', 'cost_display_note',
+  'total_paid',
+  // dates
+  'enrollment_date', 'program_start_date', 'estimated_completion_date',
+  'enrolled_at', 'approved_at',
+  'wizard_completed_at',
+  // account page
+  'owner_phone',
+  // ordering
+  'updated_at',
+].join(', ');
+
 // ── Ledger helpers ──────────────────────────────────────────────
-// Shift a date forward to the first Wednesday on or after it.
-// Supabase stores dates as 'YYYY-MM-DD' strings; use UTC to avoid
-// timezone drift pushing the week boundary around.
+// Build the merchant's weekly payment ledger on the fly from deal
+// fields. Intentionally does NOT query the `payments` or
+// `payment_schedules` tables — those stay reserved for real ACH
+// reconciliation once Dwolla/Stripe is wired up.
 function firstWednesdayOnOrAfter(dateStr) {
   const d = new Date(`${String(dateStr).split('T')[0]}T00:00:00Z`);
   const day = d.getUTCDay(); // 0=Sun, 3=Wed
@@ -17,12 +60,6 @@ function firstWednesdayOnOrAfter(dateStr) {
   return d;
 }
 
-// Build a merchant-facing payment ledger on the fly from deal fields.
-// No `payments` table reads — that table stays reserved for real ACH
-// reconciliation. Status derives from `weeksCompleted`:
-//   week <= completed         → 'paid'
-//   week === completed + 1    → 'scheduled'  (next upcoming)
-//   week  >  completed + 1    → 'upcoming'
 function generateLedger(deal, weeksCompleted) {
   const startRaw =
     deal.enrollment_date ||
@@ -55,139 +92,122 @@ function generateLedger(deal, weeksCompleted) {
 
 export async function GET(request) {
   try {
-    const { searchParams } = new URL(request.url);
-    const wpUserId = searchParams.get('wp_user_id');
-
-    if (!wpUserId) {
-      return jsonResponse({ error: 'wp_user_id is required' }, 400, request);
-    }
-
-    // God Mode: admins get an unfiltered view of every merchant deal.
-    // Source of truth is Supabase Auth user_metadata.role via the admin
-    // API (service-role client). Public users table is a fallback.
-    let isAdmin = false;
+    // Auth — resolveUser handles the impersonation cookie natively.
+    // When admin is in God Mode, caller.userId is the IMPERSONATION
+    // TARGET's id (not the admin's), so the downstream query scopes
+    // correctly for both real BO logins and admin-as-merchant.
+    // Non-fatal if it throws; we'll fall through to the legacy
+    // wp_user_id query param for unauthenticated internal callers.
+    let caller = null;
     try {
-      const { data: authLookup, error: authErr } = await supabase.auth.admin.getUserById(wpUserId);
-      if (!authErr) {
-        const meta = authLookup?.user?.user_metadata || {};
-        const appMeta = authLookup?.user?.app_metadata || {};
-        const role = (meta.role || appMeta.role || '').toString().toLowerCase();
-        if (role === 'admin') isAdmin = true;
-      }
-      if (!isAdmin) {
-        const { data: meRow } = await supabase
-          .from('users')
-          .select('role')
-          .eq('id', wpUserId)
-          .maybeSingle();
-        if ((meRow?.role || '').toLowerCase() === 'admin') isAdmin = true;
-      }
-    } catch (e) {
-      console.warn('[dashboard/bo] admin role lookup failed:', e?.message);
+      caller = await resolveUser(request);
+    } catch {
+      /* fall through to query-param fallback */
     }
 
-    // God Mode impersonation — if the admin has an active impersonation
-    // cookie, treat the request as if it came from the target merchant.
-    // Falls through to the regular "25 most recent" unscoped view only
-    // when no impersonation is active.
-    let effectiveUserId = wpUserId;
-    let isImpersonating = false;
-    if (isAdmin) {
-      const cookies = request.headers.get('cookie') || '';
-      const impMatch = cookies.match(/ff_impersonate_user_id=([^;]+)/);
-      if (impMatch) {
-        try {
-          effectiveUserId = decodeURIComponent(impMatch[1]);
-          isImpersonating = true;
-        } catch {
-          /* malformed cookie — ignore */
-        }
-      }
-    }
-    console.log('[dashboard/bo] wp_user_id=%s isAdmin=%s isImpersonating=%s', wpUserId, isAdmin, isImpersonating);
+    // Primary source: caller.userId from resolveUser.
+    // Secondary: wp_user_id query param (legacy contract — some
+    // callers still pass it for the pre-cookie flow).
+    const { searchParams } = new URL(request.url);
+    const queryUserId = searchParams.get('wp_user_id') || '';
+    const targetUserId = caller?.userId || queryUserId || '';
 
-    // Get the deal(s) for this merchant (or the 25 most recent in God Mode)
-    let dealsQuery = supabase
+    if (!targetUserId) {
+      return jsonResponse(
+        { error: 'wp_user_id is required' },
+        400,
+        request
+      );
+    }
+    if (!UUID_RE.test(targetUserId)) {
+      return jsonResponse(
+        { error: 'wp_user_id must be a valid UUID' },
+        400,
+        request
+      );
+    }
+
+    // Admin viewing /dashboard/bo without impersonating a specific
+    // merchant → no deal to render. God Mode "preview all merchants"
+    // is not something this endpoint supports; admins should either
+    // impersonate a specific merchant or use /dashboard/admin for
+    // the unfiltered overview. Return an empty deal so the BO
+    // frontend handles it as "no data" without a 404.
+    const adminNoImpersonation =
+      caller?.isAdmin && !caller?.isImpersonating;
+    if (adminNoImpersonation) {
+      return jsonResponse({ deal: null }, 200, request);
+    }
+
+    // Lookup the most-recent deal owned by this user. The `deals`
+    // table has both `user_id` (newer submit flow) and `wp_user_id`
+    // (pre-migration column); different code paths write different
+    // ones, so check `user_id` first and fall back to `wp_user_id`.
+    // Two separate .eq() queries (rather than a single .or()) keeps
+    // PostgREST filter strings out of the hot path — safer vs.
+    // any surprising characters in targetUserId.
+    let deal = null;
+
+    const byUserId = await supabase
       .from('deals')
-      .select(`
-        id, merchant_name, merchant_dba, status, enrollment_status,
-        total_balance, total_weekly_burden, current_dsr, proposed_dsr,
-        merchant_weekly_payment, position_count, monthly_revenue,
-        total_savings, original_weekly_burden, created_at, updated_at,
-        enrollment_date, program_start_date, enrolled_at, approved_at,
-        program_term_weeks, estimated_completion_date,
-        disclosed_payback, cost_display_value, cost_display_label, cost_display_note,
-        positions(
-          id, funder_name, estimated_balance, current_weekly_payment,
-          agreement_status, status, funder_legal_name, payment_frequency,
-          settled_amount, settled_date, payments_made, payments_remaining
-        )
-      `)
-      .order('created_at', { ascending: false });
-
-    if (isImpersonating) {
-      // Admin impersonating a specific merchant — filter to their deals
-      dealsQuery = dealsQuery.eq('wp_user_id', effectiveUserId);
-    } else if (isAdmin) {
-      dealsQuery = dealsQuery.limit(25);
-    } else {
-      dealsQuery = dealsQuery.eq('wp_user_id', wpUserId);
-    }
-
-    const { data: deals, error: dealsError } = await dealsQuery;
-
-    if (dealsError) {
-      return jsonResponse({ error: dealsError.message }, 500, request);
-    }
-
-    if (!deals || deals.length === 0) {
-      return jsonResponse({ error: 'No deals found for this user' }, 404, request);
-    }
-
-    // Primary deal (most recent active)
-    const deal = deals.find(d => d.status === 'active' || d.status === 'enrolled') || deals[0];
-
-    // Get next payment info
-    const { data: nextPayment } = await supabase
-      .from('payment_schedules')
-      .select('payment_date, amount, status')
-      .eq('deal_id', deal.id)
-      .eq('status', 'scheduled')
-      .gte('payment_date', new Date().toISOString().split('T')[0])
-      .order('payment_date', { ascending: true })
+      .select(BO_DEAL_COLUMNS)
+      .eq('user_id', targetUserId)
+      .order('updated_at', { ascending: false })
       .limit(1)
       .maybeSingle();
+    if (byUserId.error) {
+      return jsonResponse(
+        { error: byUserId.error.message },
+        500,
+        request
+      );
+    }
+    if (byUserId.data) {
+      deal = byUserId.data;
+    } else {
+      const byWpUserId = await supabase
+        .from('deals')
+        .select(BO_DEAL_COLUMNS)
+        .eq('wp_user_id', targetUserId)
+        .order('updated_at', { ascending: false })
+        .limit(1)
+        .maybeSingle();
+      if (byWpUserId.error) {
+        return jsonResponse(
+          { error: byWpUserId.error.message },
+          500,
+          request
+        );
+      }
+      deal = byWpUserId.data || null;
+    }
 
-    // Get payment history summary
-    const { data: payments } = await supabase
-      .from('payments')
-      .select('id, amount, payment_date, status, week_number')
-      .eq('deal_id', deal.id)
-      .order('payment_date', { ascending: false });
+    if (!deal) {
+      // Merchant has no deal yet (post-signup, pre-submit) — return
+      // null rather than 404 so the BO frontend can render its
+      // empty-state UI without treating this as an error.
+      return jsonResponse({ deal: null }, 200, request);
+    }
 
-    const totalPaid = (payments || [])
-      .filter(p => p.status === 'completed')
-      .reduce((sum, p) => sum + (parseFloat(p.amount) || 0), 0);
+    // ── Compute derived fields ────────────────────────────────────
+    const weeksCompleted = parseInt(deal.weeks_completed, 10) || 0;
+    const termWeeks = parseInt(deal.program_term_weeks, 10) || 0;
+    const progressPct =
+      termWeeks > 0 ? Math.round((weeksCompleted / termWeeks) * 100) : 0;
 
-    const weeksCompleted = (payments || []).filter(p => p.status === 'completed').length;
+    // Original weekly burden — prefer the dedicated field, fall back
+    // to total_weekly_burden (the sum of position weekly payments at
+    // submit time) if the newer column wasn't populated on this deal.
+    const originalBurden =
+      parseFloat(deal.original_weekly_burden) ||
+      parseFloat(deal.total_weekly_burden) ||
+      0;
 
-    // Compute progress
-    const originalBurden = parseFloat(deal.original_weekly_burden) || parseFloat(deal.total_weekly_burden) || 0;
-    const totalBalance = parseFloat(deal.total_balance) || 0;
-    const remaining = Math.max(0, totalBalance - totalPaid);
-    const progressPct = totalBalance > 0 ? Math.round((totalPaid / totalBalance) * 100) : 0;
-
-    // Get onboarding wizard state
-    const { data: onboarding } = await supabase
-      .from('merchant_onboarding')
-      .select('*')
-      .eq('deal_id', deal.id)
-      .maybeSingle();
-
-    // Build merchant-facing payment ledger from deal fields (not payments table)
     const payment_ledger = generateLedger(deal, weeksCompleted);
 
-    // Pick the best available enrollment / completion dates to expose
+    // Best-available enrollment date for display (in order of
+    // preference). The BO frontend reads `enrolled_at || approved_at`
+    // separately, so expose those raw too.
     const enrollmentDate =
       deal.enrollment_date ||
       deal.program_start_date ||
@@ -195,55 +215,62 @@ export async function GET(request) {
       deal.approved_at ||
       null;
 
-    return jsonResponse({
-      deal: {
-        id: deal.id,
-        merchant_name: deal.merchant_name,
-        merchant_dba: deal.merchant_dba,
-        status: deal.status,
-        enrollment_status: deal.enrollment_status,
-        weekly_payment: parseFloat(deal.merchant_weekly_payment) || 0,
-        merchant_weekly_payment: parseFloat(deal.merchant_weekly_payment) || 0,
-        weeks_completed: weeksCompleted,
-        program_term_weeks: parseInt(deal.program_term_weeks, 10) || 0,
-        enrollment_date: enrollmentDate,
-        estimated_completion_date: deal.estimated_completion_date || null,
-        total_paid: Math.round(totalPaid * 100) / 100,
-        remaining: Math.round(remaining * 100) / 100,
-        total_balance: totalBalance,
-        total_savings: parseFloat(deal.total_savings) || 0,
-        original_weekly_burden: originalBurden,
-        current_dsr: parseFloat(deal.current_dsr) || 0,
-        proposed_dsr: parseFloat(deal.proposed_dsr) || 0,
-        progress_pct: progressPct,
-        // Merchant-facing pricing disclosure (null until set at agreement signing)
-        disclosed_payback: deal.disclosed_payback != null ? parseFloat(deal.disclosed_payback) : null,
-        cost_display_value: deal.cost_display_value != null ? parseFloat(deal.cost_display_value) : null,
-        cost_display_label: deal.cost_display_label || null,
-        cost_display_note: deal.cost_display_note || null,
-        // Derived weekly ledger (generated, not from payments table)
-        payment_ledger,
+    const merchantWeekly = parseFloat(deal.merchant_weekly_payment) || 0;
+
+    return jsonResponse(
+      {
+        deal: {
+          id: deal.id,
+          merchant_name: deal.merchant_name,
+          merchant_dba: deal.merchant_dba,
+          status: deal.status,
+          enrollment_status: deal.enrollment_status,
+
+          // Hero row
+          merchant_weekly_payment: merchantWeekly,
+          // Legacy alias — BO Home reads `weekly_payment` first
+          weekly_payment: merchantWeekly,
+          weeks_completed: weeksCompleted,
+          program_term_weeks: termWeeks,
+          progress_pct: progressPct,
+
+          // Savings block
+          original_weekly_burden: originalBurden,
+          total_weekly_burden: parseFloat(deal.total_weekly_burden) || 0,
+
+          // Payments disclosure (nullable until agreement signing /
+          // admin enrollment populates them)
+          disclosed_payback:
+            deal.disclosed_payback != null
+              ? parseFloat(deal.disclosed_payback)
+              : null,
+          cost_display_value:
+            deal.cost_display_value != null
+              ? parseFloat(deal.cost_display_value)
+              : null,
+          cost_display_label: deal.cost_display_label || null,
+          cost_display_note: deal.cost_display_note || null,
+          total_paid: parseFloat(deal.total_paid) || 0,
+
+          // Dates
+          enrollment_date: enrollmentDate,
+          program_start_date: deal.program_start_date || null,
+          estimated_completion_date: deal.estimated_completion_date || null,
+          enrolled_at: deal.enrolled_at || null,
+          approved_at: deal.approved_at || null,
+          wizard_completed_at: deal.wizard_completed_at || null,
+
+          // Account page
+          owner_phone: deal.owner_phone || null,
+
+          // Derived weekly ledger (generated on-the-fly, not from
+          // the payments table)
+          payment_ledger,
+        },
       },
-      positions: (deal.positions || []).map(p => ({
-        id: p.id,
-        funder_name: p.funder_name,
-        funder_legal_name: p.funder_legal_name,
-        estimated_balance: parseFloat(p.estimated_balance) || 0,
-        current_weekly_payment: parseFloat(p.current_weekly_payment) || 0,
-        agreement_status: p.agreement_status || 'pending',
-        status: p.status,
-        payment_frequency: p.payment_frequency,
-        settled_amount: parseFloat(p.settled_amount) || 0,
-        settled_date: p.settled_date,
-        payments_made: p.payments_made || 0,
-        payments_remaining: p.payments_remaining || 0,
-      })),
-      next_payment: nextPayment ? {
-        date: nextPayment.payment_date,
-        amount: parseFloat(nextPayment.amount) || 0,
-      } : null,
-      onboarding: onboarding || null,
-    }, 200, request);
+      200,
+      request
+    );
   } catch (err) {
     return jsonResponse({ error: err.message }, 500, request);
   }
