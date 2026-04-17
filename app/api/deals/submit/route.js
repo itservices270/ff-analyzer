@@ -1,3 +1,4 @@
+import { randomBytes } from 'crypto';
 import { supabase } from '../../../../lib/supabase';
 import { jsonResponse, optionsResponse } from '../../../../lib/cors';
 import { sendNewDealEmail } from '../../../../lib/notifications';
@@ -5,6 +6,89 @@ import { assertNotImpersonating } from '../../../../lib/auth';
 
 export async function OPTIONS(request) {
   return optionsResponse(request);
+}
+
+// ── Auth user helpers ──────────────────────────────────────────────
+// Resolve an auth.users row by email. Two-path lookup:
+//
+//   Path 1 — public.users (authoritative for users created via this
+//   route). This submit handler always writes auth.users and then
+//   upserts public.users with the SAME UUID as the primary key, so
+//   public.users is a reliable email→id index for anything we've
+//   previously created. Deterministic, no pagination, no consistency
+//   lag. A public.users hit without a matching auth.users row is a
+//   legacy orphan from a pre-fix submit; fall through to Path 2.
+//
+//   Path 2 — paginated listUsers fallback. Catches users created
+//   through other admin tooling (Supabase dashboard, backfill
+//   scripts). Capped at 20,000 users via 20 pages × 1000.
+//
+// Why the previous single-page listUsers approach broke:
+//   - `listUsers({ page: 1, perPage: 1000 })` missed newly-created
+//     users in two cases — pagination (auth.users > 1000 rows) and
+//     eventual-consistency lag between createUser and listUsers.
+//     Test 6 (duplicate-email idempotency) caught this in preview.
+async function findAuthUserByEmail(email) {
+  if (!email) return null;
+  const normalizedEmail = email.toLowerCase();
+
+  // Path 1: public.users by email → getUserById to confirm.
+  try {
+    const { data: profile, error: profileErr } = await supabase
+      .from('users')
+      .select('id')
+      .eq('email', normalizedEmail)
+      .maybeSingle();
+
+    if (profileErr) {
+      console.warn('[findAuthUserByEmail] public.users lookup failed:', profileErr.message);
+    } else if (profile?.id) {
+      const { data: authData, error: authErr } =
+        await supabase.auth.admin.getUserById(profile.id);
+      if (authErr) {
+        console.warn(
+          '[findAuthUserByEmail] getUserById failed for',
+          profile.id,
+          ':',
+          authErr.message
+        );
+      } else if (authData?.user) {
+        return authData.user;
+      }
+      // public hit + auth miss → legacy orphan; fall through to Path 2
+    }
+  } catch (err) {
+    console.warn('[findAuthUserByEmail] public.users path threw:', err?.message);
+  }
+
+  // Path 2: paginated listUsers fallback.
+  try {
+    const perPage = 1000;
+    for (let page = 1; page <= 20; page++) {
+      const { data, error } = await supabase.auth.admin.listUsers({ page, perPage });
+      if (error) {
+        console.warn('[findAuthUserByEmail] listUsers page', page, 'failed:', error.message);
+        return null;
+      }
+      const users = data?.users || [];
+      const match = users.find(
+        (u) => (u.email || '').toLowerCase() === normalizedEmail
+      );
+      if (match) return match;
+      if (users.length < perPage) return null; // last page
+    }
+  } catch (err) {
+    console.warn('[findAuthUserByEmail] listUsers path threw:', err?.message);
+  }
+
+  return null;
+}
+
+// Random temp password — the merchant never sees this. They get in
+// later via magic link / password reset (admin sets or wizard-issues
+// on enrollment; see CIRCLE-BACK-LIST welcome-email item).
+function generateTempPassword() {
+  return randomBytes(18).toString('base64');
 }
 
 export async function POST(request) {
@@ -31,21 +115,104 @@ export async function POST(request) {
       return jsonResponse({ error: 'business_name and iso_wp_user_id are required' }, 400, request);
     }
 
-    // Check if merchant user already exists by email, create if not
+    // ── Resolve or create the merchant's auth.users + public.users ──
+    // Every merchant owner gets an auth.users row FIRST, then a matching
+    // public.users row with the SAME UUID. This is the fix for the
+    // orphan bug surfaced in tonight's A-Prime preflight: previously
+    // the submit path created only a public.users row, so downstream
+    // admin-enrollment via supabase.auth.admin.getUserById() hit "owner
+    // user not found in auth" for every deal.
+    //
+    // Flow:
+    //   1. Look up auth.users by email. If found, reuse its UUID.
+    //   2. If not found, create via supabase.auth.admin.createUser with
+    //      a random temp password + email_confirm: true so there's no
+    //      inbox ping at submit time. Merchant gets a magic-link / pw
+    //      reset out-of-band (admin for V1; welcome-email flow for V2).
+    //   3. Upsert the public.users row with the SAME id so both tables
+    //      agree. onConflict: 'id' means a prior submit under the same
+    //      email updates the profile fields in place rather than
+    //      duplicating.
+    //
+    // If owner_email is not provided, skip auth + profile creation and
+    // leave deals.user_id null — preserves the pre-fix behavior for
+    // unusual email-less submissions. The form requires email in
+    // practice, so this branch is defensive only.
     let merchantUserId = null;
     if (owner_email) {
-      const { data: existingUser } = await supabase
-        .from('users')
-        .select('id')
-        .eq('email', owner_email)
-        .maybeSingle();
+      // 1. Resolve or create auth.users
+      let authUser = await findAuthUserByEmail(owner_email);
+      if (!authUser) {
+        const { data: created, error: authErr } = await supabase.auth.admin.createUser({
+          email: owner_email,
+          password: generateTempPassword(),
+          email_confirm: true,
+          user_metadata: {
+            role: 'business_owner',
+            first_name: owner_first || null,
+            last_name: owner_last || null,
+          },
+        });
 
-      if (existingUser) {
-        merchantUserId = existingUser.id;
-      } else {
-        const { data: newUser, error: userError } = await supabase
-          .from('users')
-          .insert({
+        if (authErr) {
+          // Duplicate-recovery: if the lookup missed an existing user
+          // but Supabase Auth rejects the duplicate, re-resolve via
+          // findAuthUserByEmail (which will hit the public.users path
+          // this time IF a prior submit wrote the mirror row, or the
+          // listUsers fallback otherwise). Handles the race between
+          // two near-simultaneous submits AND the listUsers
+          // consistency-lag case that Test 6 exposed on the preview.
+          const msg = (authErr.message || '').toLowerCase();
+          const isDuplicate =
+            msg.includes('already been registered') ||
+            msg.includes('already exists') ||
+            authErr.code === 'email_exists' ||
+            authErr.status === 422;
+
+          if (isDuplicate) {
+            console.warn(
+              '[deals/submit] createUser reported duplicate for',
+              owner_email,
+              '— recovering via findAuthUserByEmail'
+            );
+            authUser = await findAuthUserByEmail(owner_email);
+            if (!authUser) {
+              console.error(
+                '[deals/submit] duplicate reported but user not resolvable for',
+                owner_email
+              );
+              return jsonResponse(
+                { error: 'Could not resolve merchant account after duplicate-email error' },
+                500,
+                request
+              );
+            }
+          } else {
+            console.error('[deals/submit] createUser failed:', authErr.message);
+            return jsonResponse(
+              { error: 'Failed to create merchant auth user: ' + authErr.message },
+              500,
+              request
+            );
+          }
+        } else if (!created?.user) {
+          return jsonResponse(
+            { error: 'Failed to create merchant auth user: no user returned' },
+            500,
+            request
+          );
+        } else {
+          authUser = created.user;
+        }
+      }
+      merchantUserId = authUser.id;
+
+      // 2. Upsert the public.users mirror row on the same UUID
+      const { error: profileErr } = await supabase
+        .from('users')
+        .upsert(
+          {
+            id: merchantUserId,
             email: owner_email,
             first_name: owner_first,
             last_name: owner_last,
@@ -56,14 +223,15 @@ export async function POST(request) {
             city: owner_city,
             state: owner_state,
             zip: owner_zip,
-          })
-          .select('id')
-          .single();
-
-        if (userError) {
-          return jsonResponse({ error: 'Failed to create merchant user: ' + userError.message }, 500, request);
-        }
-        merchantUserId = newUser.id;
+          },
+          { onConflict: 'id' }
+        );
+      if (profileErr) {
+        return jsonResponse(
+          { error: 'Failed to create merchant profile: ' + profileErr.message },
+          500,
+          request
+        );
       }
     }
 
