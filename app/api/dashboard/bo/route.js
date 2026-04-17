@@ -5,6 +5,54 @@ export async function OPTIONS(request) {
   return optionsResponse(request);
 }
 
+// ── Ledger helpers ──────────────────────────────────────────────
+// Shift a date forward to the first Wednesday on or after it.
+// Supabase stores dates as 'YYYY-MM-DD' strings; use UTC to avoid
+// timezone drift pushing the week boundary around.
+function firstWednesdayOnOrAfter(dateStr) {
+  const d = new Date(`${String(dateStr).split('T')[0]}T00:00:00Z`);
+  const day = d.getUTCDay(); // 0=Sun, 3=Wed
+  const delta = (3 - day + 7) % 7;
+  if (delta > 0) d.setUTCDate(d.getUTCDate() + delta);
+  return d;
+}
+
+// Build a merchant-facing payment ledger on the fly from deal fields.
+// No `payments` table reads — that table stays reserved for real ACH
+// reconciliation. Status derives from `weeksCompleted`:
+//   week <= completed         → 'paid'
+//   week === completed + 1    → 'scheduled'  (next upcoming)
+//   week  >  completed + 1    → 'upcoming'
+function generateLedger(deal, weeksCompleted) {
+  const startRaw =
+    deal.enrollment_date ||
+    deal.program_start_date ||
+    deal.enrolled_at ||
+    deal.approved_at ||
+    null;
+  const termWeeks = parseInt(deal.program_term_weeks, 10) || 0;
+  const weekly = parseFloat(deal.merchant_weekly_payment) || 0;
+  if (!startRaw || !termWeeks || !weekly) return [];
+
+  const firstDate = firstWednesdayOnOrAfter(startRaw);
+  const ledger = [];
+  for (let i = 1; i <= termWeeks; i++) {
+    const d = new Date(firstDate);
+    d.setUTCDate(firstDate.getUTCDate() + (i - 1) * 7);
+    let status;
+    if (i <= weeksCompleted) status = 'paid';
+    else if (i === weeksCompleted + 1) status = 'scheduled';
+    else status = 'upcoming';
+    ledger.push({
+      week: i,
+      date: d.toISOString().split('T')[0],
+      amount: weekly,
+      status,
+    });
+  }
+  return ledger;
+}
+
 export async function GET(request) {
   try {
     const { searchParams } = new URL(request.url);
@@ -47,6 +95,9 @@ export async function GET(request) {
         total_balance, total_weekly_burden, current_dsr, proposed_dsr,
         merchant_weekly_payment, position_count, monthly_revenue,
         total_savings, original_weekly_burden, created_at, updated_at,
+        enrollment_date, program_start_date, enrolled_at, approved_at,
+        program_term_weeks, estimated_completion_date,
+        disclosed_payback, cost_display_value, cost_display_label, cost_display_note,
         positions(
           id, funder_name, estimated_balance, current_weekly_payment,
           agreement_status, status, funder_legal_name, payment_frequency,
@@ -111,6 +162,17 @@ export async function GET(request) {
       .eq('deal_id', deal.id)
       .maybeSingle();
 
+    // Build merchant-facing payment ledger from deal fields (not payments table)
+    const payment_ledger = generateLedger(deal, weeksCompleted);
+
+    // Pick the best available enrollment / completion dates to expose
+    const enrollmentDate =
+      deal.enrollment_date ||
+      deal.program_start_date ||
+      deal.enrolled_at ||
+      deal.approved_at ||
+      null;
+
     return jsonResponse({
       deal: {
         id: deal.id,
@@ -119,7 +181,11 @@ export async function GET(request) {
         status: deal.status,
         enrollment_status: deal.enrollment_status,
         weekly_payment: parseFloat(deal.merchant_weekly_payment) || 0,
+        merchant_weekly_payment: parseFloat(deal.merchant_weekly_payment) || 0,
         weeks_completed: weeksCompleted,
+        program_term_weeks: parseInt(deal.program_term_weeks, 10) || 0,
+        enrollment_date: enrollmentDate,
+        estimated_completion_date: deal.estimated_completion_date || null,
         total_paid: Math.round(totalPaid * 100) / 100,
         remaining: Math.round(remaining * 100) / 100,
         total_balance: totalBalance,
@@ -128,6 +194,13 @@ export async function GET(request) {
         current_dsr: parseFloat(deal.current_dsr) || 0,
         proposed_dsr: parseFloat(deal.proposed_dsr) || 0,
         progress_pct: progressPct,
+        // Merchant-facing pricing disclosure (null until set at agreement signing)
+        disclosed_payback: deal.disclosed_payback != null ? parseFloat(deal.disclosed_payback) : null,
+        cost_display_value: deal.cost_display_value != null ? parseFloat(deal.cost_display_value) : null,
+        cost_display_label: deal.cost_display_label || null,
+        cost_display_note: deal.cost_display_note || null,
+        // Derived weekly ledger (generated, not from payments table)
+        payment_ledger,
       },
       positions: (deal.positions || []).map(p => ({
         id: p.id,

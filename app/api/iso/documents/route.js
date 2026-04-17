@@ -1,4 +1,5 @@
 import { supabase } from '../../../../lib/supabase';
+import { resolveUser } from '../../../../lib/auth';
 import { NextResponse } from 'next/server';
 
 const BUCKET = 'iso-documents';
@@ -11,10 +12,11 @@ function safeFileName(name) {
 // GET /api/iso/documents — list the authenticated ISO's uploaded docs
 export async function GET(request) {
   try {
-    const userId = request.headers.get('x-user-id') ||
-      new URL(request.url).searchParams.get('user_id');
-    if (!userId) {
-      return NextResponse.json({ error: 'user_id required' }, { status: 400 });
+    let userId;
+    try {
+      ({ userId } = await resolveUser(request));
+    } catch (e) {
+      return NextResponse.json({ error: e.error || 'unauthorized' }, { status: e.status || 401 });
     }
 
     const { data, error } = await supabase
@@ -40,15 +42,17 @@ export async function GET(request) {
 // Accepts FormData: file (File), doc_type (string), user_id (string)
 export async function POST(request) {
   try {
+    let userId;
+    try {
+      // Clone request before consuming body — formData() consumes the stream
+      ({ userId } = await resolveUser(request.clone()));
+    } catch (e) {
+      return NextResponse.json({ error: e.error || 'unauthorized' }, { status: e.status || 401 });
+    }
+
     const form = await request.formData();
     const file = form.get('file');
     const docType = (form.get('doc_type') || '').toString().trim();
-    const userId = form.get('user_id')?.toString().trim() ||
-      request.headers.get('x-user-id');
-
-    if (!userId) {
-      return NextResponse.json({ error: 'user_id required' }, { status: 400 });
-    }
     if (!file || typeof file === 'string') {
       return NextResponse.json({ error: 'file is required' }, { status: 400 });
     }

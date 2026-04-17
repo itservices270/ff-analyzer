@@ -1,17 +1,20 @@
 import { supabase } from '../../../../../lib/supabase';
+import { resolveUser } from '../../../../../lib/auth';
 import { NextResponse } from 'next/server';
 
 // PUT /api/iso/reps/[repId] — update an existing rep
 // Body JSON: any of { first_name, last_name, title, email, phone, is_active }
 export async function PUT(request, { params }) {
   try {
+    let userId;
+    try {
+      ({ userId } = await resolveUser(request.clone()));
+    } catch (e) {
+      return NextResponse.json({ error: e.error || 'unauthorized' }, { status: e.status || 401 });
+    }
+
     const { repId } = await params;
     const body = await request.json();
-    const userId = body.user_id || request.headers.get('x-user-id');
-
-    if (!userId) {
-      return NextResponse.json({ error: 'user_id required' }, { status: 400 });
-    }
     if (!repId) {
       return NextResponse.json({ error: 'repId required' }, { status: 400 });
     }
@@ -54,13 +57,14 @@ export async function PUT(request, { params }) {
 // DELETE /api/iso/reps/[repId] — hard delete a rep (only if no deals assigned)
 export async function DELETE(request, { params }) {
   try {
-    const { repId } = await params;
-    const userId = new URL(request.url).searchParams.get('user_id') ||
-      request.headers.get('x-user-id');
-
-    if (!userId) {
-      return NextResponse.json({ error: 'user_id required' }, { status: 400 });
+    let userId;
+    try {
+      ({ userId } = await resolveUser(request));
+    } catch (e) {
+      return NextResponse.json({ error: e.error || 'unauthorized' }, { status: e.status || 401 });
     }
+
+    const { repId } = await params;
     if (!repId) {
       return NextResponse.json({ error: 'repId required' }, { status: 400 });
     }

@@ -1,4 +1,5 @@
 import { supabase } from '../../../../lib/supabase';
+import { resolveUser } from '../../../../lib/auth';
 import { sendResendEmail } from '../../../../lib/notifications';
 import { NextResponse } from 'next/server';
 
@@ -18,12 +19,11 @@ function safeFileName(name) {
 // account_type, notes, supporting_doc (file), user_id
 export async function POST(request) {
   try {
-    const form = await request.formData();
-    const userId = form.get('user_id')?.toString().trim() ||
-      request.headers.get('x-user-id');
-
-    if (!userId) {
-      return NextResponse.json({ error: 'user_id required' }, { status: 400 });
+    let userId;
+    try {
+      ({ userId } = await resolveUser(request.clone()));
+    } catch (e) {
+      return NextResponse.json({ error: e.error || 'unauthorized' }, { status: e.status || 401 });
     }
 
     const accountHolder = (form.get('account_holder') || '').toString().trim();

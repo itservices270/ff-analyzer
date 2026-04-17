@@ -51,12 +51,13 @@ export async function GET(request) {
         total_balance, total_weekly_burden, original_weekly_burden,
         current_dsr, proposed_dsr,
         merchant_weekly_payment, iso_commission_total, iso_commission_points,
-        proposed_reduction_pct, agreement_token,
+        proposed_reduction_pct, agreement_token, assigned_rep_id,
         iso_locked_at, iso_locked_commission, iso_locked_merchant_weekly,
         iso_locked_reduction_pct, iso_locked_points, iso_locked_term,
         owner_first, owner_last, owner_email, owner_phone,
         position_count, created_at, updated_at,
-        positions(id, funder_name, estimated_balance, current_weekly_payment, payment_frequency, agreement_status, status)
+        positions(id, funder_name, estimated_balance, current_weekly_payment, payment_frequency, agreement_status, status),
+        assigned_rep:iso_reps(id, first_name, last_name, title, email, phone)
       `)
       .order('updated_at', { ascending: false });
 
