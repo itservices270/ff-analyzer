@@ -41,7 +41,25 @@ export async function GET(request) {
     } catch (e) {
       console.warn('[dashboard/iso] admin role lookup failed:', e?.message);
     }
-    console.log('[dashboard/iso] wp_user_id=%s isAdmin=%s', wpUserId, isAdmin);
+
+    // God Mode impersonation — if an admin's impersonation cookie targets
+    // an ISO, scope the dashboard to that ISO's deals only (not the full
+    // admin God Mode view).
+    let effectiveUserId = wpUserId;
+    let isImpersonating = false;
+    if (isAdmin) {
+      const cookies = request.headers.get('cookie') || '';
+      const impMatch = cookies.match(/ff_impersonate_user_id=([^;]+)/);
+      if (impMatch) {
+        try {
+          effectiveUserId = decodeURIComponent(impMatch[1]);
+          isImpersonating = true;
+        } catch {
+          /* malformed cookie — ignore */
+        }
+      }
+    }
+    console.log('[dashboard/iso] wp_user_id=%s isAdmin=%s isImpersonating=%s', wpUserId, isAdmin, isImpersonating);
 
     // Get all deals for this ISO (or all deals if admin God Mode)
     let dealsQuery = supabase
@@ -61,7 +79,9 @@ export async function GET(request) {
       `)
       .order('updated_at', { ascending: false });
 
-    if (!isAdmin) {
+    if (isImpersonating) {
+      dealsQuery = dealsQuery.eq('iso_wp_user_id', effectiveUserId);
+    } else if (!isAdmin) {
       dealsQuery = dealsQuery.eq('iso_wp_user_id', wpUserId);
     }
 

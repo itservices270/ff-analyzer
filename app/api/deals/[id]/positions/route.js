@@ -1,5 +1,6 @@
 import { supabase } from '../../../../../lib/supabase';
 import { NextResponse } from 'next/server';
+import { assertNotImpersonating } from '../../../../../lib/auth';
 
 // GET — All positions for a deal
 export async function GET(request, { params }) {
@@ -25,6 +26,11 @@ export async function GET(request, { params }) {
 // POST — Add a new position to a deal
 export async function POST(request, { params }) {
   try {
+    try {
+      await assertNotImpersonating(request);
+    } catch (e) {
+      return NextResponse.json({ error: e.error }, { status: e.status });
+    }
     const { id: deal_id } = await params;
     const body = await request.json();
 

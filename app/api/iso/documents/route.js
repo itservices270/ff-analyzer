@@ -1,5 +1,5 @@
 import { supabase } from '../../../../lib/supabase';
-import { resolveUser } from '../../../../lib/auth';
+import { resolveUser, assertNotImpersonating } from '../../../../lib/auth';
 import { NextResponse } from 'next/server';
 
 const BUCKET = 'iso-documents';
@@ -42,6 +42,11 @@ export async function GET(request) {
 // Accepts FormData: file (File), doc_type (string), user_id (string)
 export async function POST(request) {
   try {
+    try {
+      await assertNotImpersonating(request);
+    } catch (e) {
+      return NextResponse.json({ error: e.error }, { status: e.status });
+    }
     let userId;
     try {
       // Clone request before consuming body — formData() consumes the stream

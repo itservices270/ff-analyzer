@@ -1,9 +1,15 @@
 import { supabase } from '../../../lib/supabase';
 import { NextResponse } from 'next/server';
+import { assertNotImpersonating } from '../../../lib/auth';
 
 // POST — Create a new deal with positions
 export async function POST(request) {
   try {
+    try {
+      await assertNotImpersonating(request);
+    } catch (e) {
+      return NextResponse.json({ error: e.error }, { status: e.status });
+    }
     const body = await request.json();
     const {
       merchant_name, merchant_dba, merchant_ein, merchant_state,

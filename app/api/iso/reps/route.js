@@ -1,5 +1,5 @@
 import { supabase } from '../../../../lib/supabase';
-import { resolveUser } from '../../../../lib/auth';
+import { resolveUser, assertNotImpersonating } from '../../../../lib/auth';
 import { NextResponse } from 'next/server';
 
 // GET /api/iso/reps — list reps for the authenticated ISO
@@ -36,6 +36,11 @@ export async function GET(request) {
 // Body JSON: { first_name, last_name, title, email, phone, user_id }
 export async function POST(request) {
   try {
+    try {
+      await assertNotImpersonating(request);
+    } catch (e) {
+      return NextResponse.json({ error: e.error }, { status: e.status });
+    }
     let userId;
     try {
       ({ userId } = await resolveUser(request.clone()));

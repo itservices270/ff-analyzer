@@ -1,6 +1,7 @@
 import { supabase } from '../../../../lib/supabase';
 import { jsonResponse, optionsResponse } from '../../../../lib/cors';
 import { sendNewDealEmail } from '../../../../lib/notifications';
+import { assertNotImpersonating } from '../../../../lib/auth';
 
 export async function OPTIONS(request) {
   return optionsResponse(request);
@@ -8,6 +9,11 @@ export async function OPTIONS(request) {
 
 export async function POST(request) {
   try {
+    try {
+      await assertNotImpersonating(request);
+    } catch (e) {
+      return jsonResponse({ error: e.error }, e.status, request);
+    }
     const body = await request.json();
     const {
       business_name, dba, entity_type, ein, state_incorporated,

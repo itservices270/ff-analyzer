@@ -85,7 +85,26 @@ export async function GET(request) {
     } catch (e) {
       console.warn('[dashboard/bo] admin role lookup failed:', e?.message);
     }
-    console.log('[dashboard/bo] wp_user_id=%s isAdmin=%s', wpUserId, isAdmin);
+
+    // God Mode impersonation — if the admin has an active impersonation
+    // cookie, treat the request as if it came from the target merchant.
+    // Falls through to the regular "25 most recent" unscoped view only
+    // when no impersonation is active.
+    let effectiveUserId = wpUserId;
+    let isImpersonating = false;
+    if (isAdmin) {
+      const cookies = request.headers.get('cookie') || '';
+      const impMatch = cookies.match(/ff_impersonate_user_id=([^;]+)/);
+      if (impMatch) {
+        try {
+          effectiveUserId = decodeURIComponent(impMatch[1]);
+          isImpersonating = true;
+        } catch {
+          /* malformed cookie — ignore */
+        }
+      }
+    }
+    console.log('[dashboard/bo] wp_user_id=%s isAdmin=%s isImpersonating=%s', wpUserId, isAdmin, isImpersonating);
 
     // Get the deal(s) for this merchant (or the 25 most recent in God Mode)
     let dealsQuery = supabase
@@ -106,7 +125,10 @@ export async function GET(request) {
       `)
       .order('created_at', { ascending: false });
 
-    if (isAdmin) {
+    if (isImpersonating) {
+      // Admin impersonating a specific merchant — filter to their deals
+      dealsQuery = dealsQuery.eq('wp_user_id', effectiveUserId);
+    } else if (isAdmin) {
       dealsQuery = dealsQuery.limit(25);
     } else {
       dealsQuery = dealsQuery.eq('wp_user_id', wpUserId);

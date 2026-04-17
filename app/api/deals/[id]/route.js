@@ -1,5 +1,6 @@
 import { supabase } from '../../../../lib/supabase';
 import { NextResponse } from 'next/server';
+import { assertNotImpersonating } from '../../../../lib/auth';
 
 // GET — Single deal with positions
 export async function GET(request, { params }) {
@@ -25,6 +26,11 @@ export async function GET(request, { params }) {
 // PUT — Update deal fields
 export async function PUT(request, { params }) {
   try {
+    try {
+      await assertNotImpersonating(request);
+    } catch (e) {
+      return NextResponse.json({ error: e.error }, { status: e.status });
+    }
     const { id } = await params;
     const body = await request.json();
 
@@ -55,6 +61,11 @@ export async function PUT(request, { params }) {
 // DELETE — Soft delete (set status to cancelled)
 export async function DELETE(request, { params }) {
   try {
+    try {
+      await assertNotImpersonating(request);
+    } catch (e) {
+      return NextResponse.json({ error: e.error }, { status: e.status });
+    }
     const { id } = await params;
 
     const { data, error } = await supabase
