@@ -41,10 +41,25 @@ const BO_DEAL_COLUMNS = [
   'enrollment_date', 'program_start_date', 'estimated_completion_date',
   'enrolled_at', 'approved_at',
   'wizard_completed_at',
-  // account page
-  'owner_phone',
+  // account page — owner personal info denormalized on deal at submit
+  'owner_first', 'owner_last', 'owner_email', 'owner_phone',
   // ordering
   'updated_at',
+].join(', ');
+
+// Positions columns the merchant IS allowed to see. Funder NAMES are
+// legitimate — the merchant signed contracts with these funders and
+// needs to know who to send hardship emails to. Per the April 14 BO
+// content rules, merchants MUST NOT see: balance, factor_rate,
+// payments, TAD fields, scoring fields, or anything else position-
+// level beyond identity + hardship-email workflow.
+const BO_FUNDER_COLUMNS = [
+  'id',
+  'funder_name',
+  'funder_contact_email',
+  'hardship_email_sent',
+  'hardship_email_sent_at',
+  'position_order',
 ].join(', ');
 
 // ── Ledger helpers ──────────────────────────────────────────────
@@ -186,8 +201,33 @@ export async function GET(request) {
       // Merchant has no deal yet (post-signup, pre-submit) — return
       // null rather than 404 so the BO frontend can render its
       // empty-state UI without treating this as an error.
-      return jsonResponse({ deal: null }, 200, request);
+      return jsonResponse({ deal: null, funders: [] }, 200, request);
     }
+
+    // ── Fetch funders (positions) — NAMES only ────────────────────
+    // Allowlist-only SELECT: funder name + hardship-email workflow
+    // fields. Balances, factor rates, TAD, payment allocations, and
+    // every other position column stays on the server. This lets
+    // the BO Setup wizard show the real funders the merchant needs
+    // to notify without leaking any economics.
+    const { data: funderRows, error: funderErr } = await supabase
+      .from('positions')
+      .select(BO_FUNDER_COLUMNS)
+      .eq('deal_id', deal.id)
+      .order('position_order', { ascending: true });
+    if (funderErr) {
+      // Non-fatal — the deal response is still useful without
+      // funders. Log and return an empty list so the wizard's
+      // empty-state text ("No funders to notify") renders.
+      console.warn('[dashboard/bo] funder lookup failed:', funderErr.message);
+    }
+    const funders = (funderRows || []).map((f) => ({
+      id: f.id,
+      funder_name: f.funder_name || null,
+      funder_contact_email: f.funder_contact_email || null,
+      hardship_email_sent: !!f.hardship_email_sent,
+      hardship_email_sent_at: f.hardship_email_sent_at || null,
+    }));
 
     // ── Compute derived fields ────────────────────────────────────
     const weeksCompleted = parseInt(deal.weeks_completed, 10) || 0;
@@ -216,6 +256,16 @@ export async function GET(request) {
       null;
 
     const merchantWeekly = parseFloat(deal.merchant_weekly_payment) || 0;
+
+    // Owner object — denormalized from the deal's owner_* fields so
+    // the BO Account page can display the MERCHANT's info regardless
+    // of whether an admin is impersonating. Pulling from the deal (not
+    // from any user lookup) guarantees the rendered name/email/phone
+    // matches the merchant whose data this endpoint is already scoped
+    // to — no cross-merchant leakage risk.
+    const ownerFullName =
+      [deal.owner_first, deal.owner_last].filter(Boolean).join(' ').trim() ||
+      null;
 
     return jsonResponse(
       {
@@ -260,13 +310,26 @@ export async function GET(request) {
           approved_at: deal.approved_at || null,
           wizard_completed_at: deal.wizard_completed_at || null,
 
-          // Account page
+          // Account page — owner personal info scoped to THIS deal's
+          // merchant. Frontend should prefer deal.owner.* over any
+          // authenticated-user fields so the values stay correct
+          // during admin impersonation.
+          owner: {
+            full_name: ownerFullName,
+            email: deal.owner_email || null,
+            phone: deal.owner_phone || null,
+          },
+          // Legacy alias kept for the pre-owner-object consumers
+          // (current settings/page.jsx falls back to this).
           owner_phone: deal.owner_phone || null,
 
           // Derived weekly ledger (generated on-the-fly, not from
           // the payments table)
           payment_ledger,
         },
+        // Funder list — NAMES only, no economics. Drives Setup
+        // wizard Step 2 (block list) and Step 3 (hardship emails).
+        funders,
       },
       200,
       request
