@@ -31,6 +31,8 @@ export async function POST(request) {
       return NextResponse.json({ error: e.error || 'unauthorized' }, { status: e.status || 401 });
     }
 
+    const form = await request.formData();
+
     const accountHolder = (form.get('account_holder') || '').toString().trim();
     const bankName = (form.get('bank_name') || '').toString().trim();
     const routingNumber = (form.get('routing_number') || '').toString().trim();
